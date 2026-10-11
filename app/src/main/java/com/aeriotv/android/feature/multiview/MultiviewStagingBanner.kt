@@ -59,6 +59,7 @@ fun MultiviewStagingBanner(
     isTv: Boolean,
     onLaunchMultiview: () -> Unit,
     modifier: Modifier = Modifier,
+    onReturnFocus: (() -> Boolean)? = null,
 ) {
     val staging by store.isStaging.collectAsStateWithLifecycle()
     val tiles by store.selected.collectAsStateWithLifecycle()
@@ -66,6 +67,16 @@ fun MultiviewStagingBanner(
     val count = tiles.size
     val label = if (count == 1) "1 channel staged for Multiview" else "$count channels staged for Multiview"
     val guard = rememberTvMenuGuard()
+    // TV Clear / Done remove the banner while one of its capsules holds
+    // focus; the focus would then fall to the first focusable on screen (the
+    // top nav's Search, [KEY] by=guide-screen(focus-not-in-grid) 2026-10-11).
+    // Hand focus back to the list or guide BEFORE the banner leaves.
+    val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
+    val returnFocus: () -> Unit = {
+        val ok = onReturnFocus?.invoke() == true ||
+            focusManager.moveFocus(androidx.compose.ui.focus.FocusDirection.Down)
+        com.aeriotv.android.ui.tv.TvFocusTrace.guide("refocus after=staging-banner result=$ok")
+    }
     val playFocus = remember { FocusRequester() }
     LaunchedEffect(count) {
         if (isTv) {
@@ -115,8 +126,8 @@ fun MultiviewStagingBanner(
             // staging banner: Capsule backgrounds, 14 x 6 pt padding).
             TvBannerCapsule(
                 onClick = guard.wrap {
-                    store.clear()
-                    store.setStaging(false)
+                    returnFocus()
+                    store.clearStaged()
                 },
                 fill = null,
                 border = null,
@@ -141,7 +152,10 @@ fun MultiviewStagingBanner(
                     maxLines = 1, softWrap = false, color = onAccent)
             }
             TvBannerCapsule(
-                onClick = guard.wrap { store.setStaging(false) },
+                onClick = guard.wrap {
+                    returnFocus()
+                    store.setStaging(false)
+                },
                 fill = null,
                 border = accent,
             ) { _ ->

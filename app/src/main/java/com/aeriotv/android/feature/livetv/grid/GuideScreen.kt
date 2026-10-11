@@ -1178,6 +1178,8 @@ fun GuideScreen(
             store = multiviewStore,
             isTv = isTv,
             onLaunchMultiview = onLaunchMultiview,
+            // The grid restores the cell it last focused.
+            onReturnFocus = { runCatching { gridFocus.requestFocus() }.getOrDefault(false) },
         )
         // Channel Preview OFF + corner mini Active: the mini has no banner art
         // card to share a baseline with, so it gets its OWN slot here -- a
