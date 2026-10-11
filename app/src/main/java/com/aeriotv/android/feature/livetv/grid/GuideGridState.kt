@@ -28,9 +28,10 @@ import kotlin.math.abs
 @Stable
 class GuideGridState(
     initialViewportStartMs: Long,
-    // The left edge IS now (Logan 2026-10-08): the guide opens with the now
-    // line on the edge and the airing program clipped there, no earlier lead.
-    val leadMs: Long = 0L,
+    // Logan 2026-10-11: with the now line exactly on the left edge it was
+    // hidden, so the guide opens (and Back to now / anchor-at-now land) with
+    // a 5 minute lead. The partial slot left of now stays unlabeled.
+    val leadMs: Long = DEFAULT_LEAD_MS,
     val panStepMs: Long = 30 * 60_000L,
     val slopMs: Long = 30 * 60_000L,
 ) {
@@ -388,8 +389,10 @@ class GuideGridState(
 
     enum class BackStep { RESTORED_NOW_AND_TOP, TOP, NONE }
 
-    private companion object {
+    companion object {
+        /** How far left of the edge now sits when the guide opens or returns to now. */
+        const val DEFAULT_LEAD_MS = 5 * 60_000L
         /** How far left of the edge a cell may start and still count as on screen for a short Left. */
-        const val EDGE_SLOP_MS = 15 * 60_000L
+        private const val EDGE_SLOP_MS = 15 * 60_000L
     }
 }

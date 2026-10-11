@@ -23,7 +23,8 @@ class GuideGridStateTest {
         return GuideGridRows(channels.toList(), cat, window.first, window.second)
     }
 
-    private fun state(now: Long = 6 * h) = GuideGridState(initialViewportStartMs = now).also { it.viewportDurationMs = 3 * h }
+    // As GuideScreen builds it: now sits [GuideGridState.DEFAULT_LEAD_MS] inside the left edge.
+    private fun state(now: Long = 6 * h) = GuideGridState(initialViewportStartMs = now - GuideGridState.DEFAULT_LEAD_MS).also { it.viewportDurationMs = 3 * h }
 
     @Test
     fun firstInstallLandsOnRowZeroAtTheAnchor() {
@@ -77,7 +78,7 @@ class GuideGridStateTest {
         s.installRows(rows(espn, programmes = listOf(p(espn, "A", 0, 6 * h + 20 * m), p(espn, "B", 6 * h + 20 * m, 12 * h))))
         assertEquals("A", s.focusedCell()!!.title)
         assertTrue(s.pan(+1))
-        assertEquals(6 * h + 30 * m, s.viewportStartMs)
+        assertEquals(6 * h - GuideGridState.DEFAULT_LEAD_MS + 30 * m, s.viewportStartMs)
         assertEquals("B", s.focusedCell()!!.title)
         assertTrue(s.pan(-1))
         assertEquals("A", s.focusedCell()!!.title)
@@ -120,7 +121,7 @@ class GuideGridStateTest {
         assertTrue(s.isAwayFromNow(now))
         assertEquals(GuideGridState.BackStep.RESTORED_NOW_AND_TOP, s.back(now))
         assertEquals(0, s.focusRow)
-        assertEquals(now, s.viewportStartMs)
+        assertEquals(now - GuideGridState.DEFAULT_LEAD_MS, s.viewportStartMs)
         s.moveRows(1)
         assertEquals(GuideGridState.BackStep.TOP, s.back(now))
         assertEquals(GuideGridState.BackStep.NONE, s.back(now))

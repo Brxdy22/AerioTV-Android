@@ -209,7 +209,8 @@ fun MultiviewCompositePreview(
         // (audio focus); a press held still for the timeout is a long-press,
         // released on the same tile it opens the tile menu, dragged onto
         // another tile it swaps them. Moving past the touch slop first
-        // leaves the touch to the sheet (scroll).
+        // leaves the touch to the sheet (scroll). A second finger is
+        // swallowed until every finger lifts: no pinch on the preview.
         Box(
             modifier = Modifier
                 .matchParentSize()
@@ -235,7 +236,14 @@ fun MultiviewCompositePreview(
                         val outcome = withTimeoutOrNull(viewConfiguration.longPressTimeoutMillis) {
                             var result = "cancel"
                             while (true) {
-                                val c = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
+                                val ev = awaitPointerEvent()
+                                // A second finger: no pinch on the preview.
+                                if (ev.changes.count { it.pressed } > 1) {
+                                    ev.changes.forEach { it.consume() }
+                                    result = "multi"
+                                    break
+                                }
+                                val c = ev.changes.firstOrNull { it.id == down.id } ?: break
                                 if (c.changedToUpIgnoreConsumed()) {
                                     if (!c.isConsumed) {
                                         released = c
@@ -264,6 +272,19 @@ fun MultiviewCompositePreview(
                             }
                             return@awaitEachGesture
                         }
+                        if (outcome == "multi") {
+                            // Logan 2026-10-11: a pinch on the preview dragged
+                            // the sheet (the card collapsed) and the Layout row
+                            // covered it. Swallow every pointer until all fingers
+                            // lift, so a multi-touch on the preview does nothing.
+                            Log.i("AerioCast", "[MV-CAST] preview gesture multi-touch swallowed")
+                            while (true) {
+                                val ev = awaitPointerEvent()
+                                ev.changes.forEach { it.consume() }
+                                if (ev.changes.none { it.pressed }) break
+                            }
+                            return@awaitEachGesture
+                        }
                         if (outcome != null) {
                             // Moved past the slop or taken by the sheet.
                             Log.i("AerioCast", "[MV-CAST] preview gesture cancel (moved or taken by the sheet)")
@@ -278,7 +299,10 @@ fun MultiviewCompositePreview(
                         dragPos = down.position
                         var lifted = false
                         while (true) {
-                            val c = awaitPointerEvent().changes.firstOrNull { it.id == down.id } ?: break
+                            val ev = awaitPointerEvent()
+                            // Extra fingers during a tile drag go nowhere either.
+                            ev.changes.forEach { if (it.id != down.id) it.consume() }
+                            val c = ev.changes.firstOrNull { it.id == down.id } ?: break
                             if (c.changedToUpIgnoreConsumed()) {
                                 c.consume()
                                 lifted = true

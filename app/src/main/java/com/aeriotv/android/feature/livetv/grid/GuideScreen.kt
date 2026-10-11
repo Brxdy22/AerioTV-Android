@@ -459,7 +459,7 @@ fun GuideScreen(
     // whole window, the 800 to 1360 ms frames on return. The retained state
     // is reset to exactly what a new one holds, so focus and viewport land
     // as before; only the rows survive.
-    val grid = remember { RetainedGuideGrid.take(favoritesOnly, System.currentTimeMillis()) }
+    val grid = remember { RetainedGuideGrid.take(favoritesOnly, System.currentTimeMillis() - GuideGridState.DEFAULT_LEAD_MS) }
     androidx.compose.runtime.DisposableEffect(grid) { onDispose { RetainedGuideGrid.give(favoritesOnly, grid) } }
     // Hoisted so a group change can read and set the rows viewport.
     val gridListState = rememberLazyListState()
@@ -1623,6 +1623,9 @@ private fun GroupPills(
     LazyRow(
         state = listState,
         contentPadding = PaddingValues(start = leadInset, end = 12.dp, top = 6.dp, bottom = 6.dp),
+        // The 22dp Manage Groups circle sat on the row's top edge, above the
+        // taller pills' center (Streamer 2026-10-11); every item centers.
+        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
         modifier = Modifier
             .fillMaxWidth()
             .heightIn(min = 44.dp)
