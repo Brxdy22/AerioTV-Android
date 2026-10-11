@@ -26,6 +26,14 @@ import androidx.media3.common.VideoSize
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.DefaultLoadControl
+import androidx.media3.exoplayer.LoadControl
+import androidx.media3.exoplayer.Renderer
+import androidx.media3.exoplayer.analytics.PlayerId
+import androidx.media3.exoplayer.source.MediaSource
+import androidx.media3.exoplayer.source.TrackGroupArray
+import androidx.media3.exoplayer.trackselection.ExoTrackSelection
+import androidx.media3.common.Timeline
+import android.os.SystemClock
 import androidx.media3.exoplayer.ExoPlayer
 import com.aeriotv.android.feature.multiview.MultiviewTile
 import java.nio.ByteBuffer
@@ -94,8 +102,8 @@ class MultiviewCompositor(
          *  covered before the first frame and after every stall. */
         private const val TILE_MIN_BUFFER_MS = 10_000
         private const val TILE_MAX_BUFFER_MS = 30_000
-        private const val TILE_START_BUFFER_MS = 10_000
-        private const val TILE_REBUFFER_MS = 10_000
+        private const val TILE_START_BUFFER_MS = MultiviewCompositeLayout.TILE_START_BUFFER_MS.toInt()
+        private const val TILE_REBUFFER_MS = MultiviewCompositeLayout.TILE_START_BUFFER_MS.toInt()
         /** Preview notice on a tile that is retrying, and on one that gave up. */
         const val NOTICE_RECONNECTING = "Reconnecting"
         const val NOTICE_UNAVAILABLE = "Unavailable"
@@ -207,6 +215,8 @@ class MultiviewCompositor(
         var watchFrames = 0L
         var watchBufferedMs = 0L
         var watchdogRestarts = 0
+        /** Start-rule load control (see TileLoadControl). */
+        var loadControl: TileLoadControl? = null
         /** Channel logo texture (GL thread) and its opaque aspect. */
         var logoTex = 0
         @Volatile var logoAspect = 0f
@@ -449,7 +459,11 @@ class MultiviewCompositor(
         nextTickNanos = System.nanoTime()
         lastForcedKeyElapsed = -1L
         gl.post(tick)
-        main.post { state.forEach { if (it.source != null) startPlayer(it) } }
+        // Loads staggered by TILE_LOAD_STAGGER_MS so the tiles' initial
+        // bursts from the server do not land at the same moment.
+        state.filter { it.source != null }.forEachIndexed { n, t ->
+            main.postDelayed({ startPlayer(t) }, n * MultiviewCompositeLayout.TILE_LOAD_STAGGER_MS)
+        }
         main.postDelayed(health, STATS_NANOS / 1_000_000)
         main.postDelayed(watchdog, WATCHDOG_TICK_MS)
         Log.i(TAG, "[MV-CAST] composite start tiles=$initialCount ${W}x$H@$FPS")
@@ -665,6 +679,14 @@ class MultiviewCompositor(
             tileAudioGate = com.aeriotv.android.core.playback.TileAudioGate(initiallyMuted = true),
             tileAudioSinkWrapper = { sink -> CompositeTapAudioSink(sink, t.index, this) },
         )
+        val loadControl = TileLoadControl(
+            t.index,
+            DefaultLoadControl.Builder()
+                .setBufferDurationsMs(TILE_MIN_BUFFER_MS, TILE_MAX_BUFFER_MS, TILE_START_BUFFER_MS, TILE_REBUFFER_MS)
+                .setPrioritizeTimeOverSizeThresholds(true)
+                .build(),
+        )
+        t.loadControl = loadControl
         val player = ExoPlayer.Builder(context)
             .setRenderersFactory(renderers)
             .setLoadControl(
@@ -676,11 +698,9 @@ class MultiviewCompositor(
                 // resumes on 10 s and keeps 10 to 30 s; the progressive TS
                 // source has no live-offset target to pull it back to the
                 // edge. The local Multiview and the single player are
-                // unchanged.
-                DefaultLoadControl.Builder()
-                    .setBufferDurationsMs(TILE_MIN_BUFFER_MS, TILE_MAX_BUFFER_MS, TILE_START_BUFFER_MS, TILE_REBUFFER_MS)
-                    .setPrioritizeTimeOverSizeThresholds(true)
-                    .build(),
+                // unchanged. 2026-10-11: TileLoadControl also starts on 2 s
+                // after 8 s waiting (MultiviewCompositeLayout.tileStartReason).
+                loadControl,
             )
             .setHandleAudioBecomingNoisy(false)
             .build()
@@ -841,6 +861,9 @@ class MultiviewCompositor(
                     t.watchProgressAtMs = now
                     continue
                 }
+                // A tile about to take the timeout start is not stuck.
+                val waitedMs = t.loadControl?.waitedMs(now) ?: -1L
+                if (waitedMs >= 0 && MultiviewCompositeLayout.tileInTimeoutStartWindow(buffered, waitedMs)) continue
                 val limit = MultiviewCompositeLayout.tileWatchdogLimitMs(t.watchdogRestarts)
                 val idle = now - t.watchProgressAtMs
                 if (idle < limit) continue
@@ -1471,4 +1494,54 @@ class MultiviewCompositor(
             put(v)
             position(0)
         }
+}
+
+/**
+ * Composite tile load control: [delegate] (10 s start and resume) plus the
+ * timeout start of [MultiviewCompositeLayout.tileStartReason]. The wait
+ * clock runs from prepare (first start) or from the first start query of a
+ * rebuffer, and stops when the tile starts. Playback thread, except
+ * [waitedMs] (any thread).
+ */
+internal class TileLoadControl(
+    private val tile: Int,
+    private val delegate: LoadControl,
+) : LoadControl by delegate {
+    @Volatile private var waitStartMs = -1L
+
+    /** Milliseconds this tile has waited to start, or -1 when playing. */
+    fun waitedMs(now: Long = SystemClock.elapsedRealtime()): Long =
+        waitStartMs.let { if (it < 0) -1L else now - it }
+
+    override fun shouldStartPlayback(parameters: LoadControl.Parameters): Boolean {
+        val now = SystemClock.elapsedRealtime()
+        if (waitStartMs < 0) waitStartMs = now
+        val bufferedMs = parameters.bufferedDurationUs / 1000
+        val reason = MultiviewCompositeLayout.tileStartReason(bufferedMs, now - waitStartMs)
+            ?: return false
+        Log.i("AerioCast", "[MV-CAST] tile start tile=$tile reason=$reason buffered=$bufferedMs waited=${now - waitStartMs}ms rebuffer=${parameters.rebuffering}")
+        waitStartMs = -1L
+        return true
+    }
+
+    override fun onPrepared(playerId: PlayerId) {
+        waitStartMs = SystemClock.elapsedRealtime()
+        delegate.onPrepared(playerId)
+    }
+    override fun onStopped(playerId: PlayerId) {
+        waitStartMs = -1L
+        delegate.onStopped(playerId)
+    }
+    override fun onReleased(playerId: PlayerId) = delegate.onReleased(playerId)
+    override fun onTracksSelected(
+        playerId: PlayerId,
+        timeline: Timeline,
+        mediaPeriodId: MediaSource.MediaPeriodId,
+        renderers: Array<out Renderer>,
+        trackGroups: TrackGroupArray,
+        trackSelections: Array<out ExoTrackSelection>,
+    ) = delegate.onTracksSelected(playerId, timeline, mediaPeriodId, renderers, trackGroups, trackSelections)
+    override fun getBackBufferDurationUs(playerId: PlayerId): Long = delegate.getBackBufferDurationUs(playerId)
+    override fun retainBackBufferFromKeyframe(playerId: PlayerId): Boolean = delegate.retainBackBufferFromKeyframe(playerId)
+    override fun shouldContinueLoading(parameters: LoadControl.Parameters): Boolean = delegate.shouldContinueLoading(parameters)
 }

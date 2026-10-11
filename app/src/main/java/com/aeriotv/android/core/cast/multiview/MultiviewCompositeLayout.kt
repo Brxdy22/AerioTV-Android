@@ -221,6 +221,31 @@ object MultiviewCompositeLayout {
         (TILE_WATCHDOG_MS * (restarts.coerceAtLeast(0) + 1)).coerceAtMost(TILE_WATCHDOG_MAX_MS)
 
     const val TILE_WATCHDOG_MS = 20_000L
+
+    /** Composite tile start rule (Nothing Phone 2026-10-11, mv2/mv4: under
+     *  upstream congestion tiles sat at 9.7 to 9.8 s buffered for 70 to 90 s
+     *  against a 10 s start threshold). A tile starts, and resumes after a
+     *  rebuffer, on [TILE_START_BUFFER_MS] buffered, or on
+     *  [TILE_TIMEOUT_START_BUFFER_MS] once it has waited
+     *  [TILE_TIMEOUT_START_WAIT_MS], whichever comes first. Returns the
+     *  reason ("buffer" or "timeout"), or null to keep waiting. */
+    fun tileStartReason(bufferedMs: Long, waitedMs: Long): String? = when {
+        bufferedMs >= TILE_START_BUFFER_MS -> "buffer"
+        bufferedMs >= TILE_TIMEOUT_START_BUFFER_MS && waitedMs >= TILE_TIMEOUT_START_WAIT_MS -> "timeout"
+        else -> null
+    }
+
+    /** A waiting tile that already holds enough for the timeout start and
+     *  will start on its own within [TILE_TIMEOUT_START_WAIT_MS]; the
+     *  watchdog leaves it alone. */
+    fun tileInTimeoutStartWindow(bufferedMs: Long, waitedMs: Long): Boolean =
+        bufferedMs >= TILE_TIMEOUT_START_BUFFER_MS && waitedMs < TILE_TIMEOUT_START_WAIT_MS
+
+    const val TILE_START_BUFFER_MS = 10_000L
+    const val TILE_TIMEOUT_START_BUFFER_MS = 2_000L
+    const val TILE_TIMEOUT_START_WAIT_MS = 8_000L
+    /** Delay between composite tile loads, so the initial bursts do not collide. */
+    const val TILE_LOAD_STAGGER_MS = 500L
     const val TILE_WATCHDOG_MAX_MS = 60_000L
 
     /** Tile index under a point in frame coordinates, or -1 (a gap). */

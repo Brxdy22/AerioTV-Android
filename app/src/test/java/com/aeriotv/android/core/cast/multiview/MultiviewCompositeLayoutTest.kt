@@ -220,4 +220,22 @@ class MultiviewCompositeLayoutTest {
             (0..4).map { MultiviewCompositeLayout.tileWatchdogLimitMs(it) },
         )
     }
+
+    @Test
+    fun tileStartsOnTenSecondsOrTwoAfterEightWaiting() {
+        val r = MultiviewCompositeLayout::tileStartReason
+        assertEquals("buffer", r(10_000, 0))
+        assertEquals("buffer", r(12_000, 9_000))
+        assertEquals(null, r(9_800, 7_999))
+        assertEquals("timeout", r(9_800, 8_000))
+        assertEquals("timeout", r(2_000, 8_000))
+        assertEquals(null, r(1_999, 60_000))
+    }
+
+    @Test
+    fun watchdogSparesTimeoutStartWindow() {
+        assertTrue(MultiviewCompositeLayout.tileInTimeoutStartWindow(2_000, 7_999))
+        assertFalse(MultiviewCompositeLayout.tileInTimeoutStartWindow(2_000, 8_000))
+        assertFalse(MultiviewCompositeLayout.tileInTimeoutStartWindow(1_999, 1_000))
+    }
 }
