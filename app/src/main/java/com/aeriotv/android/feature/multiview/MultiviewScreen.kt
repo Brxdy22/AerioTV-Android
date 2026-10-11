@@ -608,7 +608,10 @@ fun MultiviewScreen(
                 // tvOS parity (MultiviewTileView line 355): no context menu
                 // at N=1. Suppressed mid-move so a held OK can't pop the
                 // menu over the relocate machinery.
-                if (relocatingIndex == null && selected.size > 1) {
+                // Touch (phone / tablet) also opens it at N=1, Apple parity:
+                // the single-stream menu offers Add Channel (Logan
+                // 2026-10-11, after the top-right "+" was removed).
+                if (relocatingIndex == null && (selected.size > 1 || !isTvDevice)) {
                     tileMenuIndex = idx
                     tileMenuGuard.arm()
                 }
@@ -750,6 +753,10 @@ fun MultiviewScreen(
     val menuTile = menuIdx?.let { selected.getOrNull(it) }
     if (menuIdx != null && menuTile != null) {
         val isSpotlit = spotlightId == menuTile.id
+        // Touch at N=1: only the items that apply to a sole tile. Move Tile,
+        // Full-Screen in Grid and Spotlight need a second tile; Layout hides
+        // itself (no layout choices at 1 tile).
+        val soleTouchTile = !isTvDevice && selected.size <= 1
         TvActionMenuDialog(
             title = menuTile.displayName,
             actions = buildList {
@@ -767,22 +774,29 @@ fun MultiviewScreen(
                             // promotes in removeAt; ALL position-keyed screen
                             // state (spotlight, relocate, fullscreen, overlay
                             // sets) reconciles in removeTileAt.
-                            val removingLast = selected.size <= 1
-                            removeTileAt(menuIdx)
-                            if (removingLast) onClose()
+                            // Touch at N=1: exit exactly as the Close X does.
+                            if (soleTouchTile) {
+                                onClose()
+                            } else {
+                                val removingLast = selected.size <= 1
+                                removeTileAt(menuIdx)
+                                if (removingLast) onClose()
+                            }
                         },
                     ),
                 )
-                add(
-                    TvMenuAction(
-                        label = "Move Tile",
-                        icon = Icons.Filled.OpenWith,
-                        onClick = {
-                            relocatingIndex = menuIdx
-                            chromeVisible = true
-                        },
-                    ),
-                )
+                if (!soleTouchTile) {
+                    add(
+                        TvMenuAction(
+                            label = "Move Tile",
+                            icon = Icons.Filled.OpenWith,
+                            onClick = {
+                                relocatingIndex = menuIdx
+                                chromeVisible = true
+                            },
+                        ),
+                    )
+                }
                 add(
                     TvMenuAction(
                         label = "Playback",
@@ -849,36 +863,40 @@ fun MultiviewScreen(
                         ),
                     )
                 }
-                add(
-                    TvMenuAction(
-                        label = "Full-Screen in Grid",
-                        icon = Icons.Filled.Fullscreen,
-                        onClick = {
-                            // First D-pad entry point to the existing mode
-                            // (touch enters via double-tap). Audio rides
-                            // along, matching the double-tap path; BACK exits.
-                            fullscreenIndex = menuIdx
-                            storeHandle.setAudioFocus(menuIdx)
-                            relocatingIndex = null
-                        },
-                    ),
-                )
-                add(
-                    TvMenuAction(
-                        label = if (isSpotlit) "Remove Spotlight" else "Spotlight",
-                        icon = Icons.Filled.ViewSidebar,
-                        onClick = {
-                            if (isSpotlit) {
-                                spotlightId = null
-                            } else {
-                                spotlightId = menuTile.id
-                                // Mutually exclusive with fullscreen, tvOS
-                                // parity (MultiviewTileView 452-455).
-                                fullscreenIndex = null
-                            }
-                        },
-                    ),
-                )
+                if (!soleTouchTile) {
+                    add(
+                        TvMenuAction(
+                            label = "Full-Screen in Grid",
+                            icon = Icons.Filled.Fullscreen,
+                            onClick = {
+                                // First D-pad entry point to the existing mode
+                                // (touch enters via double-tap). Audio rides
+                                // along, matching the double-tap path; BACK exits.
+                                fullscreenIndex = menuIdx
+                                storeHandle.setAudioFocus(menuIdx)
+                                relocatingIndex = null
+                            },
+                        ),
+                    )
+                }
+                if (!soleTouchTile) {
+                    add(
+                        TvMenuAction(
+                            label = if (isSpotlit) "Remove Spotlight" else "Spotlight",
+                            icon = Icons.Filled.ViewSidebar,
+                            onClick = {
+                                if (isSpotlit) {
+                                    spotlightId = null
+                                } else {
+                                    spotlightId = menuTile.id
+                                    // Mutually exclusive with fullscreen, tvOS
+                                    // parity (MultiviewTileView 452-455).
+                                    fullscreenIndex = null
+                                }
+                            },
+                        ),
+                    )
+                }
                 // Layout (Apple tvOS parity): ONE "Layout: <current>" row that
                 // opens the shape submenu, instead of a row per shape. Issue
                 // #48 rules live in the submenu below.
