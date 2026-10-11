@@ -2870,7 +2870,7 @@ internal fun buildTileMediaSource(
                     .setTsExtractorMode(TsExtractor.MODE_SINGLE_PMT)
                     .createExtractors()
                     .map { e ->
-                        if (e is TsExtractor) com.aeriotv.android.core.playback.AudioOnlyTrackGuard(e) else e
+                        if (e is TsExtractor) com.aeriotv.android.core.playback.AudioOnlyTrackGuard(com.aeriotv.android.core.playback.safeTsExtractor()) else e
                     }
                     .toTypedArray()
             }

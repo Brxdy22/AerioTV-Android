@@ -2361,7 +2361,9 @@ class AerioExoPlayerHolder @Inject constructor(
         if (ts == null) return@ExtractorsFactory all
         // AudioOnlyTrackGuard (GH AerioTV#90): a PMT that declares a video PID
         // which never carries a picture must not hold preparation forever.
-        val continuous: Extractor = ContinuousTsExtractor(AudioOnlyTrackGuard(ts))
+        // safeTsExtractor: same TsExtractor, but a corrupt AC-3 header resyncs
+        // instead of failing the load (see SafeTsExtractor.kt).
+        val continuous: Extractor = ContinuousTsExtractor(AudioOnlyTrackGuard(safeTsExtractor()))
         buildList {
             fmp4?.let { add(it) }
             add(object : Extractor by continuous {
