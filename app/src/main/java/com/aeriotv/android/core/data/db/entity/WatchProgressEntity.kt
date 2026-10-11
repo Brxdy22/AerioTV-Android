@@ -7,7 +7,7 @@ import androidx.room.PrimaryKey
 
 /**
  * Per-video playback position persistence. Mirrors iOS `WatchProgress`
- * (Aerio/Models/VODModels.swift) — same fields, same purpose, same
+ * (Aerio/Models/VODModels.swift), same fields, same purpose, same
  * "5-minute-from-end = completed" heuristic encoded by callers.
  *
  * `videoId` is the Dispatcharr UUID for movies or episodes (or the source

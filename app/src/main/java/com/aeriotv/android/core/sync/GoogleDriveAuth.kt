@@ -20,7 +20,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
 /**
  * Two-step Google account sign-in for Drive Sync.
  *
- *   1. [signIn] uses Credential Manager with GetSignInWithGoogleOption — the
+ *   1. [signIn] uses Credential Manager with GetSignInWithGoogleOption, the
  *      modern "Sign in with Google" branded sheet that picks one of the
  *      accounts already on the device. Returns the user's email + GoogleId
  *      token so the UI can render "Signed in as you@example.com".
@@ -29,7 +29,7 @@ import kotlinx.coroutines.suspendCancellableCoroutine
  *      the Drive AppData scope to that identity, returning a bearer access
  *      token DriveAppDataClient sends as Authorization: Bearer.
  *
- * Both pieces require BuildConfig.GOOGLE_DRIVE_WEB_CLIENT_ID to be set — the
+ * Both pieces require BuildConfig.GOOGLE_DRIVE_WEB_CLIENT_ID to be set, the
  * Web Client ID issued for your Google Cloud project. The signing-cert SHA-1
  * for the running build must be registered with an Android Client ID in the
  * same project, or both steps reject with API_NOT_CONNECTED.
@@ -43,7 +43,7 @@ class GoogleDriveAuth(private val context: Context) {
      */
     suspend fun signIn(activity: Activity): SignInResult? {
         if (!SyncConfig.isConfigured()) {
-            Log.w(TAG, "WEB_CLIENT_ID is blank — set local.properties.GOOGLE_DRIVE_WEB_CLIENT_ID first")
+            Log.w(TAG, "WEB_CLIENT_ID is blank, set local.properties.GOOGLE_DRIVE_WEB_CLIENT_ID first")
             throw IllegalStateException("Drive Sync OAuth client id is not configured.")
         }
         val credentialManager = CredentialManager.create(context)

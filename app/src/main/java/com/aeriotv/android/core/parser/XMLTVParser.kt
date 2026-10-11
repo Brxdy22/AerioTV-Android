@@ -72,7 +72,7 @@ object XMLTVParser {
      * Common HTML entities found in XMLTV from sites that scrape HTML guides
      * (BBC, IMDB-driven feeds, etc.) but never declared in the DTD. We register
      * them with the parser so it can resolve them inline without a string-replace
-     * pass over the entire decompressed payload — important when guides reach
+     * pass over the entire decompressed payload, important when guides reach
      * 50+ MB. XML built-ins (`amp lt gt quot apos`) are already known to the parser.
      */
     /** Poll cadence for [parse]'s shouldAbort hook. A parser event is one
@@ -84,7 +84,7 @@ object XMLTVParser {
     private val HTML_ENTITIES = mapOf(
         "nbsp" to " ",
         "middot" to "·",
-        "mdash" to "—",
+        "mdash" to "-",
         "ndash" to "–",
         "hellip" to "…",
         "laquo" to "«",

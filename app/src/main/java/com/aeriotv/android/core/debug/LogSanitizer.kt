@@ -4,7 +4,7 @@ package com.aeriotv.android.core.debug
  * Strips credentials out of log lines before they are written to the
  * persistent debug log file (audit task #53).
  *
- * Conservative pattern set — false positives are acceptable (a redacted
+ * Conservative pattern set, false positives are acceptable (a redacted
  * line is still readable), but a missed key shipped to a bug-report
  * attachment is not. Patterns:
  *

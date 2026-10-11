@@ -14,7 +14,7 @@ import kotlinx.coroutines.flow.asStateFlow
 /**
  * Process-wide state holder for the mini-player overlay anchored above the
  * bottom nav. Mirrors iOS NowPlayingManager's surfaced channel handle, but
- * scoped down: v1 ships as a tap-to-resume affordance only — no in-row
+ * scoped down: v1 ships as a tap-to-resume affordance only, no in-row
  * live video render, no audio continuation across the boundary. The user
  * still sees what they were last watching and can re-enter the player
  * with one tap.
@@ -136,7 +136,7 @@ class MiniPlayerSession @Inject constructor() {
         _state.value = State.Pending(channel)
     }
 
-    /** System back inside PlayerScreen — promote pending channel into the
+    /** System back inside PlayerScreen, promote pending channel into the
      * active mini-player surface. */
     fun showMiniPlayer() {
         val pending = (_state.value as? State.Pending)?.channel

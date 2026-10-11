@@ -1436,7 +1436,7 @@ class PlaylistRepository @Inject constructor(
      * Dispatcharr-only follow-up that fans `/api/epg/programs/<id>/` requests
      * for every channel's currently-airing programme, in parallel with a cap
      * of 4 concurrent in-flight fetches. Mirrors iOS
-     * `EPGGuideView.enrichDispatcharrCategories` (post v1.6.22) — the bulk
+     * `EPGGuideView.enrichDispatcharrCategories` (post v1.6.22), the bulk
      * `/api/epg/grid/` endpoint deliberately strips `<category>` for perf, so
      * we lazily backfill the category on the now-airing program per channel
      * after the grid lands. Categories are propagated to every same-titled
@@ -1444,7 +1444,7 @@ class PlaylistRepository @Inject constructor(
      * Dateline) keeps its tint across re-airings.
      *
      * Returns the input list when [playlist] isn't a Dispatcharr source.
-     * Failures on individual program fetches are swallowed silently — a
+     * Failures on individual program fetches are swallowed silently, a
      * single 404 shouldn't blank out the whole channel's tint.
      */
     suspend fun enrichNowPlayingCategories(
@@ -2875,7 +2875,7 @@ class PlaylistRepository @Inject constructor(
         // rows on disk (WAL), so only ONE chunk of entities is ever resident.
         // The delete-first is MANDATORY: ChannelSnapshotEntity's PK is
         // autoGenerate with only a NON-unique index on playlistId, so REPLACE
-        // never dedups — chunked inserts without it would duplicate every row.
+        // never dedups, chunked inserts without it would duplicate every row.
         database.withTransaction {
             channelSnapshotDao.deleteForPlaylist(playlistId)
             var position = 0

@@ -88,10 +88,23 @@ object MiniPlayerChrome {
 @Singleton
 class ExoWindowState @Inject constructor() {
 
-    enum class Mode { Hidden, Fullscreen, Mini }
+    /**
+     * [Tile]: the live channel that was playing in the mini player is a
+     * Multiview tile (Logan 2026-10-11, Apple parity: Play from a pile staged
+     * on the mini player keeps that channel's player, no re-tune). The window
+     * sits at [tileRectPx] under the NavHost, and the Multiview screen leaves
+     * that rect transparent so the video shows through with the tile chrome
+     * drawn over it.
+     */
+    enum class Mode { Hidden, Fullscreen, Mini, Tile }
 
     private val _mode = MutableStateFlow(Mode.Hidden)
     val mode: StateFlow<Mode> = _mode.asStateFlow()
+
+    /** Root-relative px rect of the held Multiview tile (Mode.Tile). */
+    val tileRectPx = MutableStateFlow(androidx.compose.ui.geometry.Rect.Zero)
+
+    fun requestTile() { _mode.value = Mode.Tile }
 
     fun requestFullscreen() { _mode.value = Mode.Fullscreen }
     fun requestMini() { _mode.value = Mode.Mini }

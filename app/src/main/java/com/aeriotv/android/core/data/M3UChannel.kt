@@ -5,7 +5,7 @@ import java.util.UUID
 
 /**
  * Mirrors iOS Aerio/Networking/PlaylistParsers.swift M3UChannel (lines 4-14).
- * Pure data class with no Room annotations yet — Phase 2b will add @Entity.
+ * Pure data class with no Room annotations yet, Phase 2b will add @Entity.
  *
  * Task #190: @Immutable. Every field is a val and the lone otherwise-unstable
  * field (rawAttributes: Map) is never mutated after build, so this promise is

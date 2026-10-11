@@ -158,7 +158,7 @@ class DispatcharrClient @Inject constructor() {
      * The returned access token has ~30 min TTL; refresh token ~24 h.
      *
      * Throws [DispatcharrError.InvalidCredentials] on 401/403 (the user typed the
-     * wrong password — message carries the Dashboard-vs-XC distinction so the
+     * wrong password, message carries the Dashboard-vs-XC distinction so the
      * UX shows the actionable copy iOS line 296 spells out),
      * [DispatcharrError.UnexpectedResponse] on a 200 OK whose body isn't JWT
      * shaped (catches the SPA-shell case where the URL points at a non-Dispatcharr
@@ -224,7 +224,7 @@ class DispatcharrClient @Inject constructor() {
      * rotated by the server; only a new access token is emitted, so the caller
      * keeps reusing the existing refresh until it itself expires (24h+ idle).
      *
-     * Throws [DispatcharrError.RefreshExpired] on 401/403 (refresh token stale —
+     * Throws [DispatcharrError.RefreshExpired] on 401/403 (refresh token stale,
      * caller should fall back to a fresh login from saved credentials),
      * [DispatcharrError.Transport] on any other failure.
      */
@@ -728,7 +728,7 @@ class DispatcharrClient @Inject constructor() {
      * user opens ProgramInfoView (Phase 6+ in the Android port).
      */
     /**
-     * GET /api/epg/programs/<id>/ — rich detail (categories, rating, etc.)
+     * GET /api/epg/programs/<id>/, rich detail (categories, rating, etc.)
      * for one program. Mirrors iOS DispatcharrAPI.getProgramDetail
      * (StreamingAPIs.swift line 1456). `/api/epg/grid/` deliberately strips
      * the `<category>` payload for perf, so AerioTV calls this endpoint
@@ -1298,7 +1298,7 @@ class DispatcharrClient @Inject constructor() {
     // follows the 301 itself, keeping one live session for the whole playback.
 
     /**
-     * POST /api/channels/recordings/ — schedules a server-side DVR recording.
+     * POST /api/channels/recordings/, schedules a server-side DVR recording.
      * Mirrors iOS DispatcharrAPI.createRecording (StreamingAPIs.swift:2334).
      *
      * The iOS implementation supports an `applyServerOffsets` mode where the
@@ -1346,7 +1346,7 @@ class DispatcharrClient @Inject constructor() {
     }
 
     /**
-     * POST /api/channels/series-rules/ — a Dispatcharr series recording rule
+     * POST /api/channels/series-rules/, a Dispatcharr series recording rule
      * (Every episode / New episodes only / custom match). Apple parity:
      * DispatcharrAPI.createSeriesRule. Fields per Dispatcharr's
      * SeriesRuleRequest: tvg_id (blank = every channel), mode all|new,
@@ -1392,7 +1392,7 @@ class DispatcharrClient @Inject constructor() {
     }
 
     /**
-     * POST /api/channels/series-rules/evaluate/ — schedule the recordings a
+     * POST /api/channels/series-rules/evaluate/, schedule the recordings a
      * rule matches right now (synchronous on the server). Returns the count
      * of recordings the server reports as created, or -1 when it does not say.
      */
@@ -1420,7 +1420,7 @@ class DispatcharrClient @Inject constructor() {
     }
 
     /**
-     * GET /api/channels/recordings/ — returns every recording the active user
+     * GET /api/channels/recordings/, returns every recording the active user
      * can see. Client filters by status (scheduled / recording / completed /
      * failed / stopped) for the DVR tab filter chips.
      */
@@ -1433,7 +1433,7 @@ class DispatcharrClient @Inject constructor() {
         fetchListOrResults("${baseUrl.trimEnd('/')}/api/channels/recordings/", apiKey)
 
     /**
-     * PATCH /api/channels/recordings/{id}/ — partial-update a scheduled DVR
+     * PATCH /api/channels/recordings/{id}/, partial-update a scheduled DVR
      * row. Used by the DVR-tab edit sheet to bump pre-roll / post-roll on an
      * already-scheduled recording without canceling and re-creating it (which
      * would lose the row's id and any custom_properties Dispatcharr added).
@@ -1477,7 +1477,7 @@ class DispatcharrClient @Inject constructor() {
     }
 
     /**
-     * GET /api/vod/movies/?page_size=100 — first page of VOD movies. iOS
+     * GET /api/vod/movies/?page_size=100, first page of VOD movies. iOS
      * walks all pages via fetchAllPages; the Android first cut shows page 1
      * and a "Load more" affordance lands when the user request comes.
      */
@@ -1529,7 +1529,7 @@ class DispatcharrClient @Inject constructor() {
     }
 
     /**
-     * GET /api/vod/series/?page_size=100 — first page of VOD series. Mirrors
+     * GET /api/vod/series/?page_size=100, first page of VOD series. Mirrors
      * iOS DispatcharrAPI.getVODSeries (StreamingAPIs.swift:1727), pagination
      * support deferred until the user hits the bottom of the grid.
      */
@@ -1684,7 +1684,7 @@ class DispatcharrClient @Inject constructor() {
         fetchListOrResults("${baseUrl.trimEnd('/')}/api/vod/categories/", apiKey)
 
     /**
-     * GET /api/vod/movies/<id>/provider-info/ — rich-metadata fetch for a
+     * GET /api/vod/movies/<id>/provider-info/, rich-metadata fetch for a
      * single movie. Mirrors iOS DispatcharrAPI.getMovieProviderInfo
      * (StreamingAPIs.swift line 1702). Returns the cast / director / country /
      * trailer URL / backdrop paths that the slim list endpoint doesn't carry.
@@ -1706,7 +1706,7 @@ class DispatcharrClient @Inject constructor() {
     }
 
     /**
-     * GET /api/vod/series/<id>/provider-info/ — same lazy-refresh contract as
+     * GET /api/vod/series/<id>/provider-info/, same lazy-refresh contract as
      * [getMovieProviderInfo] but for series. Dispatcharr internally calls
      * this `series_info()`; same 24h server-side throttle, same first-call
      * latency note. Mirrors iOS DispatcharrAPI.getSeriesProviderInfo
@@ -1867,7 +1867,7 @@ class DispatcharrClient @Inject constructor() {
 
     /**
      * Resolves the redirect-bound proxy URL to the session-bound playback URL
-     * for an episode. Same mechanism as [resolveVODStreamUrl] — Dispatcharr
+     * for an episode. Same mechanism as [resolveVODStreamUrl], Dispatcharr
      * emits a 301 to a one-time `/proxy/vod/episode/<uuid>/vod_<session>`
      * path that libmpv on Android can't follow itself.
      */
@@ -1979,7 +1979,7 @@ class DispatcharrClient @Inject constructor() {
     }
 
     /**
-     * POST /api/channels/recordings/{id}/comskip/ — kick off commercial
+     * POST /api/channels/recordings/{id}/comskip/, kick off commercial
      * detection / removal on a completed recording. Idempotent server-side
      * so repeated taps from the row context menu are safe (matches iOS
      * StreamingAPIs.swift line 2432 `applyComskip`).
@@ -1996,7 +1996,7 @@ class DispatcharrClient @Inject constructor() {
     }
 
     /**
-     * POST /api/channels/recordings/{id}/stop/ — stops an in-flight recording
+     * POST /api/channels/recordings/{id}/stop/, stops an in-flight recording
      * early, keeping the partial file on disk. Caller should call
      * [deleteRecording] separately if they want the partial gone too
      * (matches iOS StreamingAPIs.swift line 2408 `stopRecording`).
@@ -2013,7 +2013,7 @@ class DispatcharrClient @Inject constructor() {
     }
 
     /**
-     * GET /api/channels/channels/{channelId}/streams/ — the ordered list of a
+     * GET /api/channels/channels/{channelId}/streams/, the ordered list of a
      * Dispatcharr channel's member streams (highest-priority first), each with
      * the quality stats Dispatcharr probed for it. [channelId] is the channel's
      * INTEGER pk (M3UChannel.dispatcharrChannelId). Direct Connect only.
@@ -2080,7 +2080,7 @@ class DispatcharrClient @Inject constructor() {
         )
 
     /**
-     * POST /proxy/ts/change_stream/{channelUuid} — switch the channel's active
+     * POST /proxy/ts/change_stream/{channelUuid}, switch the channel's active
      * upstream to [streamId] (a Stream pk from [listChannelStreams]). Dispatcharr
      * swaps the source server-side behind the same /proxy/ts/stream/<uuid> URL;
      * the caller re-primes that URL so ExoPlayer pulls the new source. Keyed by
@@ -2133,7 +2133,7 @@ class DispatcharrClient @Inject constructor() {
     }
 
     /**
-     * GET /proxy/ts/status/{channelUuid} — the channel's live status. Returns the
+     * GET /proxy/ts/status/{channelUuid}, the channel's live status. Returns the
      * currently-active stream's pk (info['stream_id']). NOTE: this is only reliable
      * on first read / after an owner-direct switch; after an event-apply switch
      * (owner:false) the server leaves metadata.stream_id stale, so the caller
@@ -2293,7 +2293,7 @@ class DispatcharrClient @Inject constructor() {
     fun recordingPlaybackUrl(baseUrl: String, recordingId: Int): String =
         "${baseUrl.trimEnd('/')}/api/channels/recordings/$recordingId/file/"
 
-    /** DELETE /api/channels/recordings/{id}/ — cancels a scheduled recording or removes a completed file. */
+    /** DELETE /api/channels/recordings/{id}/, cancels a scheduled recording or removes a completed file. */
     suspend fun deleteRecording(baseUrl: String, apiKey: String, recordingId: Int) {
         val url = "${baseUrl.trimEnd('/')}/api/channels/recordings/$recordingId/"
         val response: HttpResponse = client.delete(url) { applyAuth(apiKey) }
@@ -2889,7 +2889,7 @@ data class DispatcharrVODEpisode(
  * the payload. Mirrors iOS DispatcharrVODMovieProviderInfo +
  * DispatcharrVODSeriesProviderInfo (StreamingAPIs.swift 3504-3637).
  *
- * Every field is optional + tolerant — an older or forked Dispatcharr build
+ * Every field is optional + tolerant, an older or forked Dispatcharr build
  * that omits any of them still decodes the rest.
  */
 @Serializable
@@ -3001,7 +3001,7 @@ data class DispatcharrVODProviderInfo(
             return pickBackdrop(customProperties?.get("backdrop_path"))
         }
 
-    /** Poster fallback chain — movieImage > coverBig > cover (string-shaped).
+    /** Poster fallback chain, movieImage > coverBig > cover (string-shaped).
      *  When `cover` is a JsonObject (the series endpoint shape) we read its
      *  `url` field instead. */
     val posterUrl: String?
@@ -3165,7 +3165,7 @@ data class DispatcharrVODStreamOption(
 
 /**
  * Server-reported recording shape from `/api/channels/recordings/`. Wire shape
- * matches iOS `DispatcharrAPI.Recording` (StreamingAPIs.swift:2246) — only
+ * matches iOS `DispatcharrAPI.Recording` (StreamingAPIs.swift:2246), only
  * `id`, `channel`, `start_time`, `end_time`, and `custom_properties` come back
  * at the top level. **Everything else (status, title, description, file size,
  * comskip flag) lives inside `custom_properties`**, and titles emitted by the
@@ -3173,7 +3173,7 @@ data class DispatcharrVODStreamOption(
  * `custom_properties.program.{title,description}`.
  *
  * Earlier Android revisions read `status` from a hypothetical top-level field,
- * which always decoded as null — that left every server recording in the
+ * which always decoded as null, that left every server recording in the
  * `Unknown` status bucket so it never matched the default Scheduled filter.
  * Re-aligning the getters with iOS (lines 2296-2316).
  */
@@ -3254,7 +3254,7 @@ data class DispatcharrRecording(
     /** Display title. Server-scheduled rows nest the program metadata under
      *  `custom_properties.program`; AerioTV's own createRecording call sets
      *  it as a flat key (`custom_properties.title`). Try the iOS-style nested
-     *  path first, fall back to flat — matches StreamingAPIs.swift line 2308-2314. */
+     *  path first, fall back to flat, matches StreamingAPIs.swift line 2308-2314. */
     val title: String
         get() {
             val program = customProperties?.objectField("program")
@@ -3388,7 +3388,7 @@ data class DispatcharrEpgEntry(
     @SerialName("is_previously_shown")
     val isPreviouslyShown: Boolean = false,
     // Newer Dispatcharr builds occasionally emit a top-level `categories`
-    // array on the bulk grid — accept it as a free upgrade. Falls back to
+    // array on the bulk grid, accept it as a free upgrade. Falls back to
     // the per-program lazy fetch when null.
     val categories: List<String>? = null,
     /** XMLTV `<programme><icon>` when a newer grid serializer emits it. The
@@ -3402,7 +3402,7 @@ data class DispatcharrEpgEntry(
 }
 
 /**
- * Response shape for `/api/epg/programs/<id>/` — Dispatcharr's rich-detail
+ * Response shape for `/api/epg/programs/<id>/`, Dispatcharr's rich-detail
  * fetch that carries the category list the bulk grid intentionally strips.
  * Mirrors iOS DispatcharrProgramDetail (StreamingAPIs.swift `getProgramDetail`,
  * line 1456). Categories are joined with comma to match the EPGProgramme

@@ -38,7 +38,7 @@ data class CategoryPaletteState(
         if (!masterEnabled) return null
         if (rawCategory.isNullOrBlank()) return null
 
-        // Custom entries first — substring match on lowercased haystack.
+        // Custom entries first, substring match on lowercased haystack.
         val haystack = rawCategory.lowercase()
         custom.firstOrNull { entry ->
             val needle = entry.match.lowercase().trim()
@@ -64,7 +64,7 @@ data class CategoryPaletteState(
     /**
      * Background tint for a programme cell or channel row. Opacity tiers mirror
      * iOS iOS-side weights (live=0.45, default=0.28). Focused isn't currently
-     * piped through on Android — pre-press touch ripple covers that signal —
+     * piped through on Android, pre-press touch ripple covers that signal,
      * but the parameter is kept for parity with iOS callers if they port back.
      *
      * The optional [fallback] is consulted when [rawCategory] is blank or
@@ -107,7 +107,7 @@ data class CategoryPaletteState(
 
 /**
  * Parse a 6-char hex (with or without leading '#') into a Compose [Color].
- * Returns Color.Transparent on malformed input rather than throwing — the
+ * Returns Color.Transparent on malformed input rather than throwing, the
  * Settings UI bounds-checks input but a corrupt persisted value shouldn't
  * crash the whole render.
  */

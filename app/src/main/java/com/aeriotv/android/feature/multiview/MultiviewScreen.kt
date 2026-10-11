@@ -37,6 +37,8 @@ import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.union
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.layout.boundsInRoot
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.layout.positionInWindow
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.foundation.layout.widthIn
@@ -438,10 +440,32 @@ fun MultiviewScreen(
         return
     }
 
+    val heldWindowRect by remember {
+        dagger.hilt.android.EntryPointAccessors.fromApplication(
+            mvContext.applicationContext,
+            com.aeriotv.android.feature.main.MainScaffoldEntryPoint::class.java,
+        ).exoWindowState().tileRectPx
+    }.collectAsState()
+    val heldTileId by MultiviewHeld.tileId.collectAsState()
+    var rootOffset by remember { mutableStateOf(androidx.compose.ui.geometry.Offset.Zero) }
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color.Black)
+            .onGloballyPositioned { rootOffset = it.boundsInRoot().topLeft }
+            // Black, except the held tile's rect (MultiviewHeldTile.kt): that
+            // is cleared so the live window under the NavHost shows through.
+            .drawBehind {
+                drawRect(Color.Black)
+                val r = heldWindowRect
+                if (heldTileId != null && r.width > 0f && r.height > 0f) {
+                    drawRect(
+                        color = Color.Transparent,
+                        topLeft = r.topLeft - rootOffset,
+                        size = r.size,
+                        blendMode = androidx.compose.ui.graphics.BlendMode.Clear,
+                    )
+                }
+            }
             // TV Back is claimed HERE (ancestor of the focused grid host), so it
             // fires before both the grid host's onKeyEvent AND MainActivity's
             // onKeyDown/onKeyLongPress -- neutralizing the 0.3.0 held-Back
@@ -1797,17 +1821,29 @@ private fun Tile(
                 onDoubleClick = onDoubleTap,
             ),
     ) {
-        ExoTile(
-            tile = tile,
-            gridHeaders = gridHeaders,
-            cachingMs = cachingMs,
-            isAudioFocused = isAudioFocused,
-            paused = paused,
-            onPlayer = { p -> tilePlayer = p; onPlayer(p) },
-            audioPassthrough = audioPassthrough,
-            watchVm = watchVm,
-            onFinished = onFinished,
-        )
+        // The channel that was playing in the mini player keeps its player
+        // (MultiviewHeldTile.kt): no tile ExoPlayer, the live window shows
+        // through this rect.
+        val heldId by MultiviewHeld.tileId.collectAsState()
+        if (heldId != null && heldId == tile.id) {
+            HeldTileSurface(
+                isAudioFocused = isAudioFocused,
+                paused = paused,
+                onPlayer = { p -> tilePlayer = p; onPlayer(p) },
+            )
+        } else {
+            ExoTile(
+                tile = tile,
+                gridHeaders = gridHeaders,
+                cachingMs = cachingMs,
+                isAudioFocused = isAudioFocused,
+                paused = paused,
+                onPlayer = { p -> tilePlayer = p; onPlayer(p) },
+                audioPassthrough = audioPassthrough,
+                watchVm = watchVm,
+                onFinished = onFinished,
+            )
+        }
         if (tileAudioOnly) {
             com.aeriotv.android.feature.player.AudioOnlyArtwork(
                 logoUrl = tile.logoUrl,

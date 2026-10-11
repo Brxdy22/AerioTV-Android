@@ -1681,8 +1681,20 @@ fun AerioTVNavHost(
                 // window + its decoder running on top of the tile grid.
                 // Dismiss the mini here with the same teardown order.
                 val mvMiniPlayerVm: MiniPlayerViewModel = hiltViewModel()
+                val mvStoreVm: com.aeriotv.android.feature.multiview.MultiviewStoreHandleVm = hiltViewModel()
                 val mvContext = androidx.compose.ui.platform.LocalContext.current
+                // Apple parity (Logan 2026-10-11): a pile staged on the mini
+                // player opens with that channel's player kept as tile 1, no
+                // re-tune; the composition below must see the held id on its
+                // first frame, so this runs in remember, not an effect.
+                val mvHeld = remember(entry) {
+                    val held = com.aeriotv.android.feature.multiview.MultiviewHeld
+                        .begin(mvContext, mvStoreVm.takePlayingSeedForLaunch())
+                    if (held) mvMiniPlayerVm.dismiss()
+                    held
+                }
                 LaunchedEffect(Unit) {
+                    if (mvHeld) return@LaunchedEffect
                     val mvEntry = dagger.hilt.android.EntryPointAccessors.fromApplication(
                         mvContext.applicationContext,
                         MainScaffoldEntryPoint::class.java,

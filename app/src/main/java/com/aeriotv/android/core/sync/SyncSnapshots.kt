@@ -5,7 +5,7 @@ import kotlinx.serialization.Serializable
 /**
  * Wire-format payloads for each [SyncCategory]. Versioned so we can change
  * schemas across app updates without breaking older clients holding stale
- * snapshots — see [version] (currently always 1).
+ * snapshots, see [version] (currently always 1).
  *
  * Times are millis-since-epoch UTC. Strings are intentionally permissive so a
  * future iOS port (or vice versa) can round-trip the same files.

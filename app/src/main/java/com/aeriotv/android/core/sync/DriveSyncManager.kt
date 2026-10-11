@@ -25,10 +25,10 @@ import java.util.concurrent.TimeUnit
 
 /**
  * Orchestrates Drive AppData sync. Mirrors iOS SyncManager.swift surface:
- *   - signIn() / signOut() — wraps GoogleDriveAuth.
- *   - pushAll() / pullAll() — per-category JSON snapshots written to / read
+ *   - signIn() / signOut(), wraps GoogleDriveAuth.
+ *   - pushAll() / pullAll(), per-category JSON snapshots written to / read
  *     from the appDataFolder.
- *   - clearRemote() — Settings > "Clear Drive Data" hook.
+ *   - clearRemote(), Settings > "Clear Drive Data" hook.
  *   - status flow exposed for SyncSettingsScreen badge.
  *
  * Conflict resolution: last-writer-wins by [SyncEnvelope.lastModified]. A
@@ -204,7 +204,7 @@ class DriveSyncManager @Inject constructor(
 
     /**
      * Push enabled categories to Drive. Bails on the first failure but
-     * continues across categories — a Reminders push fail doesn't block
+     * continues across categories, a Reminders push fail doesn't block
      * Playlists. Returns a map of category → success.
      */
     suspend fun pushAll(token: String, enabled: Set<SyncCategory>): Map<SyncCategory, Boolean> {
@@ -328,7 +328,7 @@ class DriveSyncManager @Inject constructor(
     private suspend fun buildPlaylistsSnapshot(): PlaylistsSnapshot {
         val rows = playlistDao.allOnce()
         val active = rows.firstOrNull { it.isActive }?.id
-        // Drop sensitive creds from this snapshot — they go in Credentials.
+        // Drop sensitive creds from this snapshot, they go in Credentials.
         return PlaylistsSnapshot(
             envelope = envelope(),
             active = active,
@@ -468,7 +468,7 @@ class DriveSyncManager @Inject constructor(
     }
 
     private suspend fun buildPreferencesSnapshot(): PreferencesSnapshot {
-        // Synced subset — theme, default tab, palette overrides, UI toggles.
+        // Synced subset, theme, default tab, palette overrides, UI toggles.
         // Avoids syncing network/device-local settings (buffer size, custom
         // DVR folder, network timeout) which are sensible per-device.
         val keys = appPreferences.snapshotSyncablePreferences()

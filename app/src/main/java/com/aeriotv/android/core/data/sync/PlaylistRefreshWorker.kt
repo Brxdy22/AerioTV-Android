@@ -38,7 +38,7 @@ import kotlinx.coroutines.flow.first
  * (Network Settings). Default ON. With the toggle off, [enqueuePeriodic] is
  * a no-op and any previously-scheduled work is canceled.
  *
- * No `lastRefreshedAt` freshness check here — WorkManager already paces the
+ * No `lastRefreshedAt` freshness check here, WorkManager already paces the
  * runs, and the periodic interval is the only knob we need. A miss (no
  * active playlist, no network mid-window, etc) returns Result.success() so
  * WorkManager re-schedules the next interval at the normal cadence, not a

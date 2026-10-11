@@ -19,7 +19,7 @@ import androidx.core.content.ContextCompat
  * On Android 13+ apps must request POST_NOTIFICATIONS at runtime; without it,
  * the DVR ongoing notification, programme reminders, and the background
  * playback notification all silently no-op. The permission is declared in the
- * manifest but the runtime request was missing — this gate fires it once per
+ * manifest but the runtime request was missing, this gate fires it once per
  * install on the first cold start where the permission isn't already granted.
  *
  * Pre-API-33 (Android 12 and below) the permission is implicit, so this gate

@@ -22,11 +22,11 @@ import javax.inject.Singleton
  *
  * Strategy per playlist:
  *  1. Try a refresh against the cached refresh token (no re-login needed when
- *     the user was active recently — typical 30 min access TTL inside the
+ *     the user was active recently, typical 30 min access TTL inside the
  *     24 h refresh window).
  *  2. On [DispatcharrError.RefreshExpired] or any other refresh failure,
  *     fall back to a fresh login from the playlist row's username + password.
- *  3. Both failures are logged but never thrown — the api_key fallback path
+ *  3. Both failures are logged but never thrown, the api_key fallback path
  *     in every call site keeps the app working when warmup fails (server
  *     unreachable, network blip), so this coordinator's failure modes are
  *     non-fatal.
@@ -60,7 +60,7 @@ class DispatcharrWarmupCoordinator @Inject constructor(
     private var backgroundedAt = 0L
 
     /**
-     * Attach this coordinator to the ProcessLifecycleOwner. Idempotent — a
+     * Attach this coordinator to the ProcessLifecycleOwner. Idempotent, a
      * second call is a no-op so it's safe to invoke from Application.onCreate
      * without guard logic at the call site.
      */
@@ -73,7 +73,7 @@ class DispatcharrWarmupCoordinator @Inject constructor(
     override fun onStart(owner: LifecycleOwner) {
         // ON_START fires both on cold-launch foreground AND every time the
         // app comes back from the background. Both cases benefit from a
-        // token refresh — match iOS scene-phase .active behavior.
+        // token refresh, match iOS scene-phase .active behavior.
         val isColdLaunch = coldLaunch
         coldLaunch = false
         // A return from the background after more than a minute re-reads
@@ -130,7 +130,7 @@ class DispatcharrWarmupCoordinator @Inject constructor(
 
     private suspend fun warmup(playlist: PlaylistEntity) {
         // Phase 1: try refresh. Only meaningful when a refresh token is
-        // cached — that happens after a successful login during this same
+        // cached, that happens after a successful login during this same
         // process run, OR a previous warmup that ran login.
         tokenStore.refreshToken(playlist.id)?.let { refresh ->
             try {

@@ -40,7 +40,7 @@ import java.util.Date
  * Edit a scheduled Dispatcharr server recording. Mirrors iOS Edit Recording
  * sheet: title + description text fields, pre-roll + post-roll radio rows
  * adjusted relative to the original scheduled window. The original program
- * window is treated as immutable here — pre/post-roll deltas adjust outward
+ * window is treated as immutable here, pre/post-roll deltas adjust outward
  * from those anchors.
  *
  * Constraint: this surface is reachable only for [DvrViewModel.Source.Server]

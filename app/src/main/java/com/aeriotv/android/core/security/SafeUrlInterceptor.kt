@@ -16,7 +16,7 @@ import com.aeriotv.android.core.network.ActivePlaylistCredentials
  * source supplies (M3U `tvg-logo`, Dispatcharr channel logo, XMLTV
  * `<icon src=>`, VOD posters). All of those are attacker-influenced text
  * fields. Coil happily resolves `file://`, `content://`, `javascript:`,
- * `about:`, `data:text/html;...`, etc. — none of which we ever want for an
+ * `about:`, `data:text/html;...`, etc., none of which we ever want for an
  * image cell.
  *
  * Policy:
@@ -32,7 +32,7 @@ import com.aeriotv.android.core.network.ActivePlaylistCredentials
  *
  * Composable Coil 3 image painters that loaded a blocked URL show the
  * caller's fallback / placeholder, matching the behavior of any other
- * fetch failure — no crash, no UI surprise.
+ * fetch failure, no crash, no UI surprise.
  */
 class SafeUrlInterceptor(
     private val credentials: ActivePlaylistCredentials,

@@ -18,7 +18,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
  * and switch to a stripped-down PiP-friendly surface.
  *
  * Singleton because PiP is an activity-level concept and Compose currently
- * doesn't expose the mode through a CompositionLocal. Keep this tiny — the
+ * doesn't expose the mode through a CompositionLocal. Keep this tiny, the
  * only writer is MainActivity.
  */
 object PipState {
@@ -97,7 +97,7 @@ fun Context.supportsPip(): Boolean {
 
 /**
  * Request that the host activity enter PiP at 16:9. Safe to call on any API
- * level / device — bails silently when PiP isn't supported (including all TVs).
+ * level / device, bails silently when PiP isn't supported (including all TVs).
  * Aspect ratio is pinned at 16:9 because all our content is video and the
  * system clamps to ranges around 2.39:1 / 1:2.39 anyway.
  */

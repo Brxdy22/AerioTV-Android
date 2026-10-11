@@ -148,7 +148,7 @@ class DriveAppDataClient(private val okHttp: OkHttpClient) {
         }
     }
 
-    /** Delete a file by id. Idempotent — a 404 is treated as success. */
+    /** Delete a file by id. Idempotent, a 404 is treated as success. */
     suspend fun delete(token: String, fileId: String): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {
             val req = Request.Builder()

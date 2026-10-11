@@ -21,7 +21,7 @@ object M3UParser {
 
     /**
      * GH #31: the ONLY attribute keys anything reads back off
-     * [M3UChannel.rawAttributes] after parsing — the EPG bridge
+     * [M3UChannel.rawAttributes] after parsing, the EPG bridge
      * ([com.aeriotv.android.core.data.ChannelEpgKey]) uses these for
      * Dispatcharr channel-uuid matching. Everything else the #EXTINF carries
      * (tvg-id / tvg-name / tvg-logo / group-title / tvg-chno) is already a
@@ -74,7 +74,7 @@ object M3UParser {
      * m3u_plus (100-200MB, ~100k+ channels) can be inserted into the DB in
      * chunks without ever holding the whole `List<M3UChannel>` (the previous
      * parse-to-list materialized the entire catalog and, together with the
-     * downstream copies, wedged a 512MB heap — see the batch-insert fix).
+     * downstream copies, wedged a 512MB heap, see the batch-insert fix).
      *
      * The charset is DETECTED up front in a throwaway constant-memory pass
      * instead of via the parse-and-retry [parseFile] uses: a streaming callback
@@ -115,7 +115,7 @@ object M3UParser {
     /**
      * The ONE parse loop, consuming lines as a sequence so file and string
      * inputs share it. EMITS each fully-formed channel to [onChannel] the moment
-     * its URL line binds — ONLY on a completed channel boundary, never mid-record
+     * its URL line binds, ONLY on a completed channel boundary, never mid-record
      * (the cross-line `pendingExtInf`/`pendingKodiProps` lookahead is reset right
      * after each emit), so a streaming caller can flush to the DB per chunk
      * safely. Semantics preserved from the original index/lookahead loop:
@@ -184,7 +184,7 @@ object M3UParser {
     ): M3UChannel {
         val attrs = parseExtInf(extInfLine)
         val tvgId = attrs["tvg-id"]?.takeIf { it.isNotBlank() }
-        // Stable ID — prefer tvg-id (the broadcaster's canonical
+        // Stable ID, prefer tvg-id (the broadcaster's canonical
         // channel key), fall back to the stream URL which is also
         // stable across refreshes of the same source. iOS uses the
         // raw UUID per fetch and stores its own per-channel id in

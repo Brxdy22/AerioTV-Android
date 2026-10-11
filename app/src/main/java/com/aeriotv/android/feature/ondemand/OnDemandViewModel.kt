@@ -75,7 +75,7 @@ import kotlinx.serialization.json.JsonPrimitive
  * "Continue Watching" CTA.
  *
  * Pagination via Dispatcharr's `next` cursor is wired but not consumed by the
- * UI yet — the first 100 movies render immediately, full library walk lands
+ * UI yet, the first 100 movies render immediately, full library walk lands
  * with the "Load more" affordance.
  */
 @HiltViewModel
@@ -158,7 +158,7 @@ class OnDemandViewModel @Inject constructor(
         // is opened. Keeps the tab visible without doing the heavy work up front
         // (which used to hammer the device while the guide was still loading).
         val hasDeferredXtreamContent: Boolean = false,
-        // Series state — separate from movies so each sub-tab's search /
+        // Series state, separate from movies so each sub-tab's search /
         // loading flow is independent. Both share the same playlist context.
         val isLoadingSeries: Boolean = false,
         val seriesError: String? = null,
@@ -178,7 +178,7 @@ class OnDemandViewModel @Inject constructor(
         val episodesErrorFor: Map<Int, String> = emptyMap(),
         // Provider-info cache. Movie + series detail pages call into this for
         // backdrop / cast / director / country / trailer enrichment. Keyed by
-        // Dispatcharr's int `id` (NOT uuid) — matches the URL shape of
+        // Dispatcharr's int `id` (NOT uuid), matches the URL shape of
         // `/api/vod/{movies,series}/<id>/provider-info/`.
         val movieProviderInfo: Map<Int, DispatcharrVODProviderInfo> = emptyMap(),
         val seriesProviderInfo: Map<Int, DispatcharrVODProviderInfo> = emptyMap(),
@@ -2532,7 +2532,7 @@ class OnDemandViewModel @Inject constructor(
         tmdbService.profileImageUrl(path, size)
 
     /**
-     * Lazy-fetch provider-info for a movie — backdrop, cast, director,
+     * Lazy-fetch provider-info for a movie, backdrop, cast, director,
      * country, trailer URL. Idempotent within session: a second call for the
      * same id no-ops if either the data is already cached or a fetch is
      * already in flight. Mirrors iOS VODService.enrichMovie which runs this

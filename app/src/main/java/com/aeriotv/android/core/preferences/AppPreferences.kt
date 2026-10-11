@@ -1208,7 +1208,7 @@ class AppPreferences @Inject constructor(
      * per-playlist, so a single global stamp was wrong-by-scope: the active
      * playlist's successful refetch stamped the epoch for EVERY playlist,
      * and a second, still-poisoned playlist inside its freshness TTL was then
-     * trusted — the exact history-only guide the epoch exists to purge. Each
+     * trusted, the exact history-only guide the epoch exists to purge. Each
      * playlist now proves ITS cache was rebuilt. Reading defaults to 0, so
      * playlists stamped only by the old global key refetch once and re-stamp.
      */
@@ -1600,7 +1600,7 @@ class AppPreferences @Inject constructor(
     }
 
     /**
-     * Snapshot the keys we sync via Drive — the user-facing UI bits, not
+     * Snapshot the keys we sync via Drive, the user-facing UI bits, not
      * device-local network/buffer settings. Returns a string-encoded map so
      * the wire format stays type-agnostic for cross-platform compatibility.
      */

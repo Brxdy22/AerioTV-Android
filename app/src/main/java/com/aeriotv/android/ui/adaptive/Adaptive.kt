@@ -25,7 +25,7 @@ import androidx.compose.ui.unit.dp
  *   - Expanded  >= 840dp          → tablets landscape / Android TV / foldables unfolded landscape
  *
  * Plus a height check (`isShort`) for "TV / tablet landscape with low height"
- * — those need two-column layouts so the content isn't crowded by an unused
+ * those need two-column layouts so the content isn't crowded by an unused
  * left/right band.
  */
 @Composable

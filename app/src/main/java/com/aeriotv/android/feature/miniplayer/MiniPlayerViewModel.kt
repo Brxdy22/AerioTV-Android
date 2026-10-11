@@ -9,7 +9,7 @@ import kotlinx.coroutines.flow.StateFlow
 /**
  * Hilt facade so composables can collect [MiniPlayerSession.state] without
  * carrying the singleton through every Composable signature. Keep this thin
- * — the real state lives in the @Singleton.
+ * the real state lives in the @Singleton.
  */
 @HiltViewModel
 class MiniPlayerViewModel @Inject constructor(

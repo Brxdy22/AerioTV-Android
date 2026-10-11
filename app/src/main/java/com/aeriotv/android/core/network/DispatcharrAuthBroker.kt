@@ -19,7 +19,7 @@ import javax.inject.Singleton
  *   2. First attempt uses the api_key persisted on [PlaylistEntity].
  *   3. If that call throws [DispatcharrError.Unauthorized], we read the
  *      saved username + password from the same row.
- *   4. Re-login via [DispatcharrClient.login] — server revoked the api_key
+ *   4. Re-login via [DispatcharrClient.login], server revoked the api_key
  *      but the credentials themselves are still valid.
  *   5. Cache the new JWT pair in [DispatcharrTokenStore] so subsequent
  *      bearer-mode calls (e.g. fetchCurrentUser) skip another round trip.
@@ -30,7 +30,7 @@ import javax.inject.Singleton
  *   8. Replay the original block with the new key.
  *
  * Returns null on any failure (no creds saved, login rejected, users/me
- * decode error, etc.). Callers fall back to surfacing the original 401 —
+ * decode error, etc.). Callers fall back to surfacing the original 401,
  * silent recovery is a best-effort upgrade, not a guarantee.
  */
 @Singleton

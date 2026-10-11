@@ -210,6 +210,7 @@ fun GuideScreen(
     val reminderKeys = remember(reminders) { reminders.mapTo(HashSet()) { it.reminderKey } }
     val collections by collectionsVm.collections.collectAsStateWithLifecycle()
     val stagedMultiview by multiviewStore.selected.collectAsStateWithLifecycle(initialValue = emptyList())
+    val mvPlayingSeed by multiviewStore.playingSeed.collectAsStateWithLifecycle()
     val groupSelector by settingsVm.guideGroupSelector.collectAsStateWithLifecycle()
     val sidebarGroupMode = isTv && groupSelector == "sidebar" && !favoritesOnly
     // Sidebar layout (Logan 2026-09-14): "shift" docks the pane beside the
@@ -1500,12 +1501,19 @@ fun GuideScreen(
     menuFor?.let { (channel, cell) ->
         val notEnded = cell.endMillis > nowMs
         val isLive = nowMs in cell.startMillis until cell.endMillis
-        val inMultiview = stagedMultiview.any { it.id == channel.id }
+        // Apple liveTVMultiviewMenuState (Logan 2026-10-11): the channel in
+        // the mini player is already staged channel 1, so its item stays
+        // "Add to Multiview", disabled; others stage on top of it.
+        val mvMenu = com.aeriotv.android.feature.multiview.multiviewMenuState(
+            channel.id, mvPlayingSeed?.id, stagedMultiview,
+        )
+        val inMultiview = mvMenu == com.aeriotv.android.feature.multiview.MultiviewMenuState.Remove
+        val mvPlayingHere = mvMenu == com.aeriotv.android.feature.multiview.MultiviewMenuState.AddDisabled
         val key = reminderKey(channel.name, cell.title, cell.startMillis)
         val isFavorite = channel.id in favoriteIds
         val isRecent = channel.id in recentChannelIds
         val atCap = stagedMultiview.size >= 4
-        val canAddToMultiview = channel.url.isNotBlank() && (!atCap || inMultiview)
+        val canAddToMultiview = channel.url.isNotBlank() && (!atCap || inMultiview) && !mvPlayingHere
         val canRecord = notEnded && (isLive || canRecordToServer)
         val replayable = !cell.isPlaceholder && channel.canReplay(cell, nowMs)
         // Apple TV order (Logan 2026-09-02): Favorites, Multiview, Collection,

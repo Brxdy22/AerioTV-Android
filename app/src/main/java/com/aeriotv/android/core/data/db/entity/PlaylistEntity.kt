@@ -15,7 +15,7 @@ import java.util.UUID
 
 /**
  * Persistent playlist row. Mirrors iOS Aerio/Models/PlaylistModels.swift M3UPlaylist
- * (SwiftData @Model). Channels themselves are NOT stored — they're re-parsed from
+ * (SwiftData @Model). Channels themselves are NOT stored, they're re-parsed from
  * [urlString] on demand, same as iOS. Keeping the schema minimal so future
  * sync via Drive AppData has a small payload.
  */

@@ -10,13 +10,13 @@ import androidx.compose.ui.unit.Density
  * Apply a user-chosen display-scale multiplier to a Compose subtree by
  * overriding [LocalDensity]. Multiplying `fontScale` (not `density`) keeps
  * pixel-based things (image sizes, surface dimensions) untouched and only
- * grows/shrinks SP-derived measurements — mirroring iOS dynamicTypeSize.
+ * grows/shrinks SP-derived measurements, mirroring iOS dynamicTypeSize.
  *
  * Source of truth is [AppPreferences.displayScaleMovies] / `displayScaleLiveTV`,
  * set via the Appearance > Display Scale sliders (0.85 .. 1.25).
  *
  * If the user already has Android-system "Display size" / "Font size" set
- * non-default, this multiplies on top — so a user with system 1.15 and app
+ * non-default, this multiplies on top, so a user with system 1.15 and app
  * scale 1.10 ends up at ~1.265 effective scale. That stacking matches iOS
  * where Dynamic Type also scales independently.
  */

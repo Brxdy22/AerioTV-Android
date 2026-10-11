@@ -7,7 +7,7 @@ import androidx.room.PrimaryKey
 
 /**
  * One row per scheduled programme reminder. Mirrors iOS `programReminders`
- * @AppStorage map keyed by "channelName|title|startTs" — same composite key
+ * @AppStorage map keyed by "channelName|title|startTs", same composite key
  * lives in [reminderKey] so the Android port preserves uniqueness semantics.
  *
  * The alarm itself is scheduled with AlarmManager at [startMillis] minus a
@@ -16,7 +16,7 @@ import androidx.room.PrimaryKey
  * `playlistId` is the new (DB v9) FK to PlaylistEntity. Cascade-delete on
  * playlist removal so a stale reminder doesn't outlive its source server.
  * Nullable + ON DELETE CASCADE so pre-v9 rows survive with null playlistId.
- * The AlarmManager registration is NOT auto-cancelled by this cascade — the
+ * The AlarmManager registration is NOT auto-cancelled by this cascade, the
  * pending intent fires harmlessly with no row to fetch, and the broadcast
  * receiver no-ops on null lookup.
  */

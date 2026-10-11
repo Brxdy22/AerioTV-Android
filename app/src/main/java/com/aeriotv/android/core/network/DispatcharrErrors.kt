@@ -10,7 +10,7 @@ package com.aeriotv.android.core.network
  *    Dashboard-vs-XC distinction so UX shows the actionable copy.
  *  - [Unauthorized]: 401/403 from an api_key-authenticated call (channel
  *    list, EPG grid, DVR, VOD, etc.). Triggers
- *    [DispatcharrAuthBroker.silentRebootstrapApiKey] — the admin probably
+ *    [DispatcharrAuthBroker.silentRebootstrapApiKey], the admin probably
  *    rotated the user's api_key, so we re-login from stored creds, extract
  *    the fresh key, persist it, and replay.
  *  - [RefreshExpired]: 401/403 from POST /api/accounts/token/refresh/.

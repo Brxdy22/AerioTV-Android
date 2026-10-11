@@ -243,6 +243,7 @@ fun ChannelListScreen(
     // menu toggles).
     val multiviewStore = rememberMultiviewStoreHandle()
     val stagedMultiview by multiviewStore.selected.collectAsStateWithLifecycle(initialValue = emptyList())
+    val mvPlayingSeed by multiviewStore.playingSeed.collectAsStateWithLifecycle()
 
     // Channel Collections (#45): user-named channel groupings as extra filter
     // pills + row-menu actions. Mirrors the guide's wiring; both screens share
@@ -265,7 +266,7 @@ fun ChannelListScreen(
     }
 
     // Preserve the order groups appear in the source channel list. iOS does
-    // this on the parse step (HomeView.swift `fetchM3U` lines 1869-1872) — an
+    // this on the parse step (HomeView.swift `fetchM3U` lines 1869-1872), an
     // empty array seeded with the first-seen groupTitle per channel and
     // `firstIndex(of:)` mapped onto each ChannelDisplayItem.categoryOrder.
     // Earlier Android revisions sorted alphabetically, which scrambled
@@ -747,7 +748,9 @@ fun ChannelListScreen(
                         showLogo = showChannelLogos,
                         showNumber = showChannelNumbers,
                         collectionsMenu = collectionsMenu,
-                        inMultiview = stagedMultiview.any { it.id == channel.id },
+                        multiviewMenu = com.aeriotv.android.feature.multiview.multiviewMenuState(
+                            channel.id, mvPlayingSeed?.id, stagedMultiview,
+                        ),
                         onToggleMultiview = if (channel.url.isNotBlank()) {
                             { multiviewStore.stageToggle(channel) }
                         } else {
@@ -998,7 +1001,10 @@ internal fun ChannelRow(
     /** Phone row menu (Apple cardMenuItems): Add to / Remove from Multiview.
      *  Null = not offered (Favorites tab, no stream URL). */
     onToggleMultiview: (() -> Unit)? = null,
-    inMultiview: Boolean = false,
+    // Apple liveTVMultiviewMenuState: AddDisabled for the channel playing
+    // in the mini player (staged channel 1), Remove for a staged channel.
+    multiviewMenu: com.aeriotv.android.feature.multiview.MultiviewMenuState =
+        com.aeriotv.android.feature.multiview.MultiviewMenuState.Add,
     /** GH #130: non-null while the channel is in Recently Watched; the
      *  long-press menu then offers "Remove from Recently Watched". */
     onRemoveFromRecents: (() -> Unit)? = null,
@@ -1118,7 +1124,7 @@ internal fun ChannelRow(
 
     // Category gradient runs cyan-of-card → category-tint when a now-playing
     // programme has a recognised category and the user has Category Colors on.
-    // Mirrors iPhone canon footer: "cards tint via gradient" — colours the
+    // Mirrors iPhone canon footer: "cards tint via gradient", colours the
     // accent edge without flattening the surface.
     //
     // Dispatcharr's bulk EPG grid drops `<category>` so nowProgramme.category
@@ -1245,8 +1251,8 @@ internal fun ChannelRow(
                 // Uniform-height channel-info column. iOS lets the description
                 // wrap 0-2 lines, which lets cards spring up and down by
                 // ~14 dp depending on EPG. The Android list ended up
-                // visually choppy in landscape on phones — every other row
-                // a different height — so we lock the slot heights:
+                // visually choppy in landscape on phones, every other row
+                // a different height, so we lock the slot heights:
                 //   * Channel name: always 1 line
                 //   * Program title: always 1 line (placeholder space when
                 //     no EPG so the column still occupies that slot)
@@ -1527,7 +1533,14 @@ internal fun ChannelRow(
                             add(TvMenuAction("Remove from Recently Watched", Icons.Outlined.History, destructive = true) { remove() })
                         }
                         onToggleMultiview?.let { toggle ->
-                            add(TvMenuAction(if (inMultiview) "Remove from Multiview" else "Add to Multiview", Icons.Outlined.GridView) { toggle() })
+                            val mvRemove = multiviewMenu == com.aeriotv.android.feature.multiview.MultiviewMenuState.Remove
+                            add(
+                                TvMenuAction(
+                                    if (mvRemove) "Remove from Multiview" else "Add to Multiview",
+                                    Icons.Outlined.GridView,
+                                    enabled = multiviewMenu != com.aeriotv.android.feature.multiview.MultiviewMenuState.AddDisabled,
+                                ) { toggle() },
+                            )
                         }
                         collectionsMenu?.let { cm ->
                             add(TvMenuAction("Add Channel to Collection", Icons.Outlined.Folder) { cm.onOpenPicker(channel.id, channel.name, -1, 0L) })

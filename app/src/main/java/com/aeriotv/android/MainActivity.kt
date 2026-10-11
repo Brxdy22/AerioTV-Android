@@ -1067,7 +1067,7 @@ class MainActivity : ComponentActivity() {
                         // The holder's stop() (mini-close, 3rd-Back dismiss) keeps
                         // the player instance for reuse, so the null-instance
                         // restore above never sees it. A deliberate stop is
-                        // IDLE + cleared media items — but ExoPlayer delivers this
+                        // IDLE + cleared media items, but ExoPlayer delivers this
                         // callback synchronously INSIDE stop(), before the holder's
                         // clearMediaItems() has run (observed items=1 here). Defer
                         // one main-loop hop so the playlist state has settled;

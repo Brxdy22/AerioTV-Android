@@ -38,7 +38,7 @@ class DriveSyncWorker @AssistedInject constructor(
 
     override suspend fun doWork(): Result = runCatching {
         if (!prefs.syncMasterEnabled.first()) {
-            Log.i(TAG, "Master sync disabled — skipping")
+            Log.i(TAG, "Master sync disabled, skipping")
             return@runCatching Result.success()
         }
         // Restore the session from the persisted token (or silently refresh)
@@ -46,14 +46,14 @@ class DriveSyncWorker @AssistedInject constructor(
         // fresh process WorkManager spawns hours later.
         val token = sync.ensureSignedIn()
         if (token == null) {
-            Log.i(TAG, "No Drive token (not signed in / consent needed) — skipping")
+            Log.i(TAG, "No Drive token (not signed in / consent needed), skipping")
             return@runCatching Result.success()
         }
         val enabled = SyncCategory.entries
             .filter { prefs.syncCategoryEnabled(it).first() }
             .toSet()
         if (enabled.isEmpty()) {
-            Log.i(TAG, "No categories enabled — skipping")
+            Log.i(TAG, "No categories enabled, skipping")
             return@runCatching Result.success()
         }
         // Never auto-push before this install's first successful pull: a
@@ -126,7 +126,7 @@ class DriveSyncWorker @AssistedInject constructor(
             )
         }
 
-        /** Tear down the periodic schedule — invoked when the user signs out
+        /** Tear down the periodic schedule, invoked when the user signs out
          * or disables the master toggle. */
         fun cancel(context: Context) {
             WorkManager.getInstance(context).cancelUniqueWork(UNIQUE_NAME)

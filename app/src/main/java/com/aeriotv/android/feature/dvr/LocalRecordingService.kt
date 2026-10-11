@@ -45,7 +45,7 @@ import java.util.concurrent.TimeUnit
  * Foreground service that downloads a Dispatcharr proxy stream to local
  * storage for a fixed duration. Mirrors iOS LocalRecordingSession behaviour
  * scoped down to "Record from Now" (iOS doesn't support scheduled local
- * recordings either — Android matches that limit).
+ * recordings either, Android matches that limit).
  *
  * Lifecycle:
  *   1. PlayerScreen/RecordProgramSheet starts the service via [startRecording].

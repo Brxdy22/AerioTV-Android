@@ -967,7 +967,7 @@ class DvrViewModel @Inject constructor(
      * Edits an already-scheduled Dispatcharr server recording. Mirrors
      * scheduleServerRecording's signature minus the channel (the channel id
      * can't change for an existing row). Caller passes pre-rolled times.
-     * Only valid for Source.Server recordings — local recordings (which are
+     * Only valid for Source.Server recordings, local recordings (which are
      * downloads, not scheduled tasks) cannot be edited in place.
      */
     suspend fun editServerRecording(
@@ -1007,7 +1007,7 @@ class DvrViewModel @Inject constructor(
      * Kick off server-side commercial detection / removal on a completed
      * recording. Mirrors iOS contextMenu "Remove Commercials" (MyRecordingsView
      * line 305-309). The server handles idempotency so repeated taps are
-     * safe — refresh() afterwards picks up any status change Dispatcharr
+     * safe, refresh() afterwards picks up any status change Dispatcharr
      * surfaces via custom_properties.
      */
     suspend fun applyComskip(recording: Recording): Result<Unit> {
@@ -1034,7 +1034,7 @@ class DvrViewModel @Inject constructor(
 
     /**
      * Stop an in-progress server recording early. The partial file stays on
-     * disk — caller pairs with deleteRecording when the partial isn't wanted.
+     * disk, caller pairs with deleteRecording when the partial isn't wanted.
      * Mirrors iOS contextMenu "Stop Recording" (MyRecordingsView line 332-336).
      */
     suspend fun stopRecording(recording: Recording): Result<Unit> {

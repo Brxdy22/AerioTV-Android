@@ -110,7 +110,7 @@ fun ConfigureSourceScreen(
 
     // Dispatcharr has two flavours sharing the same Configure screen; track
     // the toggle locally. Key on the nav-passed `sourceType`, not
-    // `state.sourceType` — the viewmodel sync happens in the LaunchedEffect
+    // `state.sourceType`, the viewmodel sync happens in the LaunchedEffect
     // above which runs after first composition, so reading state.sourceType
     // here would pick up the previous session's value on first paint.
     var dispatcharrAuthMode by remember(sourceType) {
@@ -601,7 +601,7 @@ private suspend fun importPickedFile(
  * both the public/remote and the LAN-side host in one pass during onboarding;
  * AerioTV swaps to the LAN value automatically whenever the server answers
  * locally (a reachability probe, checked at launch, on network changes, and
- * after edits). M3U sources skip this — they're already URL-based and there's
+ * after edits). M3U sources skip this, they're already URL-based and there's
  * no auth credential reuse implied.
  */
 @Composable

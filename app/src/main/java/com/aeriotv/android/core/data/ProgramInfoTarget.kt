@@ -23,7 +23,7 @@ data class ProgramInfoTarget(
     val channelDispatcharrId: Int? = null,
     /**
      * Dispatcharr's int program id. Drives the lazy `/api/epg/programs/<id>/`
-     * category-enrichment fetch in ProgramInfoSheet — when set, the sheet
+     * category-enrichment fetch in ProgramInfoSheet, when set, the sheet
      * upgrades [category] from the bulk-grid blank string to the real list
      * the moment the user opens the detail. Null for XMLTV-parsed programs
      * and for Dispatcharr's "Dummy EPG" rows.

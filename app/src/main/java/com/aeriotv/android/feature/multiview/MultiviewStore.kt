@@ -9,7 +9,7 @@ import kotlinx.coroutines.flow.asStateFlow
 
 /**
  * App-scoped state for the multiview surface. Mirrors iOS MultiviewStore
- * (Aerio/Features/Multiview/MultiviewStore.swift) — single source of truth
+ * (Aerio/Features/Multiview/MultiviewStore.swift), single source of truth
  * for which channels are tiled, which tile owns audio, and which tiles are
  * muted.
  *
@@ -124,6 +124,7 @@ class MultiviewStore @Inject constructor() {
     fun clear() {
         _selected.value = emptyList()
         _audioFocusedIndex.value = 0
+        _playingSeedId.value = null
     }
 
     /**
@@ -144,11 +145,92 @@ class MultiviewStore @Inject constructor() {
      * enters staging; later calls toggle the channel in or out.
      */
     fun stageToggle(channel: M3UChannel) {
-        if (!_isStaging.value) {
+        if (!_isStaging.value || _playingSeedId.value != null) {
             clear()
             _isStaging.value = true
         }
         toggle(channel)
+    }
+
+    /**
+     * Channel id of the single channel playing in the mini player that the
+     * current staged pile was built on (Apple PlayerSession
+     * miniPlayerSeedTile + MultiviewStore.stagedExtras, Logan 2026-10-11).
+     * Non-null only while [selected] starts with that channel: index 0 is the
+     * playing channel, the rest are the staged extras, so the banner and the
+     * dock card count the playing channel as the first. Play hands the
+     * running player to that tile instead of re-tuning it.
+     */
+    private val _playingSeedId = MutableStateFlow<String?>(null)
+    val playingSeedId: StateFlow<String?> = _playingSeedId.asStateFlow()
+
+    /** The pile is built on [seedId] (it is the first tile). */
+    private fun pileOn(seedId: String): Boolean =
+        _playingSeedId.value == seedId && _selected.value.firstOrNull()?.id == seedId
+
+    /**
+     * Live TV "Add to Multiview" while [seed] plays in the mini player. The
+     * playing channel is staged channel 1 (its own item is disabled, so
+     * [channel] == [seed] is a no-op); other channels toggle in or out as
+     * extras and the mini player keeps playing. A pile kept by Done is
+     * resumed; any other pile starts over from the playing channel.
+     */
+    fun stageOnPlaying(seed: M3UChannel, channel: M3UChannel) {
+        if (channel.id == seed.id) return
+        if (!pileOn(seed.id)) {
+            _selected.value = listOf(MultiviewTile.live(seed))
+            _audioFocusedIndex.value = 0
+            _playingSeedId.value = seed.id
+        }
+        _isStaging.value = true
+        toggle(channel)
+        runCatching {
+            android.util.Log.i(
+                "AerioMV",
+                "[MV-Tile] staged on playing ${seed.name}: ${channel.name} staged=${_selected.value.size}",
+            )
+        }
+    }
+
+    /**
+     * The mini player moved to another channel while a pile is built on the
+     * old one: the new playing channel takes slot 1 (and leaves the extras if
+     * it was one of them), so the count and Play follow what is playing.
+     */
+    fun onPlayingChannelChanged(seed: M3UChannel?) {
+        val seedId = _playingSeedId.value ?: return
+        if (seed == null || seed.id == seedId) return
+        val current = _selected.value
+        if (current.firstOrNull()?.id != seedId) {
+            _playingSeedId.value = null
+            return
+        }
+        val extras = current.drop(1).filterNot { it.id == seed.id }
+        _selected.value = listOf(MultiviewTile.live(seed)) + extras
+        _audioFocusedIndex.value = 0
+        _playingSeedId.value = seed.id
+    }
+
+    /**
+     * Banner / dock Clear. Drops every staged channel; with a pile built on
+     * the playing channel that is only the extras, and the mini player is
+     * left exactly as it was (nothing here touches playback).
+     */
+    fun clearStaged() {
+        clear()
+        _playingSeedId.value = null
+        _isStaging.value = false
+    }
+
+    /**
+     * Banner / dock Play is opening Multiview: returns the id of the playing
+     * channel whose player the first tile keeps, or null for a classic pile.
+     * One-shot: the pile is no longer built on the mini player afterwards.
+     */
+    fun takePlayingSeedForLaunch(): String? {
+        val seedId = _playingSeedId.value ?: return null
+        _playingSeedId.value = null
+        return seedId.takeIf { _selected.value.firstOrNull()?.id == it }
     }
 
     /**
@@ -200,6 +282,7 @@ class MultiviewStore @Inject constructor() {
      */
     fun restore(snapshot: List<MultiviewTile>, audioFocus: Int) {
         val clamped = snapshot.take(maxTiles)
+        if (clamped.firstOrNull()?.id != _playingSeedId.value) _playingSeedId.value = null
         _selected.value = clamped
         _audioFocusedIndex.value = audioFocus.coerceIn(0, (clamped.size - 1).coerceAtLeast(0))
     }
@@ -254,7 +337,7 @@ class MultiviewStore @Inject constructor() {
 
     /**
      * Replace the channel at [index] with [newChannel] in place. Mirrors iOS
-     * MultiviewStore.swapTileContent (commit cc28f18 + e627ca7) — the
+     * MultiviewStore.swapTileContent (commit cc28f18 + e627ca7), the
      * positional Tile composable preserves its AndroidView, the update
      * callback notices the URL change, and calls MPVPlayerView.playFile
      * which routes through `mpv_command loadfile` (default replace mode).

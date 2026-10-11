@@ -312,7 +312,7 @@ private fun BrandLogo() {
     // Mirrors iOS WelcomeView's `.shadow(color: aerioCyan @ 0.45, radius: 20, y: 8)`
     // under the logo. Compose's shadow modifier only renders elevation drop-shadows,
     // not colored glows, so we draw a soft radial gradient halo behind the logo
-    // bitmap instead — same visual effect, API-agnostic.
+    // bitmap instead, same visual effect, API-agnostic.
     val accent = MaterialTheme.colorScheme.primary
     // Sized to read as a hero logo while still letting the whole stacked page
     // fit a ~540dp-tall Android TV without scrolling.
@@ -347,7 +347,7 @@ private fun BrandLogo() {
 }
 
 /**
- * Two soft, blurred accent orbs in opposite corners — mirrors iOS WelcomeView
+ * Two soft, blurred accent orbs in opposite corners, mirrors iOS WelcomeView
  * lines 22-35 where SwiftUI uses `Circle().blur(radius: 80)` on top of the
  * navy background. Compose's Modifier.blur is API 31+, so the same look here
  * comes from radial gradients with carefully tuned color stops.
@@ -404,7 +404,7 @@ private fun accentBrush(): Brush = Brush.linearGradient(
     ),
 )
 
-/** Icon filled with a Brush instead of a solid tint — mirrors iOS FeaturePill's
+/** Icon filled with a Brush instead of a solid tint, mirrors iOS FeaturePill's
  * `.foregroundStyle(LinearGradient.accentGradient)` on the SF Symbol. */
 @Composable
 private fun GradientIcon(

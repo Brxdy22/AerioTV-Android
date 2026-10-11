@@ -15,7 +15,7 @@ import kotlinx.serialization.json.longOrNull
  * Per-playlist live JWT cache. Holds the access + refresh pair plus a
  * best-effort expiry timestamp parsed from the access token's `exp` claim
  * so callers can pre-emptively refresh before the server returns 401.
- * Process-scoped only — nothing is persisted to disk; the playlist row's
+ * Process-scoped only, nothing is persisted to disk; the playlist row's
  * username/password are the only durable credential and re-login from them
  * is the recovery path when the cache is cold.
  *
@@ -23,7 +23,7 @@ import kotlinx.serialization.json.longOrNull
  * lines 96-267. Differences from iOS:
  *  - Keyed by playlist UUID string (not `UUID` value type) since Android's
  *    PlaylistEntity stores it as String.
- *  - ConcurrentHashMap instead of NSLock — same thread-safety property,
+ *  - ConcurrentHashMap instead of NSLock, same thread-safety property,
  *    less verbose, fine for our access pattern (low contention since
  *    Dispatcharr calls run inside coroutines on Dispatchers.IO).
  *  - JWT exp parsing uses java.util.Base64.getUrlDecoder + kotlinx
@@ -66,7 +66,7 @@ class DispatcharrTokenStore @Inject constructor() {
 
     /**
      * Update only the access token after a refresh. The refresh token stays
-     * the same — Dispatcharr does not rotate it on `/api/accounts/token/refresh/`,
+     * the same, Dispatcharr does not rotate it on `/api/accounts/token/refresh/`,
      * only emits a new access.
      */
     fun storeRefreshedAccess(playlistId: String, access: String) {

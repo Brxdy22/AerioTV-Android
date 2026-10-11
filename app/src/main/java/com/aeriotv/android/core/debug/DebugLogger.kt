@@ -28,7 +28,7 @@ import kotlinx.coroutines.launch
  * same screen.
  *
  * Why a singleton and not just `android.util.Log`: the OS logcat is
- * volatile — Android wipes it on reboot and trims aggressively while the
+ * volatile, Android wipes it on reboot and trims aggressively while the
  * device is foregrounded. Bug reports need a persistent artifact the user
  * can attach to a GitHub issue without paired-device tooling.
  *
@@ -388,7 +388,7 @@ class DebugLogger @Inject constructor(
         const val ARCHIVE_FILE = "aerio_debug_logs_archive.txt"
         const val MAX_BYTES = 10L * 1024 * 1024  // 10 MB, matches iOS rotation threshold
 
-        // Locale.US + literal pattern is intentional — log timestamps need to
+        // Locale.US + literal pattern is intentional, log timestamps need to
         // be locale-independent so bug-report submitters from different
         // regions produce files that parse identically. iOS uses ISO 8601
         // for the same reason.

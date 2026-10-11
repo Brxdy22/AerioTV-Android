@@ -7,7 +7,13 @@ import androidx.lifecycle.ViewModel
 import com.aeriotv.android.core.data.M3UChannel
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
+import androidx.lifecycle.viewModelScope
+import com.aeriotv.android.feature.miniplayer.MiniPlayerSession
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
 
 /**
  * Compose-friendly handle around the app-scoped [MultiviewStore]. Hilt
@@ -19,7 +25,34 @@ import kotlinx.coroutines.flow.StateFlow
 class MultiviewStoreHandleVm @Inject constructor(
     private val store: MultiviewStore,
     private val multiviewCast: com.aeriotv.android.core.cast.multiview.MultiviewCastController,
+    miniSession: MiniPlayerSession,
 ) : ViewModel() {
+    /**
+     * The single channel playing in the mini player (TV corner mini, phone and
+     * tablet floating mini), or null. Null as well while a real Multiview runs
+     * (the composite on a receiver, or the tiles in the background): those
+     * keep taking adds as one more tile.
+     */
+    val playingSeed: StateFlow<M3UChannel?> = combine(
+        miniSession.state,
+        multiviewCast.session,
+        MultiviewBackground.state,
+    ) { mini, composite, background ->
+        (mini as? MiniPlayerSession.State.Active)?.channel
+            ?.takeIf { composite == null && background == null && it.url.isNotBlank() }
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    init {
+        viewModelScope.launch {
+            miniSession.state.collect { st ->
+                (st as? MiniPlayerSession.State.Active)?.channel?.let(store::onPlayingChannelChanged)
+            }
+        }
+    }
+
+    val playingSeedId: StateFlow<String?> get() = store.playingSeedId
+    fun clearStaged() = store.clearStaged()
+    fun takePlayingSeedForLaunch(): String? = store.takePlayingSeedForLaunch()
     val selected: StateFlow<List<MultiviewTile>> get() = store.selected
     val audioFocusedIndex: StateFlow<Int> get() = store.audioFocusedIndex
     val maxTiles: Int get() = store.maxTiles
@@ -42,6 +75,11 @@ class MultiviewStoreHandleVm @Inject constructor(
         if (MultiviewBackground.toggleTile(tile, store.maxTiles)) {
             // Last background tile removed: Multiview ended, the mirror too.
             if (MultiviewBackground.state.value == null) store.clear()
+            return
+        }
+        val seed = playingSeed.value
+        if (seed != null) {
+            store.stageOnPlaying(seed, channel)
             return
         }
         store.stageToggle(channel)
@@ -93,6 +131,10 @@ class MultiviewStoreHandle(
     val clear: () -> Unit,
     val seedCurrent: (M3UChannel) -> Unit,
     val restore: (List<MultiviewTile>, Int) -> Unit,
+    /** Channel playing in the mini player, while no real Multiview runs. */
+    val playingSeed: StateFlow<M3UChannel?>,
+    /** Banner / dock Clear: drops the staged extras, playback untouched. */
+    val clearStaged: () -> Unit,
 )
 
 @Composable
@@ -120,5 +162,32 @@ fun rememberMultiviewStoreHandle(
         clear = vm::clear,
         seedCurrent = vm::seedCurrent,
         restore = vm::restore,
+        playingSeed = vm.playingSeed,
+        clearStaged = vm::clearStaged,
     )
+}
+
+/** Live TV long-press "Add to Multiview" item state (Apple LiveTVMultiviewMenuState). */
+enum class MultiviewMenuState { Add, AddDisabled, Remove }
+
+/**
+ * Apple PlayerSession.liveTVMultiviewMenuState: the channel playing in the
+ * mini player reads "Add to Multiview", disabled (it is already staged
+ * channel 1, never "Remove"); other channels read Remove only when staged on
+ * top of it. With nothing playing, staged channels read Remove.
+ */
+fun multiviewMenuState(
+    channelId: String,
+    playingId: String?,
+    staged: List<MultiviewTile>,
+): MultiviewMenuState = when {
+    playingId != null && channelId == playingId -> MultiviewMenuState.AddDisabled
+    playingId != null ->
+        if (staged.firstOrNull()?.id == playingId && staged.any { it.id == channelId }) {
+            MultiviewMenuState.Remove
+        } else {
+            MultiviewMenuState.Add
+        }
+    staged.any { it.id == channelId } -> MultiviewMenuState.Remove
+    else -> MultiviewMenuState.Add
 }

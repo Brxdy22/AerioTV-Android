@@ -1384,7 +1384,7 @@ class PlaylistViewModel @Inject constructor(
                 // Save FIRST, stamp SECOND: the stamp certifies "this
                 // playlist's on-disk cache was rebuilt clean", so writing it
                 // before (or despite) a failed save would leave poisoned rows
-                // behind a clean stamp — the state the epoch exists to detect.
+                // behind a clean stamp, the state the epoch exists to detect.
                 // Rows go to Room first; the guide is then rebuilt from Room so
                 // fetch, cache paint, enrichment and history all install the
                 // same way (one deterministic build, no map surgery).
@@ -1818,7 +1818,7 @@ class PlaylistViewModel @Inject constructor(
     /**
      * Apply user edits to the active playlist. Reuses [PlaylistRepository.loadAndPersist]
      * with `existingId` so the row's UUID stays stable. Mirrors iOS Edit Playlist
-     * Save action — connection details + auth credentials + EPG URL can change
+     * Save action, connection details + auth credentials + EPG URL can change
      * but the source type does not (iOS gates that too via a separate flow).
      */
     /**

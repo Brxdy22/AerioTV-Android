@@ -16,8 +16,8 @@ import okhttp3.Response
  * dedicated OkHttp client.
  *
  * Header strategy mirrors DispatcharrClient:
- *   - `X-API-Key: <key>` — preferred header name.
- *   - `Authorization: ApiKey <key>` — fallback some Dispatcharr deployments
+ *   - `X-API-Key: <key>`, preferred header name.
+ *   - `Authorization: ApiKey <key>`, fallback some Dispatcharr deployments
  *     accept. Sending both is harmless and matches the auth header pair
  *     the rest of the app uses.
  *

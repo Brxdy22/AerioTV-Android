@@ -87,7 +87,7 @@ import com.aeriotv.android.ui.adaptive.LocalTabBarBottomInset
  * "My Recordings" title, three filter chips with counts (Scheduled / Recording /
  * Completed), empty-state film-strip icon + helper copy, and a list of row cards.
  *
- * Phase 9a is server-only — recordings come from Dispatcharr's
+ * Phase 9a is server-only, recordings come from Dispatcharr's
  * `/api/channels/recordings/`. Local recordings via foreground service land in
  * Phase 9b.
  */
@@ -835,7 +835,7 @@ private fun RecordingRow(
  * MyRecordingsView line 708-717:
  *   Server → server.rack glyph + accentPrimary cyan
  *   Local  → internaldrive glyph + system green
- * The cyan/green color split is intentional — it lets the user scan a long
+ * The cyan/green color split is intentional, it lets the user scan a long
  * mixed list and see at a glance which rows would survive if their server
  * went offline. The Material `Storage` icon is the closest SF-Symbols
  * `server.rack` equivalent (stack of horizontal rectangles); `Smartphone`
@@ -847,7 +847,7 @@ private fun DestinationBadge(source: DvrViewModel.Source) {
     val isLocal = source == DvrViewModel.Source.Local
     val icon = if (isLocal) Icons.Outlined.Smartphone else Icons.Outlined.Storage
     val label = if (isLocal) "Local" else "Server"
-    // iOS uses `Color.green` for local rows — system green (#34C759). Server
+    // iOS uses `Color.green` for local rows, system green (#34C759). Server
     // rows pull the active theme accent so the badge stays brand-coherent
     // when a custom accent is set in Appearance.
     val tint = if (isLocal) Color(0xFF34C759) else MaterialTheme.colorScheme.primary

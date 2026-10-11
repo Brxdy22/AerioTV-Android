@@ -2,7 +2,7 @@
 <!--
     Official Google "G" logo, four-color brand mark. Path data lifted from
     Google's Identity Services brand asset bundle, viewBox 0 0 48 48.
-    Required by Google Sign-In branding guidelines — the mark must render in
+    Required by Google Sign-In branding guidelines, the mark must render in
     its full multi-color form (cannot be tinted to match the host app), so
     this lives as a static vector drawable rather than a Canvas approximation.
 

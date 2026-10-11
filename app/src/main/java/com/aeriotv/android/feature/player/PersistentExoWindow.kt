@@ -235,8 +235,18 @@ fun BoxScope.PersistentExoWindow(
     // tl;dr: NavHost paints over PersistentExoWindow by declaration order;
     // fullscreen wants that (chrome over video), mini doesn't (mini needs
     // to float above the Guide's opaque background).
+    val tileRect by state.tileRectPx.collectAsStateWithLifecycle()
     val containerModifier = when {
         mode == ExoWindowState.Mode.Hidden -> Modifier.size(0.dp)
+        // Held Multiview tile: the tile's rect, under the NavHost (no zIndex)
+        // so the grid's ring, name strip and glyphs draw over the video. The
+        // fixed-size surface buffer means this move never resets the codec.
+        mode == ExoWindowState.Mode.Tile -> with(localDensity) {
+            Modifier
+                .offset { androidx.compose.ui.unit.IntOffset(tileRect.left.toInt(), tileRect.top.toInt()) }
+                .size(width = tileRect.width.toDp(), height = tileRect.height.toDp())
+                .background(Color.Black)
+        }
         phoneFrame != null -> phoneFrame
         // tvOS geometry, halved from the 1080 pt canvas (mini report D2-D4):
         // 410x231 pt -> 205x115 dp, 40 pt -> 20 dp end inset, corner radius

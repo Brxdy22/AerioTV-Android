@@ -47,7 +47,7 @@ import javax.inject.Singleton
  * progress change; the launcher-initiated INITIALIZE_PROGRAMS broadcast also
  * lands on [publishNow] via [HomeChannelsInitReceiver].
  *
- * Divergence from tvOS, on purpose: no "name — current programme" subtitle on
+ * Divergence from tvOS, on purpose: no "name, current programme" subtitle on
  * channel cards. The EPG multi-key channel<->programme match
  * (project_aeriotv_epg_match_model) is too heavy to re-run in a background
  * publisher for six cards, and the launcher already renders the channel name
