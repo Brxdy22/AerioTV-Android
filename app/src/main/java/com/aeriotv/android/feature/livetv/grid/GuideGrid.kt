@@ -1174,16 +1174,27 @@ private fun GridRow(
             }
             val cells = state.rows.cells(row)
             var i = state.rows.cellIndexAt(row, vs).let { if (it < 0) 0 else it }
+            // Sticky labels: x0 is clamped to the strip's left edge, so a
+            // cell scrolled partly off screen draws its title and subtitle
+            // from the visible edge (the clipRect below follows x0). The
+            // airing cell clipped at now also keeps a minimum visible width
+            // so even a 5-minute sliver shows its title (Logan 2026-10-11);
+            // the next cell starts after it. Plain floats, no allocation.
+            val airingMinPx = AIRING_MIN_VISIBLE.toPx()
+            var drawnRight = 0f
             while (i < cells.size) {
                 val cell = cells[i]
                 if (cell.startMillis >= ve) break
                 i++
                 if (cell.endMillis <= vs) continue
-                val x0 = ((cell.startMillis - vs) * pxPerMs).coerceAtLeast(0f)
-                val x1 = ((cell.endMillis - vs) * pxPerMs).coerceAtMost(stripW)
+                val airing = nowMs in cell.startMillis until cell.endMillis
+                val x0 = ((cell.startMillis - vs) * pxPerMs).coerceAtLeast(drawnRight)
+                var x1 = ((cell.endMillis - vs) * pxPerMs).coerceAtMost(stripW)
+                if (airing && cell.startMillis < vs && x1 - x0 < airingMinPx) x1 = (x0 + airingMinPx).coerceAtMost(stripW)
+                if (x1 - x0 < MIN_CELL_PX + seam) { drawnRight = maxOf(drawnRight, x1); if (x1 <= x0) continue }
+                drawnRight = maxOf(drawnRight, x1)
                 val w = (x1 - x0 - seam).coerceAtLeast(MIN_CELL_PX)
                 val focused = focusedHere && cell.startMillis == focusStart
-                val airing = nowMs in cell.startMillis until cell.endMillis
                 // Category tint first (Apple: tvOS 0.55 focused / 0.35 live /
                 // 0.22, iOS 0.45 live / 0.28), then the idiom's neutral fill:
                 // iOS = accentPrimary 0.25 airing, cardBackground otherwise.
@@ -1463,6 +1474,8 @@ internal fun guideTraceCell(state: GuideGridState): String {
 
 private fun GuideRemoteAction.orDefault(default: GuideRemoteAction) = if (this == GuideRemoteAction.NONE) default else this
 private const val MIN_CELL_PX = 6f
+/** Airing cell clipped at the strip edge never draws narrower than this, so its title shows. */
+private val AIRING_MIN_VISIBLE = 72.dp
 /** GH #127 guide cell info button: glyph size, corner inset, tap target, min visible cell width. */
 private val GUIDE_INFO_BUTTON_SIZE = 18.dp
 private val GUIDE_INFO_BUTTON_INSET = 5.dp

@@ -2,6 +2,11 @@ package com.aeriotv.android.feature.multiview
 
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.collectIsFocusedAsState
+import androidx.compose.ui.draw.clip
+import com.aeriotv.android.ui.tv.tvFocusScale
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -103,40 +108,128 @@ fun MultiviewStagingBanner(
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f),
         )
-        TextButton(
-            onClick = guard.wrap {
-                store.clear()
-                store.setStaging(false)
-            },
-            contentPadding = buttonPadding,
-            modifier = Modifier.dpadFocusRing(shape = pill, washTint = accent),
-        ) {
-            Text("Clear", maxLines = 1, softWrap = false, fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        if (isTv) {
+            // TV: compact capsules on the TvPill metrics (same height and
+            // padding as the group pills, CircleShape, pill focus ring and
+            // scale) so the ring follows the capsule (tvOS EPGGuideView
+            // staging banner: Capsule backgrounds, 14 x 6 pt padding).
+            TvBannerCapsule(
+                onClick = guard.wrap {
+                    store.clear()
+                    store.setStaging(false)
+                },
+                fill = null,
+                border = null,
+            ) { ink ->
+                Text("Clear", fontSize = com.aeriotv.android.ui.tv.TvChrome.pillFontSize, fontWeight = FontWeight.SemiBold,
+                    maxLines = 1, softWrap = false,
+                    color = ink ?: MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            TvBannerCapsule(
+                onClick = guard.wrap {
+                    guard.arm()
+                    store.setStaging(false)
+                    onLaunchMultiview()
+                },
+                fill = accent,
+                border = null,
+                modifier = Modifier.focusRequester(playFocus),
+            ) { _ ->
+                val onAccent = MaterialTheme.colorScheme.onPrimary
+                Icon(Icons.Filled.PlayArrow, contentDescription = null, tint = onAccent, modifier = Modifier.size(12.dp))
+                Text("Play", fontSize = com.aeriotv.android.ui.tv.TvChrome.pillFontSize, fontWeight = FontWeight.SemiBold,
+                    maxLines = 1, softWrap = false, color = onAccent)
+            }
+            TvBannerCapsule(
+                onClick = guard.wrap { store.setStaging(false) },
+                fill = null,
+                border = accent,
+            ) { _ ->
+                Text("Done", fontSize = com.aeriotv.android.ui.tv.TvChrome.pillFontSize, fontWeight = FontWeight.SemiBold,
+                    maxLines = 1, softWrap = false, color = accent)
+            }
+        } else {
+            TextButton(
+                onClick = guard.wrap {
+                    store.clear()
+                    store.setStaging(false)
+                },
+                contentPadding = buttonPadding,
+                modifier = Modifier.dpadFocusRing(shape = pill, washTint = accent),
+            ) {
+                Text("Clear", maxLines = 1, softWrap = false, fontWeight = FontWeight.SemiBold,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            Button(
+                onClick = guard.wrap {
+                    guard.arm()
+                    store.setStaging(false)
+                    onLaunchMultiview()
+                },
+                shape = pill,
+                contentPadding = buttonPadding,
+                colors = ButtonDefaults.buttonColors(containerColor = accent),
+                modifier = Modifier.focusRequester(playFocus).dpadFocusRing(shape = pill, washTint = accent),
+            ) {
+                Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
+                Spacer(Modifier.size(4.dp))
+                Text("Play", maxLines = 1, softWrap = false, fontWeight = FontWeight.SemiBold)
+            }
+            OutlinedButton(
+                onClick = guard.wrap { store.setStaging(false) },
+                shape = pill,
+                contentPadding = buttonPadding,
+                border = BorderStroke(1.dp, accent),
+                modifier = Modifier.dpadFocusRing(shape = pill, washTint = accent),
+            ) {
+                Text("Done", maxLines = 1, softWrap = false, fontWeight = FontWeight.SemiBold, color = accent)
+            }
         }
-        Button(
-            onClick = guard.wrap {
-                guard.arm()
-                store.setStaging(false)
-                onLaunchMultiview()
-            },
-            shape = pill,
-            contentPadding = buttonPadding,
-            colors = ButtonDefaults.buttonColors(containerColor = accent),
-            modifier = Modifier.focusRequester(playFocus).dpadFocusRing(shape = pill, washTint = accent),
-        ) {
-            Icon(Icons.Filled.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
-            Spacer(Modifier.size(4.dp))
-            Text("Play", maxLines = 1, softWrap = false, fontWeight = FontWeight.SemiBold)
-        }
-        OutlinedButton(
-            onClick = guard.wrap { store.setStaging(false) },
-            shape = pill,
-            contentPadding = buttonPadding,
-            border = BorderStroke(1.dp, accent),
-            modifier = Modifier.dpadFocusRing(shape = pill, washTint = accent),
-        ) {
-            Text("Done", maxLines = 1, softWrap = false, fontWeight = FontWeight.SemiBold, color = accent)
-        }
+    }
+}
+
+/**
+ * TV staging-banner button: a capsule on the [com.aeriotv.android.ui.tv.TvPill]
+ * metrics. Focus ring 2 dp, white on a filled capsule and accent otherwise,
+ * scale 1.05, exactly as the group pills. [content] receives the focused ink
+ * (onSurface) for plain capsules, or null at rest.
+ */
+@Composable
+private fun TvBannerCapsule(
+    onClick: () -> Unit,
+    fill: androidx.compose.ui.graphics.Color?,
+    border: androidx.compose.ui.graphics.Color?,
+    modifier: Modifier = Modifier,
+    content: @Composable (androidx.compose.ui.graphics.Color?) -> Unit,
+) {
+    val source = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
+    val focused by source.collectIsFocusedAsState()
+    val colors = MaterialTheme.colorScheme
+    val shape = androidx.compose.foundation.shape.CircleShape
+    val ringWidth = com.aeriotv.android.ui.tv.TvChrome.ringWidth
+    Row(
+        modifier = modifier
+            .tvFocusScale(focused, focusedScale = 1.05f)
+            .clip(shape)
+            .then(if (fill != null) Modifier.background(fill) else Modifier)
+            .then(if (border != null && !focused) Modifier.border(1.dp, border, shape) else Modifier)
+            .border(
+                width = ringWidth,
+                color = when {
+                    !focused -> androidx.compose.ui.graphics.Color.Transparent
+                    fill != null -> androidx.compose.ui.graphics.Color.White
+                    else -> colors.primary
+                },
+                shape = shape,
+            )
+            .clickable(interactionSource = source, indication = null, onClick = onClick)
+            .padding(
+                horizontal = com.aeriotv.android.ui.tv.TvChrome.pillHorizontalPadding,
+                vertical = com.aeriotv.android.ui.tv.TvChrome.pillVerticalPadding,
+            ),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(5.dp),
+    ) {
+        content(if (focused) colors.onSurface else null)
     }
 }

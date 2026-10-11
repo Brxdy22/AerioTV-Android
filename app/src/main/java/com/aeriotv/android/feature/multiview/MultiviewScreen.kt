@@ -1228,6 +1228,7 @@ private fun TileGrid(
     LaunchedEffect(Unit) {
         if (isTv) runCatching { gridFocusRequester.requestFocus() }
     }
+    val slotKeyState = remember { TileSlotKeys() }
     // Item #16 focus-trap fix: while a per-tile scrubber strip is up it owns
     // focus; once every scrubber is hidden/removed, pull focus back to the grid
     // host so the remote drives tile nav again instead of landing nowhere.
@@ -1374,7 +1375,23 @@ private fun TileGrid(
         // releases an AndroidView / destroys an mpv handle. Normal mode tiles
         // the grid; fullscreen promotes the focused tile to the whole viewport
         // (zIndex on top) and parks the rest just off the right edge, paused.
+        // Move Tile / drag reorder must MOVE a tile's player with it, not
+        // re-tune both slots (Streamer 2026-10-11: each swap re-prepared two
+        // players, stalled them for up to 15 s and left the [PERF] tracers
+        // reporting the old channel names). Each tile composes under a slot
+        // key that follows its channel through swaps and moves, so Compose
+        // moves the keyed group (AndroidView and ExoPlayer included). A
+        // replacement in place (Change Channel, Switch Stream) inherits the
+        // replaced tile's key, so it keeps the in-place stream swap.
+        val slotKeys = slotKeyState.keysFor(tiles)
         tiles.forEachIndexed { index, tile ->
+          androidx.compose.runtime.key(slotKeys[index]) {
+            var slotPlayer by remember { mutableStateOf<ExoPlayer?>(null) }
+            DisposableEffect(index, slotPlayer) {
+                val p = slotPlayer
+                if (p != null) onTilePlayer(index, p)
+                onDispose { if (p != null && tilePlayers[index] === p) onTilePlayer(index, null) }
+            }
             val isFull = fullscreenIndex == index
             // This tile's rect in the current layout (mode + spotlight already
             // reconciled into dpRects). Fullscreen branch stays OUTERMOST
@@ -1517,7 +1534,7 @@ private fun TileGrid(
                     singleTile = tiles.size <= 1,
                     onTap = { onTileTap(index) },
                     onDoubleTap = { onTileDoubleTap(index) },
-                    onPlayer = { player -> onTilePlayer(index, player) },
+                    onPlayer = { player -> slotPlayer = player },
                     onFinished = { onTileFinished(index) },
                 )
                 // Finished overlay (Phase 3). Sibling of the Tile so its
@@ -1551,6 +1568,7 @@ private fun TileGrid(
                     )
                 }
             }
+          }
         }
     }
 }
@@ -1774,7 +1792,6 @@ private fun Tile(
         modifier = Modifier
             .fillMaxSize()
             .clip(shape)
-            .border(borderWidth, borderColor, shape)
             .combinedClickable(
                 onClick = onTap,
                 onDoubleClick = onDoubleTap,
@@ -1791,54 +1808,6 @@ private fun Tile(
             watchVm = watchVm,
             onFinished = onFinished,
         )
-        // Channel-name overlay (top-left). Fades with the chrome: it's up
-        // on launch + whenever the user interacts (tap toggles chrome,
-        // D-pad navigation re-arms it) and auto-hides after 4s so the tile
-        // is an unobstructed video cell at rest. AnimatedVisibility gives
-        // a soft cross-fade rather than a hard pop.
-        // Tiles on the top row start at the window's top edge, under the
-        // status bar on touch devices (Onn tablet: the badge drew over the
-        // clock). Push the badge down by however much of the status-bar inset
-        // overlaps THIS tile, so lower rows keep their 6 dp corner position.
-        // A top-row tile at the leading edge also shares its corner with the
-        // screen's Close X (CloseButton: 14 dp inset, 44 dp circle), so its
-        // badge starts past the X instead of sitting on it.
-        val density = LocalDensity.current
-        val statusTopPx = WindowInsets.statusBars.union(WindowInsets.displayCutout)
-            .getTop(density)
-        var tileOriginPx by remember { mutableStateOf(Offset.Zero) }
-        val badgeTopDp = with(density) { (statusTopPx - tileOriginPx.y).coerceAtLeast(0f).toDp() }
-        val badgeStartDp = if (badgeTopDp > 0.dp) {
-            with(density) { (CLOSE_BUTTON_CLEARANCE.toPx() - tileOriginPx.x).coerceAtLeast(0f).toDp() }
-        } else {
-            0.dp
-        }
-        Box(
-            Modifier
-                .matchParentSize()
-                .onGloballyPositioned { tileOriginPx = it.positionInWindow() },
-        )
-        androidx.compose.animation.AnimatedVisibility(
-            visible = chromeVisible,
-            enter = androidx.compose.animation.fadeIn(),
-            exit = androidx.compose.animation.fadeOut(),
-            modifier = Modifier.align(Alignment.TopStart).padding(top = badgeTopDp, start = badgeStartDp),
-        ) {
-            Box(
-                modifier = Modifier
-                    .padding(6.dp)
-                    .clip(RoundedCornerShape(4.dp))
-                    .background(Color.Black.copy(alpha = 0.55f))
-                    .padding(horizontal = 6.dp, vertical = 2.dp),
-            ) {
-                Text(
-                    text = tile.displayName,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = Color.White,
-                    fontWeight = FontWeight.SemiBold,
-                )
-            }
-        }
         if (tileAudioOnly) {
             com.aeriotv.android.feature.player.AudioOnlyArtwork(
                 logoUrl = tile.logoUrl,
@@ -1857,18 +1826,91 @@ private fun Tile(
                 avoidNameBadge = chromeVisible,
             )
         }
-        // Audio-focus indicator. centerIcon mode shows the speaker icon over
-        // the active tile while the chrome is visible. grayPersistent and
-        // themeFading are border-only — handled above on the outer Box.
-        if (showCenterIcon) {
-            Icon(
-                imageVector = Icons.Filled.VolumeUp,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.85f),
-                modifier = Modifier
+        // The ring, the channel name and the speaker glyph sit on the
+        // FITTED video rect, not the slot (Logan 2026-10-11, Streamer: a
+        // full-height slot letterboxes 16:9 video, and the ring wrapped the
+        // whole slot with the name 330 px above the picture). Aspect fit of
+        // the decoder's reported aspect, 16:9 until it is known; matches the
+        // player's RESIZE_MODE_FIT so the ring frames the picture exactly.
+        androidx.compose.foundation.layout.BoxWithConstraints(Modifier.matchParentSize()) {
+            val slotW = maxWidth
+            val slotH = maxHeight
+            val aspect = if (videoAspect > 0f && !tileAudioOnly) videoAspect else 16f / 9f
+            val fitW: Dp
+            val fitH: Dp
+            if (slotW.value / slotH.value.coerceAtLeast(0.001f) > aspect) {
+                fitH = slotH; fitW = slotH * aspect
+            } else {
+                fitW = slotW; fitH = slotW / aspect
+            }
+            Box(
+                Modifier
                     .align(Alignment.Center)
-                    .size(48.dp),
-            )
+                    .size(fitW, fitH)
+                    .border(borderWidth, borderColor, shape),
+            ) {
+                // Channel-name overlay (top-left). Fades with the chrome: it's up
+                // on launch + whenever the user interacts (tap toggles chrome,
+                // D-pad navigation re-arms it) and auto-hides after 4s so the tile
+                // is an unobstructed video cell at rest. AnimatedVisibility gives
+                // a soft cross-fade rather than a hard pop.
+                // Tiles on the top row start at the window's top edge, under the
+                // status bar on touch devices (Onn tablet: the badge drew over the
+                // clock). Push the badge down by however much of the status-bar inset
+                // overlaps THIS tile, so lower rows keep their 6 dp corner position.
+                // A top-row tile at the leading edge also shares its corner with the
+                // screen's Close X (CloseButton: 14 dp inset, 44 dp circle), so its
+                // badge starts past the X instead of sitting on it.
+                val density = LocalDensity.current
+                val statusTopPx = WindowInsets.statusBars.union(WindowInsets.displayCutout)
+                    .getTop(density)
+                var tileOriginPx by remember { mutableStateOf(Offset.Zero) }
+                val badgeTopDp = with(density) { (statusTopPx - tileOriginPx.y).coerceAtLeast(0f).toDp() }
+                val badgeStartDp = if (badgeTopDp > 0.dp) {
+                    with(density) { (CLOSE_BUTTON_CLEARANCE.toPx() - tileOriginPx.x).coerceAtLeast(0f).toDp() }
+                } else {
+                    0.dp
+                }
+                Box(
+                    Modifier
+                        .matchParentSize()
+                        .onGloballyPositioned { tileOriginPx = it.positionInWindow() },
+                )
+                androidx.compose.animation.AnimatedVisibility(
+                    visible = chromeVisible,
+                    enter = androidx.compose.animation.fadeIn(),
+                    exit = androidx.compose.animation.fadeOut(),
+                    modifier = Modifier.align(Alignment.TopStart).padding(top = badgeTopDp, start = badgeStartDp),
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .padding(6.dp)
+                            .clip(RoundedCornerShape(4.dp))
+                            .background(Color.Black.copy(alpha = 0.55f))
+                            .padding(horizontal = 6.dp, vertical = 2.dp),
+                    ) {
+                        Text(
+                            text = tile.displayName,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Color.White,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                    }
+                }
+                // Audio-focus indicator. centerIcon mode shows the speaker icon over
+                // the active tile while the chrome is visible. grayPersistent and
+                // themeFading are border-only, handled above on the outer Box.
+                if (showCenterIcon) {
+                    Icon(
+                        imageVector = Icons.Filled.VolumeUp,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.85f),
+                        modifier = Modifier
+                            .align(Alignment.Center)
+                            .size(48.dp),
+                    )
+                }
+            }
         }
     }
 }
@@ -3065,3 +3107,37 @@ private fun readDebugProp(name: String): String? = runCatching {
         Runtime.getRuntime().exec(arrayOf("getprop", name)).inputStream,
     )).use { it.readLine()?.trim() }
 }.getOrNull()
+
+/**
+ * Stable composition keys for Multiview tiles. A tile keeps its key while its
+ * channel id stays in the list (swaps and moves carry it along); a new id
+ * takes the key of the tile it replaced at the same position, or a fresh one.
+ */
+internal class TileSlotKeys {
+    private var lastIds: List<String> = emptyList()
+    private var lastKeys: List<Int> = emptyList()
+    private var next = 0
+
+    fun keysFor(tiles: List<MultiviewTile>): List<Int> {
+        val ids = tiles.map { it.id }
+        if (ids == lastIds) return lastKeys
+        val byId = HashMap<String, Int>(lastIds.size)
+        lastIds.forEachIndexed { i, id -> byId[id] = lastKeys[i] }
+        val stillPresent = ids.toHashSet()
+        val used = HashSet<Int>()
+        val keys = ids.mapIndexed { i, id ->
+            byId[id]?.takeIf { used.add(it) } ?: run {
+                val inherited = lastIds.getOrNull(i)
+                    ?.takeIf { it !in stillPresent }
+                    ?.let { byId[it] }
+                    ?.takeIf { used.add(it) }
+                inherited ?: (next++).also { used.add(it) }
+            }
+        }
+        // Keep fresh keys clear of inherited ones.
+        next = maxOf(next, (keys.maxOrNull() ?: -1) + 1)
+        lastIds = ids
+        lastKeys = keys
+        return keys
+    }
+}
