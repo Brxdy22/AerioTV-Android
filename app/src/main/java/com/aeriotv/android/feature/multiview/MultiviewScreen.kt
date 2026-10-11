@@ -149,7 +149,7 @@ private const val TAG = "MultiviewScreen"
 
 /**
  * Multiview tile grid. Mirrors iOS MultiviewContainerView (Aerio/Features/
- * Multiview/MultiviewContainerView.swift) — one MPVPlayerView per selected
+ * Multiview/MultiviewContainerView.swift) - one MPVPlayerView per selected
  * channel, only the audio-focused tile plays sound (others get aid=no), tap a
  * tile to swap audio focus.
  *
