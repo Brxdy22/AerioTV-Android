@@ -84,6 +84,9 @@ class MultiviewCompositor(
         const val MAX_BEHIND_NANOS = 3_000_000_000L
         private const val STATS_NANOS = 10_000_000_000L
         private const val MAX_TILE_RETRIES = 10
+        /** Tile watchdog poll, and the buffer growth that counts as progress. */
+        private const val WATCHDOG_TICK_MS = 2_000L
+        private const val WATCHDOG_GROWTH_MS = 250L
         /** Composite tile buffering (see startPlayer). Start and resume on
          *  10 s (Onn 11" 2026-10-08: a tile that started on 6 s fell to 1.4 s
          *  within 10 s and stalled at 21 s, then sat at 8 to 14 s once
@@ -186,6 +189,7 @@ class MultiviewCompositor(
         @Volatile var videoHeight = 0
         @Volatile var pixelRatio = 1f
         var player: ExoPlayer? = null
+        var http: DefaultHttpDataSource.Factory? = null
         var retries = 0
         /** Reached READY once; a later BUFFERING is a stall. */
         var wasReady = false
@@ -195,6 +199,14 @@ class MultiviewCompositor(
         @Volatile var ingestBytes = 0L
         @Volatile var framesRendered = 0L
         @Volatile var stalls = 0
+        /** No-frames watchdog (main thread): when the tile last made
+         *  progress (a new rendered frame or a growing buffer), the frame
+         *  count and buffer seen then, and the watchdog restarts since the
+         *  tile last rendered a frame (the backoff step). */
+        var watchProgressAtMs = 0L
+        var watchFrames = 0L
+        var watchBufferedMs = 0L
+        var watchdogRestarts = 0
         /** Channel logo texture (GL thread) and its opaque aspect. */
         var logoTex = 0
         @Volatile var logoAspect = 0f
@@ -439,6 +451,7 @@ class MultiviewCompositor(
         gl.post(tick)
         main.post { state.forEach { if (it.source != null) startPlayer(it) } }
         main.postDelayed(health, STATS_NANOS / 1_000_000)
+        main.postDelayed(watchdog, WATCHDOG_TICK_MS)
         Log.i(TAG, "[MV-CAST] composite start tiles=$initialCount ${W}x$H@$FPS")
         return true
     }
@@ -476,6 +489,7 @@ class MultiviewCompositor(
         t.retries = 0
         t.wasReady = false
         t.stalled = false
+        t.watchdogRestarts = 0
         setNotice(t.index, null)
         // A new tile starts its health counters from zero: the slot's old
         // totals (and the health window baselines) belonged to the channel
@@ -564,6 +578,7 @@ class MultiviewCompositor(
         if (!running && drainThread == null) return
         running = false
         main.removeCallbacks(health)
+        main.removeCallbacks(watchdog)
         Log.i(TAG, "[MV-CAST] composite stop reason=$reason")
         val playersDone = CountDownLatch(1)
         val releasePlayers = Runnable {
@@ -754,6 +769,8 @@ class MultiviewCompositor(
         player.playWhenReady = true
         player.prepare()
         t.player = player
+        t.http = http
+        armWatchdog(t)
         Log.i(TAG, "[MV-CAST] composite tile ${t.index} loading ${source.displayName}")
         if (style.showLogos) loadLogo(t)
     }
@@ -776,12 +793,71 @@ class MultiviewCompositor(
         t.stalled = false
         pendingReanchor.set(t.index, "restart")
         t.picture.reset()
+        armWatchdog(t)
         player.stop()
         player.setMediaSource(
             com.aeriotv.android.feature.multiview.buildTileMediaSource(source.resolvedUrl, http),
         )
         player.playWhenReady = true
         player.prepare()
+    }
+
+    /** Start (or restart) a tile's no-frames window from now. */
+    private fun armWatchdog(t: Tile) {
+        t.watchProgressAtMs = android.os.SystemClock.elapsedRealtime()
+        t.watchFrames = t.framesRendered
+        t.watchBufferedMs = 0L
+    }
+
+    /**
+     * Composite tile watchdog (Nothing Phone log 2026-10-11 15:45:32 to
+     * 15:48:22: ESPNU HD rendered no frame for about 3 minutes, sitting in
+     * BUFFERING with no error after one error retry, while the same channel
+     * played locally). A tile that renders no new frame and whose buffer does
+     * not grow for [MultiviewCompositeLayout.tileWatchdogLimitMs] restarts its
+     * stream the same way an error retry does. The window backs off 20, 40,
+     * 60 s and resets once the tile renders again. Main thread.
+     */
+    private val watchdog = object : Runnable {
+        override fun run() {
+            if (!running) return
+            val now = android.os.SystemClock.elapsedRealtime()
+            for (slot in shown) {
+                val t = state[slot]
+                val player = t.player ?: continue
+                val http = t.http ?: continue
+                if (t.source == null) continue
+                val frames = t.framesRendered
+                val buffered = runCatching { player.totalBufferedDuration }.getOrDefault(0L)
+                if (frames != t.watchFrames) {
+                    t.watchFrames = frames
+                    t.watchBufferedMs = buffered
+                    t.watchProgressAtMs = now
+                    t.watchdogRestarts = 0
+                    continue
+                }
+                if (buffered > t.watchBufferedMs + WATCHDOG_GROWTH_MS) {
+                    t.watchBufferedMs = buffered
+                    t.watchProgressAtMs = now
+                    continue
+                }
+                val limit = MultiviewCompositeLayout.tileWatchdogLimitMs(t.watchdogRestarts)
+                val idle = now - t.watchProgressAtMs
+                if (idle < limit) continue
+                t.watchdogRestarts++
+                val reason = if (t.wasReady) "no new frames" else "no first frame"
+                Log.w(
+                    TAG,
+                    "[MV-CAST] tile watchdog restart tile=${t.index} reason=$reason idle=${idle / 1000}s " +
+                        "buf=${buffered}ms state=${player.playbackState} frames=$frames " +
+                        "restart=${t.watchdogRestarts} next window=${MultiviewCompositeLayout.tileWatchdogLimitMs(t.watchdogRestarts) / 1000}s " +
+                        "(${t.source?.displayName})",
+                )
+                setNotice(t.index, NOTICE_RECONNECTING)
+                restartSource(t, player, http)
+            }
+            main.postDelayed(this, WATCHDOG_TICK_MS)
+        }
     }
 
     private fun loadLogos() = state.forEach { if (it.source != null) loadLogo(it) }

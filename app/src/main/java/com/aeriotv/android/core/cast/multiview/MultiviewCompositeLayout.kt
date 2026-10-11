@@ -210,6 +210,19 @@ object MultiviewCompositeLayout {
     fun tileRetryDelayMs(retry: Int): Long =
         (TILE_RETRY_MS shl (retry - 1).coerceIn(0, 4)).coerceAtMost(TILE_RETRY_MAX_MS)
 
+    /**
+     * Composite tile watchdog window: a tile with no rendered frame and no
+     * buffer growth for this long restarts its stream. 20 s after start or
+     * a restart, then 40 s, then 60 s for every further restart, so a dead
+     * channel does not reconnect every 20 s. [restarts] is the number of
+     * watchdog restarts since the tile last rendered a frame.
+     */
+    fun tileWatchdogLimitMs(restarts: Int): Long =
+        (TILE_WATCHDOG_MS * (restarts.coerceAtLeast(0) + 1)).coerceAtMost(TILE_WATCHDOG_MAX_MS)
+
+    const val TILE_WATCHDOG_MS = 20_000L
+    const val TILE_WATCHDOG_MAX_MS = 60_000L
+
     /** Tile index under a point in frame coordinates, or -1 (a gap). */
     fun hitTest(x: Float, y: Float, rects: List<CompositeRect>): Int = rects.indexOfFirst { it.contains(x, y) }
 

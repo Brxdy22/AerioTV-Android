@@ -137,6 +137,8 @@ fun aerioRenderersFactory(
                                 clockless = false,
                             ),
                         )
+                    } else if (renderer.javaClass == androidx.media3.decoder.ffmpeg.FfmpegAudioRenderer::class.java) {
+                        out.add(MimeGuardRenderer(renderer, clockless = false))
                     } else {
                         out.add(renderer)
                     }
@@ -166,7 +168,7 @@ fun aerioRenderersFactory(
             // tile sink, and the composite cast carried only generated
             // silence (Nothing Phone log 2026-10-08 14:35: three ESPN tiles,
             // three video decoders, zero audio decoders created).
-            out.add(ClocklessRenderer(androidx.media3.decoder.ffmpeg.FfmpegAudioRenderer(eventHandler, eventListener, audioSink)))
+            out.add(MimeGuardRenderer(androidx.media3.decoder.ffmpeg.FfmpegAudioRenderer(eventHandler, eventListener, audioSink), clockless = true))
         }
 
         override fun buildVideoRenderers(
@@ -584,20 +586,109 @@ private class AerioMediaCodecVideoRenderer(
  *    on ExoPlayer's standalone clock whether or not its sink is muted.
  */
 /**
- * Forwards every call to [inner] but never offers its media clock, so a
- * Multiview tile keeps running on ExoPlayer's standalone clock whichever
- * audio renderer claims the track. For renderers that cannot be subclassed
- * (FfmpegAudioRenderer is final).
+ * Wraps the bundled FFmpeg audio renderer (final, so it cannot be subclassed).
+ *
+ * 1. MIME guard. media3's Ac3Reader emits a Format with a NULL sampleMimeType
+ *    when it parses an AC-3 header with fscod '11' ("do not decode"). Garbage
+ *    bytes that happen to carry the 0x0B77 sync word after an ingest gap or a
+ *    corrupt segment produce exactly that mid-stream. DecoderAudioRenderer then
+ *    tears the decoder down and builds a new FfmpegAudioDecoder from the null
+ *    MIME without re-checking support, and the constructor throws a
+ *    NullPointerException, which surfaces as a fatal player error (Nothing
+ *    Phone log 2026-10-11 15:46:24, composite tile ESPNU HD, E-AC-3 3 ch). The
+ *    wrapper hands the renderer a SampleStream that replaces any undecodable
+ *    format with the last decodable one, so the decoder is reused and the bad
+ *    access units that follow are dropped by the decoder itself (FFmpeg's
+ *    "Invalid data" result is a decode-only skip, not an error). A real
+ *    config change (new MIME, channels, rate) still passes through and
+ *    re-initializes the decoder as before.
+ * 2. [clockless] (Multiview tiles only): never offers the media clock, so a tile
+ *    keeps running on ExoPlayer's standalone clock whichever audio renderer
+ *    claims the track.
  */
 @OptIn(UnstableApi::class)
-private class ClocklessRenderer(private val inner: Renderer) : Renderer by inner {
-    override fun getMediaClock(): androidx.media3.exoplayer.MediaClock? = null
+private class MimeGuardRenderer(
+    private val inner: Renderer,
+    private val clockless: Boolean,
+) : Renderer by inner {
+    private var original: androidx.media3.exoplayer.source.SampleStream? = null
+
+    override fun getMediaClock(): androidx.media3.exoplayer.MediaClock? =
+        if (clockless) null else inner.mediaClock
     override fun getDurationToProgressUs(positionUs: Long, elapsedRealtimeUs: Long): Long =
         inner.getDurationToProgressUs(positionUs, elapsedRealtimeUs)
     override fun setPlaybackSpeed(currentPlaybackSpeed: Float, targetPlaybackSpeed: Float) =
         inner.setPlaybackSpeed(currentPlaybackSpeed, targetPlaybackSpeed)
     override fun enableMayRenderStartOfStream() = inner.enableMayRenderStartOfStream()
     override fun release() = inner.release()
+
+    override fun enable(
+        configuration: androidx.media3.exoplayer.RendererConfiguration,
+        formats: Array<out Format>,
+        stream: androidx.media3.exoplayer.source.SampleStream,
+        positionUs: Long,
+        joining: Boolean,
+        mayRenderStartOfStream: Boolean,
+        startPositionUs: Long,
+        offsetUs: Long,
+        mediaPeriodId: androidx.media3.exoplayer.source.MediaSource.MediaPeriodId,
+    ) {
+        original = stream
+        inner.enable(
+            configuration, formats, GuardedSampleStream(stream, formats.firstOrNull { it.sampleMimeType != null }),
+            positionUs, joining, mayRenderStartOfStream, startPositionUs, offsetUs, mediaPeriodId,
+        )
+    }
+
+    override fun replaceStream(
+        formats: Array<out Format>,
+        stream: androidx.media3.exoplayer.source.SampleStream,
+        startPositionUs: Long,
+        offsetUs: Long,
+        mediaPeriodId: androidx.media3.exoplayer.source.MediaSource.MediaPeriodId,
+    ) {
+        original = stream
+        inner.replaceStream(
+            formats, GuardedSampleStream(stream, formats.firstOrNull { it.sampleMimeType != null }),
+            startPositionUs, offsetUs, mediaPeriodId,
+        )
+    }
+
+    // ExoPlayerImplInternal compares getStream() with the period's own stream by
+    // identity, so report the original, never the wrapper.
+    override fun getStream(): androidx.media3.exoplayer.source.SampleStream? =
+        if (inner.stream == null) null else original
+
+    override fun disable() { inner.disable(); original = null }
+    override fun reset() { inner.reset(); original = null }
+}
+
+@OptIn(UnstableApi::class)
+private class GuardedSampleStream(
+    private val inner: androidx.media3.exoplayer.source.SampleStream,
+    private var lastGood: Format?,
+) : androidx.media3.exoplayer.source.SampleStream by inner {
+    override fun readData(
+        formatHolder: androidx.media3.exoplayer.FormatHolder,
+        buffer: androidx.media3.decoder.DecoderInputBuffer,
+        readFlags: Int,
+    ): Int {
+        val result = inner.readData(formatHolder, buffer, readFlags)
+        if (result != androidx.media3.common.C.RESULT_FORMAT_READ) return result
+        val format = formatHolder.format ?: return result
+        if (format.sampleMimeType != null) { lastGood = format; return result }
+        val keep = lastGood
+        if (keep != null) {
+            android.util.Log.w("AerioPlayer", "[FFMPEG-AUDIO] undecodable format (null MIME) dropped, keeping ${keep.sampleMimeType} ${keep.channelCount} ch")
+            formatHolder.format = keep
+            return result
+        }
+        // No decodable format seen yet: discard what is buffered and wait.
+        android.util.Log.w("AerioPlayer", "[FFMPEG-AUDIO] undecodable first format (null MIME), skipping buffered audio")
+        formatHolder.format = null
+        inner.skipData(Long.MAX_VALUE)
+        return androidx.media3.common.C.RESULT_NOTHING_READ
+    }
 }
 
 @OptIn(UnstableApi::class)

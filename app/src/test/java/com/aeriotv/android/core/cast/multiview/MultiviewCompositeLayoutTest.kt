@@ -212,4 +212,12 @@ class MultiviewCompositeLayoutTest {
             (1..7).map { MultiviewCompositeLayout.tileRetryDelayMs(it) },
         )
     }
+
+    @Test
+    fun tileWatchdogBacksOffTo60s() {
+        assertEquals(
+            listOf(20_000L, 40_000L, 60_000L, 60_000L, 60_000L),
+            (0..4).map { MultiviewCompositeLayout.tileWatchdogLimitMs(it) },
+        )
+    }
 }
