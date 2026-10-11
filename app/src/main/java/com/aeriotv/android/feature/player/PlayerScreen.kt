@@ -674,7 +674,7 @@ fun PlayerScreen(
                     "[RETAIN] not kept on close: " + if (toMini) "minimized to the mini player" else "multiview launch",
                 )
             }
-            timeshiftController.onFullscreenLiveStopped(keepIfEnabled = keepOnClose)
+            timeshiftController.onFullscreenLiveStopped(keepIfEnabled = keepOnClose, toMini = toMini && !hlsSession)
         }
     }
 

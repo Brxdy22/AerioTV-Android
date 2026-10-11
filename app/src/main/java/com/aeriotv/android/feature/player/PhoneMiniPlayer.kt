@@ -528,6 +528,15 @@ fun BoxScope.PhoneMiniControls(
                     state.hide()
                     holder.stop()
                     com.aeriotv.android.core.playback.AerioMediaPlaybackService.stop(context)
+                    // Keep Recent Channels Live: the full-screen X keeps the
+                    // channel live; the mini's X does the same (no-op for
+                    // on-demand, or with the setting off).
+                    runCatching {
+                        dagger.hilt.android.EntryPointAccessors.fromApplication(
+                            context.applicationContext,
+                            com.aeriotv.android.feature.main.MainScaffoldEntryPoint::class.java,
+                        ).timeshiftController().onMiniClosed()
+                    }
                 })
             },
         contentAlignment = Alignment.Center,

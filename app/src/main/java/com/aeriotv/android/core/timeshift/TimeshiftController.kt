@@ -239,6 +239,9 @@ class TimeshiftController @Inject constructor(
         liveUrl = streamUrl
         liveHeaders = headers
         scope.launch {
+            // Back to full screen (expand or a new tune): the mini's X no
+            // longer owns this channel.
+            miniKeepCandidate = null
             // runCatching: session setup does disk IO (mkdirs, meta
             // write) that can throw on a full or flaky disk; an uncaught
             // exception here killed the whole process on every tune.
@@ -552,14 +555,25 @@ class TimeshiftController @Inject constructor(
      * multiview, PiP handoff). Buffered data stays on disk until the
      * retention reaper ages it out.
      */
-    fun onFullscreenLiveStopped(keepIfEnabled: Boolean = false) {
+    fun onFullscreenLiveStopped(keepIfEnabled: Boolean = false, toMini: Boolean = false) {
         // Snapshot the actual play URL now if the holder still has one
         // (post LAN/WAN failover); after an X-close the holder is already
         // stopped and demotion falls back to the tune-time URL.
-        if (keepIfEnabled) noteChannelLeaving()
+        if (keepIfEnabled || toMini) noteChannelLeaving()
         // Through the same serial scope as start so a fast tune-then-back
         // can never stop BEFORE the pending start runs.
         scope.launch {
+            // Minimize: the buffer session ends as before, but remember the
+            // channel so the mini's X can keep it live (same outcome as the
+            // full-screen X). Only a channel that had a buffer qualifies,
+            // which already excludes HLS and non-TS sessions.
+            miniKeepCandidate = if (toMini && activeWriter != null) {
+                val id = currentChannelId
+                val url = lastPlayUrlSnapshot ?: liveUrl
+                if (id != null && url != null) {
+                    MiniKeepCandidate(id, currentChannelName ?: id, currentChannelLogo, url, liveHeaders)
+                } else null
+            } else null
             // Keep Recent Channels Live on close (iOS parity, NowPlaying.stop
             // hands the remuxer to the retained manager): closing the player
             // demotes the session exactly like a flip, honoring the cap and
@@ -586,6 +600,63 @@ class TimeshiftController @Inject constructor(
             }
             lastPlayUrlSnapshot = null
             _state.value = State()
+        }
+    }
+
+    private data class MiniKeepCandidate(
+        val channelId: String,
+        val channelName: String,
+        val logoUrl: String?,
+        val url: String,
+        val headers: Map<String, String>,
+    )
+
+    /** Channel that was minimized to the mini player (see [onMiniClosed]). */
+    @Volatile private var miniKeepCandidate: MiniKeepCandidate? = null
+
+    /**
+     * The mini player's X: the same Keep Recent Channels Live outcome as the
+     * full-screen player's close. The buffer session ended at minimize, so a
+     * fresh kept session opens on its own connection; call this AFTER the
+     * player is stopped so only one connection is open at a time. No-op when
+     * the setting is off or the minimized channel had no buffer.
+     */
+    fun onMiniClosed() {
+        scope.launch {
+            val c = miniKeepCandidate ?: return@launch
+            miniKeepCandidate = null
+            runCatching {
+                val keep = prefs.liveRewindEnabled.first() && prefs.liveRewindKeepRecent.first()
+                if (!keep) {
+                    Log.i(APP_TAG, "[RETAIN] not kept on mini close ${c.channelName}: Keep Recent Channels Live off")
+                    return@launch
+                }
+                val depthMin = prefs.liveRewindDepthMinutes.first()
+                val keepCount = prefs.liveRewindKeepCount.first()
+                val writer = store.startSession(
+                    channelId = c.channelId,
+                    channelName = c.channelName,
+                    depthMs = depthMin * 60_000L,
+                    retentionMs = FIXED_RETENTION_MS,
+                    budgetBytes = store.freeSpaceBudgetBytes(),
+                    protectedDirs = retained.values.map { it.writer.sessionDir }.toSet(),
+                )
+                retained.remove(c.channelId)?.let { releaseRetained(it, "replaced by mini close keep") }
+                val session = RetainedSession(
+                    channelId = c.channelId,
+                    channelName = c.channelName,
+                    logoUrl = c.logoUrl?.takeIf { it.isNotBlank() },
+                    sinceMs = System.currentTimeMillis(),
+                    url = c.url,
+                    headers = c.headers,
+                    writer = writer,
+                )
+                retained[c.channelId] = session
+                evictPastCap(keepCount)
+                startRetainedFill(session)
+                publishRetained()
+                Log.i(APP_TAG, "[RETAIN] kept on mini close ${c.channelName}")
+            }.onFailure { Log.w(TAG, "mini close keep failed: $it") }
         }
     }
 

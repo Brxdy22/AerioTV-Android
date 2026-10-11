@@ -3149,6 +3149,7 @@ interface MainScaffoldEntryPoint {
     fun companionDiscovery(): com.aeriotv.android.core.cast.companion.CompanionDiscovery
     fun multiviewCastController(): com.aeriotv.android.core.cast.multiview.MultiviewCastController
     fun watchProgressDao(): com.aeriotv.android.core.data.db.dao.WatchProgressDao
+    fun timeshiftController(): com.aeriotv.android.core.timeshift.TimeshiftController
 }
 
 /** Two-step Add Playlist flow embedded in the Settings tab. None = closed. */
