@@ -35,6 +35,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -60,6 +61,9 @@ fun MultiviewStagingBanner(
     onLaunchMultiview: () -> Unit,
     modifier: Modifier = Modifier,
     onReturnFocus: (() -> Boolean)? = null,
+    playFocusRequester: FocusRequester? = null,
+    upTarget: FocusRequester? = null,
+    downTarget: FocusRequester? = null,
 ) {
     val staging by store.isStaging.collectAsStateWithLifecycle()
     val tiles by store.selected.collectAsStateWithLifecycle()
@@ -77,7 +81,15 @@ fun MultiviewStagingBanner(
             focusManager.moveFocus(androidx.compose.ui.focus.FocusDirection.Down)
         com.aeriotv.android.ui.tv.TvFocusTrace.guide("refocus after=staging-banner result=$ok")
     }
-    val playFocus = remember { FocusRequester() }
+    val ownPlayFocus = remember { FocusRequester() }
+    val playFocus = playFocusRequester ?: ownPlayFocus
+    // TV: the host routes Up from the grid / clock to Play; from the banner
+    // Up goes to the pills and Down back to the grid (Logan 2026-10-11:
+    // the banner was skipped, leaving Clear and Done unreachable).
+    val tvNav = Modifier.focusProperties {
+        if (upTarget != null) up = upTarget
+        if (downTarget != null) down = downTarget
+    }
     LaunchedEffect(count) {
         if (isTv) {
             guard.arm()
@@ -131,6 +143,7 @@ fun MultiviewStagingBanner(
                 },
                 fill = null,
                 border = null,
+                modifier = tvNav,
             ) { ink ->
                 Text("Clear", fontSize = com.aeriotv.android.ui.tv.TvChrome.pillFontSize, fontWeight = FontWeight.SemiBold,
                     maxLines = 1, softWrap = false,
@@ -144,7 +157,7 @@ fun MultiviewStagingBanner(
                 },
                 fill = accent,
                 border = null,
-                modifier = Modifier.focusRequester(playFocus),
+                modifier = tvNav.focusRequester(playFocus),
             ) { _ ->
                 val onAccent = MaterialTheme.colorScheme.onPrimary
                 Icon(Icons.Filled.PlayArrow, contentDescription = null, tint = onAccent, modifier = Modifier.size(12.dp))
@@ -158,6 +171,7 @@ fun MultiviewStagingBanner(
                 },
                 fill = null,
                 border = accent,
+                modifier = tvNav,
             ) { _ ->
                 Text("Done", fontSize = com.aeriotv.android.ui.tv.TvChrome.pillFontSize, fontWeight = FontWeight.SemiBold,
                     maxLines = 1, softWrap = false, color = accent)

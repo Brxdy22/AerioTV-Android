@@ -210,6 +210,7 @@ fun GuideScreen(
     val reminderKeys = remember(reminders) { reminders.mapTo(HashSet()) { it.reminderKey } }
     val collections by collectionsVm.collections.collectAsStateWithLifecycle()
     val stagedMultiview by multiviewStore.selected.collectAsStateWithLifecycle(initialValue = emptyList())
+    val stagingOn by multiviewStore.isStaging.collectAsStateWithLifecycle()
     val mvPlayingSeed by multiviewStore.playingSeed.collectAsStateWithLifecycle()
     val groupSelector by settingsVm.guideGroupSelector.collectAsStateWithLifecycle()
     val sidebarGroupMode = isTv && groupSelector == "sidebar" && !favoritesOnly
@@ -677,6 +678,7 @@ fun GuideScreen(
     val gridFocus = remember { FocusRequester() }
     val pillsFocus = remember { FocusRequester() }
     val bannerFocus = remember { FocusRequester() }
+    val stagingPlayFocus = remember { FocusRequester() }
     var clockSelectTrigger by remember { androidx.compose.runtime.mutableIntStateOf(0) }
     val previewProgram: EPGProgramme? = if (previewMode) grid.focusedCell() else null
     val previewChannel: M3UChannel? = if (previewMode && grid.focusRow in 0 until grid.rows.size) grid.rows.channel(grid.focusRow) else null
@@ -1180,6 +1182,9 @@ fun GuideScreen(
             onLaunchMultiview = onLaunchMultiview,
             // The grid restores the cell it last focused.
             onReturnFocus = { runCatching { gridFocus.requestFocus() }.getOrDefault(false) },
+            playFocusRequester = stagingPlayFocus,
+            upTarget = if (!sidebarGroupMode && !favoritesOnly && pillItems.isNotEmpty()) pillsFocus else null,
+            downTarget = gridFocus,
         )
         // Channel Preview OFF + corner mini Active: the mini has no banner art
         // card to share a baseline with, so it gets its OWN slot here -- a
@@ -1276,7 +1281,10 @@ fun GuideScreen(
                 // requester landed on the leftmost pill and, with
                 // selection-follows-focus, switched to Live TV.
                 onLeaveTop = {
-                    when {
+                    val stagingUp = isTv && stagingOn && stagedMultiview.isNotEmpty() &&
+                        runCatching { stagingPlayFocus.requestFocus() }.getOrDefault(false)
+                    com.aeriotv.android.ui.tv.TvFocusTrace.guide("leave-top staging-banner=$stagingUp")
+                    if (stagingUp) true else when {
                         // Channel Preview with no pill row: the banner's
                         // description is the next stop above the clock.
                         previewMode && (favoritesOnly || sidebarGroupMode) && previewProgram?.description?.isNotBlank() == true ->

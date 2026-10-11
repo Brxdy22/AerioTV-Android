@@ -580,6 +580,8 @@ fun MultiviewScreen(
                 // sole tile has nothing to swap with, so picking it up only
                 // shows a stuck "Tap a tile to swap" and eats a BACK).
                 if (fullscreenIndex != null || selected.size <= 1) return@TileGrid
+                // A drag after the threshold menu opened: the drag wins.
+                tileMenuIndex = null
                 relocatingIndex = idx
             },
             onReorder = { from, to ->
@@ -659,62 +661,9 @@ fun MultiviewScreen(
                     .statusBarsPadding()
                     .padding(end = 18.dp, top = 18.dp),
             )
-            // Item #7 phone parity: TV reaches "Add streams" through the BACK
-            // exit dialog, but on phone BACK exits outright (no dialog), so the
-            // re-entrant picker was unreachable. Surface a small touch "+" in
-            // the chrome (phone only) when not mid-relocate/fullscreen and below
-            // the tile cap. It opens the SAME picker the TV menu does; the store
-            // appends, so the live grid grows in place.
-            // Tablet parity: the selectable grid layouts live inside the per-tile
-            // context menu, which is TV-only (opened via D-pad long-OK). Touch
-            // long-press maps to relocate, so tablets had no way to reach it.
-            // Surface a layout button on large-screen non-TV devices; it opens the
-            // same tile menu (grid-wide "Layout:" rows appear there at 3/5/6 tiles).
-            if (!isTvDevice && LocalConfiguration.current.screenWidthDp >= 600 &&
-                relocatingIndex == null && fullscreenIndex == null && selected.size > 1) {
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .statusBarsPadding()
-                        .padding(end = 14.dp, top = 94.dp)
-                        .size(44.dp)
-                        .clip(CircleShape)
-                        .background(Color.Black.copy(alpha = 0.55f)),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    IconButton(onClick = {
-                        tileMenuIndex = focused.coerceIn(0, selected.size - 1)
-                        tileMenuGuard.arm()
-                    }) {
-                        Icon(
-                            imageVector = Icons.Filled.GridView,
-                            contentDescription = "Grid layout",
-                            tint = Color.White,
-                        )
-                    }
-                }
-            }
-            if (!isTvDevice && relocatingIndex == null && fullscreenIndex == null &&
-                selected.size < storeHandle.maxTiles) {
-                Box(
-                    modifier = Modifier
-                        .align(Alignment.TopEnd)
-                        .statusBarsPadding()
-                        .padding(end = 14.dp, top = 44.dp)
-                        .size(44.dp)
-                        .clip(CircleShape)
-                        .background(Color.Black.copy(alpha = 0.55f)),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    IconButton(onClick = { addPickerOpen = true }) {
-                        Icon(
-                            imageVector = Icons.Filled.Add,
-                            contentDescription = "Add streams",
-                            tint = Color.White,
-                        )
-                    }
-                }
-            }
+            // The top-right Add (+) and Layout buttons were removed (Logan
+            // 2026-10-11): the tile long-press menu carries Add Channel and
+            // Layout, so they were redundant.
         }
     }
 
@@ -1506,6 +1455,15 @@ private fun TileGrid(
                                     var travelled = 0f
                                     var last = pressStart
                                     var cancelled = false
+                                    // The menu opens AT the long-press
+                                    // threshold, finger still down (Apple
+                                    // parity; Logan 2026-10-11: it used to
+                                    // wait for the release). The Dialog does
+                                    // not take this touch stream (it stays
+                                    // with the window that got the down), so
+                                    // a drag past dragSlop still reorders and
+                                    // onTileLongPress closes the menu.
+                                    onTileMenu(index)
                                     // Phase 2: own the pointer (consume on Initial so Tile sees no tap).
                                     while (longPressed) {
                                         val ev = awaitPointerEvent(PointerEventPass.Initial)
@@ -1524,9 +1482,7 @@ private fun TileGrid(
                                     }
                                     val from = dragSource
                                     if (!cancelled) {
-                                        if (!moved) {
-                                            onTileMenu(index)
-                                        } else if (from != null) {
+                                        if (moved && from != null) {
                                             val to = MultiviewGridMath.indexAt(dragPos, pxRects)
                                             if (to != from) onReorder(from, to)
                                         }
