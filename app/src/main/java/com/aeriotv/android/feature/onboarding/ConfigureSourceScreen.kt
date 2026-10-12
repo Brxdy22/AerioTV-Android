@@ -831,7 +831,7 @@ private fun VodEnabledRow(
             verticalAlignment = Alignment.CenterVertically,
             modifier = Modifier
                 .clip(RoundedCornerShape(12.dp))
-                .dpadFocusWash()
+                .dpadFocusRing(RoundedCornerShape(12.dp), washTint = MaterialTheme.colorScheme.primary)
                 .toggleable(
                     value = checked,
                     interactionSource = remember { MutableInteractionSource() },
@@ -895,7 +895,7 @@ private fun DvrDestinationRow(
                     else MaterialTheme.colorScheme.onBackground,
                     modifier = Modifier
                         .clip(RoundedCornerShape(50))
-                        .dpadFocusWash()
+                        .dpadFocusRing(RoundedCornerShape(50), washTint = MaterialTheme.colorScheme.primary)
                         .background(
                             if (selected) MaterialTheme.colorScheme.primary
                             else MaterialTheme.colorScheme.surface.copy(alpha = 0.6f),
@@ -942,7 +942,7 @@ private fun GuideHistoryRow(
                     else MaterialTheme.colorScheme.onBackground,
                     modifier = Modifier
                         .clip(RoundedCornerShape(50))
-                        .dpadFocusWash()
+                        .dpadFocusRing(RoundedCornerShape(50), washTint = MaterialTheme.colorScheme.primary)
                         .background(
                             if (selected) MaterialTheme.colorScheme.primary
                             else MaterialTheme.colorScheme.surface.copy(alpha = 0.6f),

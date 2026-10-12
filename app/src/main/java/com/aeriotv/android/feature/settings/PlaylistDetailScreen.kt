@@ -1,5 +1,7 @@
 package com.aeriotv.android.feature.settings
 
+import com.aeriotv.android.ui.settings.settingsRowCard
+
 import com.aeriotv.android.ui.scale.subtext
 import com.aeriotv.android.ui.theme.textAccent
 import androidx.compose.foundation.background
@@ -252,13 +254,8 @@ fun PlaylistDetailScreen(
                                 if (isTv) {
                                     Modifier
                                         .onFocusChanged { infoFocused = it.isFocused }
-                                        .background(
-                                            if (infoFocused) {
-                                                MaterialTheme.colorScheme.primary.copy(alpha = 0.10f)
-                                            } else {
-                                                Color.Transparent
-                                            },
-                                        )
+                                        // The card's own shape and the 2 dp accent ring.
+                                        .settingsRowCard(infoFocused)
                                         .focusable()
                                 } else {
                                     Modifier
@@ -339,13 +336,8 @@ fun PlaylistDetailScreen(
                                 if (isTv) {
                                     Modifier
                                         .onFocusChanged { permsFocused = it.isFocused }
-                                        .background(
-                                            if (permsFocused) {
-                                                MaterialTheme.colorScheme.primary.copy(alpha = 0.10f)
-                                            } else {
-                                                Color.Transparent
-                                            },
-                                        )
+                                        // The card's own shape and the 2 dp accent ring.
+                                        .settingsRowCard(permsFocused)
                                         .focusable()
                                 } else {
                                     Modifier
@@ -806,13 +798,9 @@ private fun ActionRow(
         modifier = Modifier
             .fillMaxWidth()
             .onFocusChanged { focused = it.isFocused }
-            .background(
-                if (focused) {
-                    accent.copy(alpha = 0.16f)
-                } else {
-                    Color.Transparent
-                },
-            )
+            // Shaped fill plus the 2 dp accent ring, as on every settings row
+            // (it was a square wash with no ring on a rounded card).
+            .settingsRowCard(focused)
             // Guarded instead of clickable(enabled = !running) so the row
             // keeps its D-pad focus stop while a run is in flight; a disabled
             // clickable drops out of focus traversal entirely.

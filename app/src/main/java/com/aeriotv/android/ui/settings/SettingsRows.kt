@@ -796,6 +796,20 @@ fun Modifier.dpadFocusWash(tint: androidx.compose.ui.graphics.Color = MaterialTh
  * the element's measured size never changes on focus. Place AFTER
  * clip/background, BEFORE clickable.
  */
+/**
+ * Focus treatment for a full-width row that sits in a settings card: the
+ * same shaped fill and 2 dp accent ring [SettingsRowContainer] draws (the
+ * card's radius on TV, first/last-row corners on phones), so a hand-built
+ * row never shows a square wash on a rounded card.
+ */
+@Composable
+fun Modifier.settingsRowFocusCard(): Modifier {
+    var focused by remember { mutableStateOf(false) }
+    return this
+        .onFocusChanged { focused = it.isFocused }
+        .settingsRowCard(focused)
+}
+
 @Composable
 fun Modifier.dpadFocusRing(
     shape: androidx.compose.ui.graphics.Shape,

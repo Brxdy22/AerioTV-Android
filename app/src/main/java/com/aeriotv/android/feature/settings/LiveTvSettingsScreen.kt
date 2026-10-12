@@ -69,7 +69,7 @@ import com.aeriotv.android.ui.settings.SettingsSubPageHost
 import com.aeriotv.android.ui.settings.SettingsToggleRow
 import com.aeriotv.android.ui.settings.settingsCountSummary
 import com.aeriotv.android.ui.settings.settingsFormWidth
-import com.aeriotv.android.ui.settings.dpadFocusWash
+import com.aeriotv.android.ui.settings.settingsRowFocusCard
 import com.aeriotv.android.ui.settings.rememberIsTvDevice
 import com.aeriotv.android.ui.theme.textAccent
 
@@ -482,7 +482,7 @@ fun LiveTvSettingsScreen(
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .dpadFocusWash()
+                            .settingsRowFocusCard()
                             .clickable(enabled = palette.masterEnabled) { viewModel.resetCategoryPalette() }
                             .alpha(if (palette.masterEnabled) 1f else 0.4f)
                             .padding(horizontal = 16.dp, vertical = 14.dp),

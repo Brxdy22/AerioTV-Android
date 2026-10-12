@@ -78,7 +78,7 @@ import com.aeriotv.android.ui.settings.SettingsSection
 import com.aeriotv.android.ui.settings.SettingsSubPageHost
 import com.aeriotv.android.ui.settings.SettingsTextField
 import com.aeriotv.android.ui.settings.settingsFormWidth
-import com.aeriotv.android.ui.settings.dpadFocusWash
+import com.aeriotv.android.ui.settings.settingsRowFocusCard
 import com.aeriotv.android.core.preferences.TEXT_SCALE_MAX
 import com.aeriotv.android.core.preferences.TEXT_SCALE_MIN
 import com.aeriotv.android.ui.theme.AppTheme
@@ -476,7 +476,7 @@ internal fun ThemeRow(
 ) {
     Row(
         modifier = modifier
-            .dpadFocusWash()
+            .settingsRowFocusCard()
             .clickable(onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -567,7 +567,7 @@ private fun CustomAccentRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .dpadFocusWash()
+            .settingsRowFocusCard()
             .clickable {
                 val next = !enabled
                 onToggle(next)
@@ -795,7 +795,7 @@ internal fun ToggleRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .dpadFocusWash()
+            .settingsRowFocusCard()
             .clickable { onCheckedChange(!checked) }
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -1036,7 +1036,7 @@ internal fun CategoryPaletteRow(
     val swatch = parseHex(hex)
     Row(
         modifier = modifier
-            .dpadFocusWash()
+            .settingsRowFocusCard()
             .clickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -1082,7 +1082,7 @@ internal fun AddMoreCategoriesRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .dpadFocusWash()
+            .settingsRowFocusCard()
             .clickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,

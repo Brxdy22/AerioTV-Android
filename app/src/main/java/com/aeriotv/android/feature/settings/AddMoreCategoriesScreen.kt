@@ -265,7 +265,7 @@ private fun AdditionalBucketRow(
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
             .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.4f))
-            .dpadFocusWash()
+            .dpadFocusRing(RoundedCornerShape(12.dp), washTint = MaterialTheme.colorScheme.primary)
             .clickable { onToggle(!enabled) }
             .padding(horizontal = 14.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -312,7 +312,7 @@ private fun CustomEntryRow(
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
             .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.4f))
-            .dpadFocusWash()
+            .dpadFocusRing(RoundedCornerShape(12.dp), washTint = MaterialTheme.colorScheme.primary)
             .clickable(onClick = onEdit)
             .padding(horizontal = 14.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
