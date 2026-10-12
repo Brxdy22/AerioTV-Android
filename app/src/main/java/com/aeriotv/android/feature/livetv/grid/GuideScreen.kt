@@ -530,15 +530,22 @@ fun GuideScreen(
     // Streamer empty-guide-at-launch diagnosis: once per process, state at
     // the first non-empty row install (catalog, coverage of now, window).
     LaunchedEffect(rows) {
-        if (rows.isEmpty || !RetainedGuideGrid.markFirstPaintLogged()) return@LaunchedEffect
-        val now = System.currentTimeMillis()
+        if (rows.isEmpty) return@LaunchedEffect
         val cat = state.epgByChannel
+        // Two one-shot lines: the first row install (may precede the cached
+        // catalog by about 1.5 s on the Streamer) and the first with programs.
+        val label = when {
+            RetainedGuideGrid.markFirstPaintLogged() -> "first paint"
+            cat is GuideCatalog && RetainedGuideGrid.markFirstCatalogPaintLogged() -> "first paint with programs"
+            else -> return@LaunchedEffect
+        }
+        val now = System.currentTimeMillis()
         val withNow = rows.channels.count { ch ->
             cat[ch.guideMatchKey]?.any { now >= it.startMillis && now < it.endMillis } == true
         }
         android.util.Log.i(
             "AerioTV",
-            "[GUIDE] first paint: catalog=${if (cat is GuideCatalog) "built" else "none"} " +
+            "[GUIDE] $label: catalog=${if (cat is GuideCatalog) "built" else "none"} " +
                 "catalogChannels=${cat.size} rows=${rows.size} rowsWithNow=$withNow " +
                 "windowStart=${rows.windowStartMs} windowEnd=${rows.windowEndMs} " +
                 "viewportStart=${grid.viewportStartMs} now=$now " +
@@ -1810,6 +1817,10 @@ internal object RetainedGuideGrid {
 
     /** True exactly once per process. */
     fun markFirstPaintLogged(): Boolean = firstPaintLogged.compareAndSet(false, true)
+    private val firstCatalogPaintLogged = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** True exactly once per process. */
+    fun markFirstCatalogPaintLogged(): Boolean = firstCatalogPaintLogged.compareAndSet(false, true)
 
     fun take(favoritesOnly: Boolean, initialViewportStartMs: Long): GuideGridState {
         val kept = synchronized(held) { held.remove(favoritesOnly) }

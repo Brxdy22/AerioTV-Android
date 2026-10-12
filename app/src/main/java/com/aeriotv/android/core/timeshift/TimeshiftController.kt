@@ -37,6 +37,10 @@ class TimeshiftController @Inject constructor(
     private val prefs: AppPreferences,
 ) {
     companion object {
+        /** Retries for a kept fill's first open that meets a 503. */
+        private const val OPEN_BUSY_RETRIES = 4
+        private const val OPEN_BUSY_RETRY_MS = 2_000L
+
         private const val TAG = "TimeshiftController"
 
         /** Retention as a USER concept died in the 2026-07-11 settings
@@ -418,6 +422,8 @@ class TimeshiftController @Inject constructor(
     private fun startRetainedFill(session: RetainedSession) {
         session.fillJob = fillScope.launch {
             var attempts = 0
+            var everConnected = false
+            var openBusyRetries = 0
             while (currentCoroutineContext().isActive && !session.writer.closed) {
                 var endReason: String? = null
                 try {
@@ -433,6 +439,7 @@ class TimeshiftController @Inject constructor(
                             return@use
                         }
                         attempts = 0
+                        everConnected = true
                         val src = resp.body?.byteStream()
                         if (src == null) {
                             endReason = "empty response"
@@ -453,6 +460,17 @@ class TimeshiftController @Inject constructor(
                     Log.w(TAG, "retained fill error for ${session.channelName}: $t")
                 }
                 if (!currentCoroutineContext().isActive || session.writer.closed) return@launch
+                // A keep that opens right after the player stopped (the mini
+                // close) can meet a 503 while the server still holds the
+                // player's slot (Streamer 2026-10-12: released 0.3 s after
+                // the keep). Before the first successful open, a 503 is
+                // retried a few times instead of ending the keep.
+                if (endReason == "http 503" && !everConnected && openBusyRetries < OPEN_BUSY_RETRIES) {
+                    openBusyRetries++
+                    Log.i(APP_TAG, "[RETAIN] kept fill for ${session.channelName}: http 503 on open, retry $openBusyRetries/$OPEN_BUSY_RETRIES")
+                    kotlinx.coroutines.delay(OPEN_BUSY_RETRY_MS)
+                    continue
+                }
                 endReason?.let { reason ->
                     releaseRetainedAfterFillEnd(session, reason)
                     return@launch
