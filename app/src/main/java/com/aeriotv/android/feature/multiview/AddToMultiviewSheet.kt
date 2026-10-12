@@ -845,7 +845,14 @@ fun AddToMultiviewSheet(
     // (for the grid "Add streams" path) keep playing; the player flow then
     // relies on its Play button, not BACK, to commit. This is the BackHandler
     // the header comment ("BACK to dismiss") always promised but never wired.
-    BackHandler(onBack = onDismiss)
+    // Back, swipe down and the scrim apply the selection exactly like Play
+    // (Apple TV parity, 2026-10-12); only the explicit Cancel control reverts.
+    // With nothing launchable (fewer than two tiles from the player, or the
+    // Swap Stream picker) they just close and keep what was toggled.
+    val applyAndClose: () -> Unit = {
+        if (swapTargetTileId == null && canLaunch) onLaunch() else onDismiss()
+    }
+    BackHandler(onBack = applyAndClose)
     if (isTvDevice) {
         androidx.compose.runtime.DisposableEffect(Unit) {
             com.aeriotv.android.ui.tv.TvFocusTrace.player("sheet open AddToMultiview")
@@ -856,7 +863,7 @@ fun AddToMultiviewSheet(
         // onDismissRequest KEEPS selections (onDismiss); the "Cancel" text
         // button is the only revert path (onCancel).
         Dialog(
-            onDismissRequest = onDismiss,
+            onDismissRequest = applyAndClose,
             properties = DialogProperties(usePlatformDefaultWidth = false),
         ) {
             // TV: Back that closes the IME never reaches Compose, so watch the IME
@@ -897,7 +904,7 @@ fun AddToMultiviewSheet(
         // Phone / tablet: native bottom sheet. Swipe-to-dismiss KEEPS selections
         // (onDismiss); the "Cancel" text button reverts (onCancel).
         ModalBottomSheet(
-            onDismissRequest = onDismiss,
+            onDismissRequest = applyAndClose,
             sheetState = sheetState,
             containerColor = MaterialTheme.colorScheme.background,
             content = body,
