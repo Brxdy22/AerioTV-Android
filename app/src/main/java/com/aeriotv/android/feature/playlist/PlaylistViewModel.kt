@@ -1675,7 +1675,7 @@ class PlaylistViewModel @Inject constructor(
                     epgRefreshStatus = when {
                         outcome == null -> ActionStatus.Failure("No EPG source configured")
                         outcome.isSuccess -> ActionStatus.Success(
-                            "EPG updated (${outcome.getOrThrow()} programmes)",
+                            "EPG updated (${outcome.getOrThrow()} programs)",
                         )
                         else -> ActionStatus.Failure(
                             "EPG refresh failed: ${LogSanitizer.redact(outcome.exceptionOrNull()?.message ?: "unknown error")}",
