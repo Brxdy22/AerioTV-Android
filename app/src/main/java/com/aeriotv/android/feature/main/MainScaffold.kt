@@ -275,6 +275,26 @@ fun MainScaffold(
     }
     // Multiview staging dock card + sheet (phones and tablets, Logan 2026-10-06).
     val multiviewStore = com.aeriotv.android.feature.multiview.rememberMultiviewStoreHandle()
+    // A staged set that holds exactly one live channel plays in the standard
+    // single player, not a one-tile Multiview (Logan 2026-10-11): every Play
+    // path below (TV banner, dock card, sheet Play Here) reads this wrapper.
+    @Suppress("NAME_SHADOWING")
+    val onLaunchMultiview: () -> Unit = launch@{
+        val staged = multiviewStore.selected.value
+        val only = staged.singleOrNull()
+        if (only != null && only.kind == com.aeriotv.android.feature.multiview.TileKind.Live) {
+            val channel = state.channels.firstOrNull { it.id == only.id }
+            if (channel != null) {
+                android.util.Log.i("AerioMV", "[MV] staged single ${channel.name}: standard player")
+                com.aeriotv.android.feature.multiview.MultiviewBackground.stop()
+                multiviewStore.clear()
+                multiviewStore.setStaging(false)
+                onChannelClick(channel)
+                return@launch
+            }
+        }
+        onLaunchMultiview()
+    }
     var showMultiviewSheet by remember { mutableStateOf(false) }
     val favoritesVm: FavoritesViewModel = hiltViewModel()
     // null until the DB emits: on the phone, backing out of the player
@@ -552,6 +572,16 @@ fun MainScaffold(
     }
     val playStagedOnReceiver: () -> Unit = playOnReceiver@{
         showMultiviewSheet = false
+        // One staged channel casts as a normal channel, not a one-tile Multiview.
+        val single = multiviewStore.selected.value.singleOrNull()
+            ?.takeIf { it.kind == com.aeriotv.android.feature.multiview.TileKind.Live }
+            ?.let { t -> state.channels.firstOrNull { it.id == t.id } }
+        if (single != null) {
+            multiviewStore.clear()
+            multiviewStore.setStaging(false)
+            onCastChannel(single)
+            return@playOnReceiver
+        }
         com.aeriotv.android.feature.multiview.MultiviewBackground.stop()
         if (!mvNativeReceiver) {
             // Web receiver: the phone composites the grid and casts one stream.
@@ -574,7 +604,8 @@ fun MainScaffold(
     }
     // Card Play: Play Here, or the play-where prompt when the TV app can take it.
     val playStagedMultiview: () -> Unit = {
-        if (mvReceiverName == null) playStagedHere()
+        // One staged channel: the single-player path runs its own play-where prompt.
+        if (mvReceiverName == null || multiviewStore.selected.value.size == 1) playStagedHere()
         else PlayWhereRouter.route(castSender, "Multiview", playStagedHere, playStagedOnReceiver)
     }
     if (showMultiviewSheet) {
@@ -1668,6 +1699,9 @@ fun MainScaffold(
                         com.aeriotv.android.feature.cast.CastTransportCard(
                             tabletWidth = tabletCardWidth,
                             multiviewCast = multiviewCast,
+                            compositeHeaders = if (mvWebReceiver) ({
+                                com.aeriotv.android.core.network.PlaybackHeaders.forPlaylist(state.playlist)
+                            }) else null,
                             castSender = castSender,
                             companionRemote = companionRemote,
                             channels = state.channels,

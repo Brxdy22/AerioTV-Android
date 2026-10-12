@@ -80,6 +80,9 @@ fun CastTransportCard(
     /** Phone-composited Multiview on a web receiver (2026-10-06): the sheet
      *  shows its grid preview (tap a tile for its audio). */
     multiviewCast: com.aeriotv.android.core.cast.multiview.MultiviewCastController? = null,
+    /** Web receiver only: the playlist headers a composite started from the
+     *  card's Add Channel uses. Null hides Add Channel (Logan 2026-10-11). */
+    compositeHeaders: (() -> Map<String, String>)? = null,
 ) {
     val castState by castSender.state.collectAsStateWithLifecycle()
     val castContent by castSender.content.collectAsStateWithLifecycle()
@@ -282,6 +285,19 @@ fun CastTransportCard(
         )
     } else emptyList()
 
+    // Add Channel (Logan 2026-10-11): a single live cast becomes a 2-tile
+    // composite, a composite gains a tile; hidden at the composite tile cap.
+    val mvMax = com.aeriotv.android.core.cast.multiview.MultiviewCompositeLayout.MAX_TILES
+    val canAddChannel = compositeHeaders != null && multiviewCast != null && !isCompanion &&
+        nativeMultiview == null && switchingTo == null && hasContent &&
+        (if (isComposite) (compositeSession?.tiles?.size ?: 0) < mvMax else currentChannel != null)
+    var addPickerOpen by remember { mutableStateOf(false) }
+    val openAddChannel: () -> Unit = {
+        Log.i(TAG, "[MV-CAST] Add Channel opened (${if (isComposite) "composite" else "single cast"})")
+        sheetOpen = false
+        addPickerOpen = true
+    }
+
     fun flipChannel(delta: Int) {
         val idx = channels.indexOfFirst { it.id == currentChannel?.id }
         if (idx < 0) return
@@ -375,6 +391,51 @@ fun CastTransportCard(
                 if (isCompanion) companionRemote.togglePlayPause() else castSender.togglePlayPause()
             },
             onStop = { endSession() },
+            onAddChannel = if (canAddChannel) openAddChannel else null,
+        )
+    }
+
+    if (addPickerOpen && multiviewCast != null && compositeHeaders != null) {
+        val store = com.aeriotv.android.feature.multiview.rememberMultiviewStoreHandle()
+        val composite = isComposite
+        val seedChannel = if (composite) null else currentChannel
+        val baseTiles = remember {
+            if (composite) compositeSession?.tiles.orEmpty()
+            else listOfNotNull(seedChannel?.let { com.aeriotv.android.feature.multiview.MultiviewTile.live(it) })
+        }
+        val snapshot = remember { store.selected.value to store.audioFocusedIndex.value }
+        remember {
+            store.restore(baseTiles, if (composite) compositeSession?.focused ?: 0 else 0)
+            true
+        }
+        fun applyPicks() {
+            addPickerOpen = false
+            val picked = multiviewCast.castableTiles(store.selected.value)
+            val baseIds = baseTiles.map { it.id }.toSet()
+            if (composite) {
+                // Joins the running composite in place (no receiver reload).
+                val pickedIds = picked.map { it.id }.toSet()
+                baseTiles.filter { it.id !in pickedIds }.forEach { multiviewCast.toggleTile(it) }
+                picked.filter { it.id !in baseIds }.forEach { multiviewCast.toggleTile(it) }
+                Log.i(TAG, "[MV-CAST] Add Channel applied: composite ${picked.size} tiles")
+            } else if (picked.size >= 2) {
+                val tiles = picked.take(mvMax)
+                Log.i(TAG, "[MV-CAST] Add Channel: single cast -> composite ${tiles.joinToString { it.displayName }}")
+                if (multiviewCast.start(tiles, compositeHeaders(), 0)) store.setStaging(false)
+                else store.restore(snapshot.first, snapshot.second)
+            } else {
+                store.restore(snapshot.first, snapshot.second)
+            }
+        }
+        com.aeriotv.android.feature.multiview.AddToMultiviewSheet(
+            currentChannel = seedChannel,
+            onLaunch = { applyPicks() },
+            onCancel = {
+                addPickerOpen = false
+                store.restore(snapshot.first, snapshot.second)
+            },
+            onDismiss = { applyPicks() },
+            multiviewStore = store,
         )
     }
 
@@ -487,8 +548,11 @@ fun CastTransportCard(
                                 }
                             }
                         },
+                        onAddChannel = if (canAddChannel) openAddChannel else null,
                     )
                 }
+            } else if (canAddChannel) {
+                { com.aeriotv.android.feature.cast.MultiviewAddChannelRow(openAddChannel) }
             } else null,
             inlineSkipEnabled = castCanSkip || position.canSeek || remoteState.canSeek,
             canSwitchStream = canSwitchStream,

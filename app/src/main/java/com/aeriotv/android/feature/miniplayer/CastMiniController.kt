@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Cast
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Pause
@@ -72,6 +73,8 @@ fun CastMiniController(
     /** Tablets draw the tab pill's chrome behind the row instead. */
     containerColor: androidx.compose.ui.graphics.Color = MaterialTheme.colorScheme.surface,
     horizontalPadding: androidx.compose.ui.unit.Dp = 12.dp,
+    /** Cast "Add Channel" (Logan 2026-10-11): a + beside the X; null hides it. */
+    onAddChannel: (() -> Unit)? = null,
 ) {
     Row(
         modifier = modifier
@@ -140,6 +143,15 @@ fun CastMiniController(
                 Icon(
                     imageVector = if (isPlaying) Icons.Filled.Pause else Icons.Filled.PlayArrow,
                     contentDescription = if (isPlaying) "Pause" else "Play",
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+            }
+        }
+        if (onAddChannel != null) {
+            IconButton(onClick = onAddChannel) {
+                Icon(
+                    imageVector = Icons.Filled.Add,
+                    contentDescription = "Add Channel",
                     tint = MaterialTheme.colorScheme.primary,
                 )
             }

@@ -45,6 +45,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.UnfoldMore
+import androidx.compose.material.icons.filled.Add
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -83,6 +84,8 @@ fun MultiviewCompositePreview(
     canSwitchStream: (tileId: String) -> Boolean = { false },
     /** Opens the Switch Stream sheet for the tile with this id. */
     onSwitchStream: (tileId: String) -> Unit = {},
+    /** The Multiview section's "Add Channel" row; null hides it (tile cap). */
+    onAddChannel: (() -> Unit)? = null,
 ) {
     val session by controller.session.collectAsStateWithLifecycle()
     val count = session?.tiles?.size ?: 0
@@ -153,21 +156,28 @@ fun MultiviewCompositePreview(
                 }
             },
         )
-        // Drop-target outline while dragging (the local Multiview's drop
-        // cue), or the armed tile while Move Tile waits for its target.
-        val target = if (dragTarget >= 0 && dragTarget != dragFrom) dragTarget else movingFrom
-        if (target >= 0 && viewW > 0 && count > 0) {
-            val cell = MultiviewCompositeLayout.tileRects(count, style.padding, mode = layoutMode).getOrNull(target)
-            if (cell != null) {
-                val density = LocalDensity.current
-                val sx = viewW / MultiviewCompositeLayout.WIDTH.toFloat()
-                val sy = viewH / MultiviewCompositeLayout.HEIGHT.toFloat()
+        // The pressed tile carries the Move Tile ring (primary, 3 dp, same as
+        // the local Multiview's relocating tile) from the long-press threshold
+        // until release (Logan 2026-10-11); the drop target keeps its tertiary
+        // outline, and the armed Move Tile tile keeps the ring too.
+        val heldTile = if (dragFrom >= 0) dragFrom else movingFrom
+        val dropTile = if (dragTarget >= 0 && dragTarget != dragFrom) dragTarget else -1
+        if (viewW > 0 && count > 0 && (heldTile >= 0 || dropTile >= 0)) {
+            val rects = MultiviewCompositeLayout.tileRects(count, style.padding, mode = layoutMode)
+            val density = LocalDensity.current
+            val sx = viewW / MultiviewCompositeLayout.WIDTH.toFloat()
+            val sy = viewH / MultiviewCompositeLayout.HEIGHT.toFloat()
+            listOf(
+                heldTile to MaterialTheme.colorScheme.primary,
+                dropTile to MaterialTheme.colorScheme.tertiary,
+            ).forEach { (idx, ring) ->
+                val cell = rects.getOrNull(idx) ?: return@forEach
                 with(density) {
                     Box(
                         Modifier
                             .offset { IntOffset((cell.left * sx).toInt(), (cell.top * sy).toInt()) }
                             .size((cell.width * sx).toDp(), (cell.height * sy).toDp())
-                            .border(3.dp, MaterialTheme.colorScheme.tertiary),
+                            .border(3.dp, ring),
                     )
                 }
             }
@@ -340,6 +350,7 @@ fun MultiviewCompositePreview(
     }
     // Layout row: the options Settings > Player > Multiview offers for this
     // tile count; the composite re-lays out live and the preview follows.
+    if (onAddChannel != null) MultiviewAddChannelRow(onAddChannel)
     val options = MultiviewCompositeLayout.layoutOptions(count)
     if (count > 0 && options.size > 1) {
         MultiviewLayoutRow(layoutMode, options) { mode ->
@@ -391,6 +402,37 @@ fun MultiviewCompositePreview(
             },
             guard = menuGuard,
             onDismiss = { menuIndex = -1 },
+        )
+    }
+}
+
+/**
+ * The cast sheet's "Add Channel" row (Logan 2026-10-11): opens the Multiview
+ * add-channel picker. Above Layout on a composite; the only Multiview row on
+ * a single-channel cast. Same frame as [MultiviewLayoutRow].
+ */
+@Composable
+internal fun MultiviewAddChannelRow(onClick: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = 14.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(onClick = onClick)
+            .padding(start = 8.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            "Add Channel",
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onBackground,
+            modifier = Modifier.weight(1f),
+        )
+        Icon(
+            androidx.compose.material.icons.Icons.Filled.Add,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(20.dp),
         )
     }
 }
