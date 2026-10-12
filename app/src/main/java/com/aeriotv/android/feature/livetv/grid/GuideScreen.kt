@@ -931,7 +931,12 @@ fun GuideScreen(
     val hostAction: (com.aeriotv.android.core.remote.GuideRemoteAction) -> Boolean = { action ->
         when (action) {
             com.aeriotv.android.core.remote.GuideRemoteAction.FOCUS_GROUP_PILLS -> openGroupMenu()
-            com.aeriotv.android.core.remote.GuideRemoteAction.RESUME_PLAYER -> { if (miniActive) miniPlayerVm.session.requestResume(); true }
+            com.aeriotv.android.core.remote.GuideRemoteAction.RESUME_PLAYER -> {
+                // A Multiview left with Back to Guide: Play/Pause returns to it.
+                if (isTv && com.aeriotv.android.feature.multiview.MultiviewBackground.state.value != null) onLaunchMultiview()
+                else if (miniActive) miniPlayerVm.session.requestResume()
+                true
+            }
             com.aeriotv.android.core.remote.GuideRemoteAction.CLOSE_MINI_PLAYER -> { if (miniActive) miniPlayerVm.session.dismiss(); true }
             com.aeriotv.android.core.remote.GuideRemoteAction.PROGRAM_INFO -> {
                 val row = grid.focusRow; val cell = grid.focusedCell()
@@ -1032,6 +1037,12 @@ fun GuideScreen(
                 // group stays as picked, matching Apple TV's Menu (now + top only).
             }
         }
+    }
+    // TV, Multiview playing in the background (Back to Guide): Back returns
+    // to it. Declared after the ladder so it takes Back first.
+    val mvBackground by com.aeriotv.android.feature.multiview.MultiviewBackground.state.collectAsStateWithLifecycle()
+    BackHandler(enabled = isTv && tabActive && mvBackground != null && !groupSidebarOpen && menuFor == null && programInfoTarget == null && recordTarget == null) {
+        onLaunchMultiview()
     }
 
     // Phone drawer rows: collections where their pill placement puts them,
@@ -1281,7 +1292,10 @@ fun GuideScreen(
                 // requester landed on the leftmost pill and, with
                 // selection-follows-focus, switched to Live TV.
                 onLeaveTop = {
-                    val stagingUp = isTv && stagingOn && stagedMultiview.isNotEmpty() &&
+                    // The background Multiview banner shares the Play slot.
+                    val bannerUp = (stagingOn && stagedMultiview.isNotEmpty()) ||
+                        com.aeriotv.android.feature.multiview.MultiviewBackground.state.value != null
+                    val stagingUp = isTv && bannerUp &&
                         runCatching { stagingPlayFocus.requestFocus() }.getOrDefault(false)
                     com.aeriotv.android.ui.tv.TvFocusTrace.guide("leave-top staging-banner=$stagingUp")
                     if (stagingUp) true else when {
@@ -1522,7 +1536,12 @@ fun GuideScreen(
         val key = reminderKey(channel.name, cell.title, cell.startMillis)
         val isFavorite = channel.id in favoriteIds
         val isRecent = channel.id in recentChannelIds
-        val atCap = stagedMultiview.size >= 4
+        // A Multiview running in the background takes adds up to its own
+        // tile limit (MultiviewBackground.toggleTile), not the staging 4.
+        val mvCap = if (com.aeriotv.android.feature.multiview.MultiviewBackground.state.value != null) {
+            multiviewStore.maxTiles
+        } else 4
+        val atCap = stagedMultiview.size >= mvCap
         val canAddToMultiview = channel.url.isNotBlank() && (!atCap || inMultiview) && !mvPlayingHere
         val canRecord = notEnded && (isLive || canRecordToServer)
         val replayable = !cell.isPlaceholder && channel.canReplay(cell, nowMs)

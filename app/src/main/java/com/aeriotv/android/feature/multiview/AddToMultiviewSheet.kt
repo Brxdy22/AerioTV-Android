@@ -127,6 +127,11 @@ fun AddToMultiviewSheet(
     // id instead of appending a new one, and closes on the first pick. Null
     // keeps the original add behaviour, so existing call sites are unchanged.
     swapTargetTileId: String? = null,
+    // Deselect (2026-10-12, Apple parity): a checked row picked again leaves
+    // the set. Over a running Multiview the host removes the tile in place
+    // (MultiviewScreen.removeTileAt, fixed slots) and decides what removing
+    // the sole tile means; null = plain store removal (staging, player flow).
+    onRemoveTile: ((String) -> Unit)? = null,
     multiviewStore: MultiviewStoreHandle = rememberMultiviewStoreHandle(),
     playlistVm: PlaylistViewModel = hiltViewModel(),
     settingsVm: SettingsViewModel = hiltViewModel(),
@@ -162,6 +167,13 @@ fun AddToMultiviewSheet(
     val recentIds by settingsVm.recentChannelIds.collectAsStateWithLifecycle(initialValue = emptyList())
     val selectedIds = selected.map { it.id }.toSet()
     val scope = rememberCoroutineScope()
+    // Picker pills "Show Subtitles" / "Show Descriptions" (2026-10-12):
+    // extra lines on every channel row, remembered across launches.
+    val showSubtitles by settingsVm.multiviewPickerShowSubtitles.collectAsStateWithLifecycle(initialValue = false)
+    val showDescriptions by settingsVm.multiviewPickerShowDescriptions.collectAsStateWithLifecycle(initialValue = false)
+    val removeSelected: (String) -> Unit = { id ->
+        onRemoveTile?.invoke(id) ?: multiviewStore.removeTile(id)
+    }
 
     // Source switcher (Phase 2). Channels keeps the existing channel picker;
     // Movies / Series / Recordings draw from the On Demand + DVR view models so
@@ -319,10 +331,11 @@ fun AddToMultiviewSheet(
         return ok
     }
     val commitChannel: (M3UChannel, Boolean) -> Unit = { channel, isSel ->
-        if (swapTargetTileId != null) {
-            commitTile(MultiviewTile.live(channel))
-        } else {
-            gateAdd(!isSel) { multiviewStore.toggle(channel) }
+        when {
+            swapTargetTileId != null -> commitTile(MultiviewTile.live(channel))
+            // Picking a checked row again deselects it (fixed-slot removal).
+            isSel -> removeSelected(channel.id)
+            else -> gateAdd(true) { multiviewStore.toggle(channel) }
         }
     }
     // FORM-FACTOR SPLIT: phones/tablets get the native ModalBottomSheet (with
@@ -389,12 +402,34 @@ fun AddToMultiviewSheet(
                 if (hasSeries) add(PickerSource.Series)
                 if (hasRecordings) add(PickerSource.Recordings)
             }
-            if (availableSources.size > 1) {
+            // Show Subtitles / Show Descriptions ride this row (right-aligned
+            // on TV and tablet, wrapped onto their own row below on phones),
+            // so the row renders even when Channels is the only source.
+            val wideRow = isTvDevice ||
+                androidx.compose.ui.platform.LocalConfiguration.current.smallestScreenWidthDp >= 600
+            val detailPills: @Composable () -> Unit = {
+                PickerTogglePill(
+                    label = "Show Subtitles",
+                    selected = showSubtitles,
+                    onClick = { settingsVm.setMultiviewPickerShowSubtitles(!showSubtitles) },
+                )
+                PickerTogglePill(
+                    label = "Show Descriptions",
+                    selected = showDescriptions,
+                    onClick = { settingsVm.setMultiviewPickerShowDescriptions(!showDescriptions) },
+                )
+            }
+            // Pill rows keep start and vertical room inside the LazyRow's
+            // clip, so a selected or focused first pill is never cut at its
+            // left edge (Apple TV showed "Channels" clipped by the inset).
+            val pillRowPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 4.dp)
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
                 LazyRow(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 4.dp),
-                    contentPadding = PaddingValues(end = 12.dp),
+                    modifier = Modifier.weight(1f),
+                    contentPadding = pillRowPadding,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
@@ -413,6 +448,20 @@ fun AddToMultiviewSheet(
                         )
                     }
                 }
+                if (wideRow) {
+                    Row(
+                        modifier = Modifier.padding(start = 4.dp, end = 12.dp, top = 4.dp, bottom = 4.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) { detailPills() }
+                }
+            }
+            if (!wideRow) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 2.dp, bottom = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) { detailPills() }
             }
 
             // Control row (Channels only): a search TOGGLE button to the LEFT of
@@ -497,7 +546,9 @@ fun AddToMultiviewSheet(
                     } else if (groups.size > 1) {
                         LazyRow(
                             modifier = Modifier.weight(1f),
-                            contentPadding = PaddingValues(end = 12.dp),
+                            // Start and vertical room so a selected or focused
+                            // first pill is not clipped by the row.
+                            contentPadding = PaddingValues(start = 4.dp, end = 12.dp, top = 4.dp, bottom = 4.dp),
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
@@ -563,6 +614,8 @@ fun AddToMultiviewSheet(
                                 ChannelPickerRow(
                                     channel = channel,
                                     nowTitle = now?.title.orEmpty(),
+                                    subtitle = if (showSubtitles) now?.subTitle.orEmpty() else "",
+                                    description = if (showDescriptions) now?.description.orEmpty() else "",
                                     selected = isSel,
                                     atCap = !isSel && atCapNow,
                                     onToggle = { commitChannel(channel, isSel) },
@@ -576,6 +629,8 @@ fun AddToMultiviewSheet(
                             ChannelPickerRow(
                                 channel = channel,
                                 nowTitle = now?.title.orEmpty(),
+                                subtitle = if (showSubtitles) now?.subTitle.orEmpty() else "",
+                                description = if (showDescriptions) now?.description.orEmpty() else "",
                                 selected = isSel,
                                 atCap = !isSel && atCapNow,
                                 onToggle = { commitChannel(channel, isSel) },
@@ -612,7 +667,10 @@ fun AddToMultiviewSheet(
                                 resolving = movieUuid in resolving,
                                 atCap = !isSel && atCapNow,
                                 onPick = {
-                                    if (isSel) return@VodPickerRow
+                                    if (isSel) {
+                                        if (swapTargetTileId == null) removeSelected(tileId)
+                                        return@VodPickerRow
+                                    }
                                     gateAdd(true) {
                                         scope.launch {
                                             resolving = resolving + movieUuid
@@ -703,7 +761,10 @@ fun AddToMultiviewSheet(
                                     resolving = ep.uuid in resolving,
                                     atCap = !isSel && atCapNow,
                                     onPick = {
-                                        if (isSel) return@VodPickerRow
+                                        if (isSel) {
+                                        if (swapTargetTileId == null) removeSelected(tileId)
+                                        return@VodPickerRow
+                                    }
                                         gateAdd(true) {
                                             scope.launch {
                                                 resolving = resolving + ep.uuid
@@ -764,7 +825,10 @@ fun AddToMultiviewSheet(
                                 resolving = false,
                                 atCap = !isSel && atCapNow,
                                 onPick = {
-                                    if (isSel) return@VodPickerRow
+                                    if (isSel) {
+                                        if (swapTargetTileId == null) removeSelected(tileId)
+                                        return@VodPickerRow
+                                    }
                                     gateAdd(true) {
                                         commitTile(
                                             MultiviewTile(
@@ -983,6 +1047,8 @@ private fun ChannelPickerRow(
     channel: M3UChannel,
     nowTitle: String,
     selected: Boolean,
+    subtitle: String = "",
+    description: String = "",
     atCap: Boolean,
     onToggle: () -> Unit,
     modifier: Modifier = Modifier,
@@ -1048,6 +1114,26 @@ private fun ChannelPickerRow(
                     overflow = TextOverflow.Ellipsis,
                 )
             }
+            // Show Subtitles: the program's subtitle line (Teamarr puts
+            // "Team 1 vs Team 2" here). Show Descriptions: two lines max.
+            if (subtitle.isNotBlank()) {
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onBackground,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            if (description.isNotBlank()) {
+                Text(
+                    text = description,
+                    style = MaterialTheme.typography.bodySmall.subtext(),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
         Spacer(Modifier.width(8.dp))
         Box(
@@ -1072,6 +1158,26 @@ private fun ChannelPickerRow(
             }
         }
     }
+}
+
+/** Picker detail toggle ("Show Subtitles" / "Show Descriptions"): a filter
+ *  chip like the source pills, with a check while on. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun PickerTogglePill(label: String, selected: Boolean, onClick: () -> Unit) {
+    FilterChip(
+        selected = selected,
+        onClick = onClick,
+        label = { Text(label, maxLines = 1, softWrap = false) },
+        leadingIcon = if (selected) {
+            { Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(16.dp)) }
+        } else null,
+        colors = FilterChipDefaults.filterChipColors(
+            selectedContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.22f),
+            selectedLabelColor = MaterialTheme.colorScheme.primary,
+            selectedLeadingIconColor = MaterialTheme.colorScheme.primary,
+        ),
+    )
 }
 
 /** Multiview picker content source. Mirrors iOS PickerSource. */

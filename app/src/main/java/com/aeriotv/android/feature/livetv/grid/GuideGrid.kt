@@ -462,7 +462,17 @@ fun GuideGrid(
                     }
                     true
                 }
-                else -> false
+                else -> {
+                    // Android#114: a learned button's In the Guide action.
+                    val learned = com.aeriotv.android.core.remote.LearnedButtons
+                        .current[event.nativeKeyEvent.keyCode]
+                        ?.guide?.takeIf { it != GuideRemoteAction.NONE }
+                    if (learned != null) {
+                        traceBy = "grid-learned"
+                        if (down && repeat == 0) runAction(learned)
+                        true
+                    } else false
+                }
             }
         } finally {
             Trace.endSection()

@@ -140,6 +140,13 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        // Android#114: the Learn Button dialog takes the next learnable press.
+        com.aeriotv.android.core.remote.LearnedButtons.onCapture?.let { capture ->
+            if (com.aeriotv.android.core.remote.LearnedButtons.isLearnable(event.keyCode)) {
+                if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) capture(event.keyCode)
+                return true
+            }
+        }
         if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0 &&
             (event.keyCode == KeyEvent.KEYCODE_DPAD_CENTER || event.keyCode == KeyEvent.KEYCODE_ENTER) &&
             isTelevisionDevice()
@@ -400,6 +407,10 @@ class MainActivity : ComponentActivity() {
             if (mediaSlot != null &&
                 dispatchPlayerAction(remoteMap.playerAction(mediaSlot))
             ) return true
+            // Android#114: a learned button's While Watching action.
+            com.aeriotv.android.core.remote.LearnedButtons.current[event.keyCode]?.let { b ->
+                if (event.repeatCount == 0 && dispatchPlayerAction(b.player)) return true
+            }
         }
         return super.dispatchKeyEvent(event)
     }
@@ -754,13 +765,16 @@ class MainActivity : ComponentActivity() {
     // already on their content rate before the first tune; #40 switches to the
     // content's resolution class so the TV does the upscaling. Distinct from
     // the FORBIDDEN frame-rate-matching pin (25Hz-override regression): these
-    // are explicit user choices, default off, and never driven by content
-    // frame rate. Playback-time refresh matching stays with the
-    // framework-arbitrated Surface.setFrameRate path.
+    // are explicit user choices, default off. Match Frame Rate (Android#134)
+    // pins only the 50 / 59.94 / 60 class at the CURRENT size; it never
+    // requests a sub-mode rate. The framework-arbitrated Surface.setFrameRate
+    // hint (API 31+) still runs alongside.
     // ------------------------------------------------------------------
 
     /** True while GH #40 matching is enabled in Settings. */
     private var matchContentResolutionEnabled = false
+    /** Android#134: refresh-rate matching, independent of resolution. */
+    private var matchFrameRateEnabled = false
     /** Non-zero once #40 switched the mode; cleared on restore. */
     private var resolutionModeApplied = false
     private var resMatchListener: androidx.media3.common.Player.Listener? = null
@@ -816,8 +830,9 @@ class MainActivity : ComponentActivity() {
      *  3:2 cadence that reads as slow motion - Logan, Streamer 2026-09-02). */
     private fun onContentRateRequested(rate: Float) {
         lastContentRate = rate
-        if (!matchContentResolutionEnabled || !isTelevisionDevice()) return
-        if (resolutionMatchUnsupported) return
+        // Android#134: gated by Match Frame Rate alone. The mode pick below
+        // keeps the current physical size, so this never changes resolution.
+        if (!matchFrameRateEnabled || !isTelevisionDevice()) return
         val player = resMatchPlayer ?: return
         if (!player.playWhenReady) return
         val disp = currentDisplay() ?: return
@@ -1002,6 +1017,11 @@ class MainActivity : ComponentActivity() {
             }
         }
         lifecycleScope.launch {
+            appPreferences.learnedRemoteButtons.collect {
+                com.aeriotv.android.core.remote.LearnedButtons.current = it
+            }
+        }
+        lifecycleScope.launch {
             appPreferences.skipWithoutControls.collect {
                 skipWithoutControls = it
                 com.aeriotv.android.feature.player.VodHiddenChromeScrub.skipWithoutControls = it
@@ -1040,9 +1060,26 @@ class MainActivity : ComponentActivity() {
         lifecycleScope.launch {
             appPreferences.matchContentResolution.collect { enabled ->
                 matchContentResolutionEnabled = enabled
-                if (!enabled) restoreDisplayMode()
-                else resMatchPlayer?.videoSize?.let { vs ->
+                if (!enabled) {
+                    restoreDisplayMode()
+                    // Rate matching survives on its own (Android#134).
+                    if (lastContentRate > 0f) onContentRateRequested(lastContentRate)
+                } else resMatchPlayer?.videoSize?.let { vs ->
                     if (vs.height > 0) applyContentResolutionMode(vs.width, vs.height)
+                }
+            }
+        }
+        lifecycleScope.launch {
+            appPreferences.matchFrameRate.collect { enabled ->
+                matchFrameRateEnabled = enabled
+                if (!enabled) {
+                    restoreDisplayMode()
+                    // Resolution matching survives on its own.
+                    resMatchPlayer?.videoSize?.let { vs ->
+                        if (vs.height > 0) applyContentResolutionMode(vs.width, vs.height)
+                    }
+                } else if (lastContentRate > 0f) {
+                    onContentRateRequested(lastContentRate)
                 }
             }
         }

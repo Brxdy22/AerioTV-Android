@@ -284,7 +284,9 @@ fun MultiviewScreen(
         }
     }
     val enterBackground: () -> Unit = {
-        if (!isTvDevice && selected.isNotEmpty() && backgroundRequest.value == null) {
+        // TV too since the Leave Multiview "Back to Guide" action (2026-10-12):
+        // the guide shows the background banner instead of the dock card.
+        if (selected.isNotEmpty() && backgroundRequest.value == null) {
             backgroundPositions.clear()
             selected.forEachIndexed { i, t ->
                 if (t.kind != TileKind.Live) tilePlayers[i]?.let { backgroundPositions[i] = it.currentPosition }
@@ -352,7 +354,9 @@ fun MultiviewScreen(
         when {
             relocatingIndex != null -> relocatingIndex = null
             fullscreenIndex != null -> fullscreenIndex = null
-            isTvDevice && selected.isNotEmpty() -> {
+            // Every form factor (2026-10-12), 2 or more tiles: Back to Guide,
+            // Exit Multiview, Cancel. A single tile exits directly.
+            selected.size >= 2 -> {
                 exitDialogOpen = true
                 exitGuard.arm()
             }
@@ -638,6 +642,10 @@ fun MultiviewScreen(
                 when {
                     relocatingIndex != null -> relocatingIndex = null
                     fullscreenIndex != null -> fullscreenIndex = null
+                    selected.size >= 2 -> {
+                        exitDialogOpen = true
+                        exitGuard.arm()
+                    }
                     else -> onClose()
                 }
             })
@@ -674,16 +682,19 @@ fun MultiviewScreen(
         TvActionMenuDialog(
             title = "Leave Multiview?",
             actions = listOf(
+                // Back to Guide (2026-10-12, replaces "Add streams": Add
+                // Channel lives in the tile menu): the tiles keep playing
+                // headless (MultiviewBackground) with their channels staged;
+                // the dock card (phone, tablet) or the guide banner (TV)
+                // returns to the grid.
                 TvMenuAction(
-                    label = "Add streams",
-                    icon = Icons.Filled.Add,
-                    // Reopen the picker over the running grid. Existing tiles
-                    // stay in the store and keep playing; the picker APPENDS.
-                    onClick = { addPickerOpen = true },
+                    label = "Back to Guide",
+                    icon = Icons.Filled.LiveTv,
+                    onClick = {
+                        exitDialogOpen = false
+                        enterBackground()
+                    },
                 ),
-                // "Back to TV Guide" removed (Logan 2026-08-31): with Add
-                // streams in this menu and on the grid, a keep-tiles-and-
-                // leave option just duplicated the system Back flow.
                 TvMenuAction(
                     label = "Exit Multiview",
                     icon = Icons.Outlined.Close,
@@ -719,6 +730,21 @@ fun MultiviewScreen(
             // Navigation.kt's hiltViewModel(parent) wiring.
             playlistVm = playlistVm,
             swapTargetTileId = swapTargetTileId,
+            // Deselecting a checked row removes that tile in place (fixed
+            // slots, removeTileAt). The sole remaining tile is never removed
+            // here: it stays selected with a "Last channel in the Multiview"
+            // toast (Apple decision 2026-10-12).
+            onRemoveTile = { id ->
+                val idx = selected.indexOfFirst { it.id == id }
+                if (idx >= 0) {
+                    if (selected.size <= 1) {
+                        // Apple parity: the last tile stays selected.
+                        android.widget.Toast.makeText(mvContext, "Last channel in the Multiview", android.widget.Toast.LENGTH_SHORT).show()
+                    } else {
+                        removeTileAt(idx)
+                    }
+                }
+            },
             onLaunch = { addPickerOpen = false; swapTargetTileId = null },
             onCancel = { addPickerOpen = false; swapTargetTileId = null },
             onDismiss = { addPickerOpen = false; swapTargetTileId = null },

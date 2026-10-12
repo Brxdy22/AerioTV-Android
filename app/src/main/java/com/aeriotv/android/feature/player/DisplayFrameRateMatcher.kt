@@ -94,7 +94,10 @@ object DisplayFrameRateMatcher {
          *  badge and Stream Info need it) and never request a display rate. */
         matchRate: Boolean = true,
     ): Any? {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return null
+        // Android#134: measure on every API level. Below S (Shield on
+        // Android 11) there is no Surface.setFrameRate, but the measured rate
+        // still drives MainActivity's Match Frame Rate mode pick through
+        // [onRateRequested].
         val deltasUs = ArrayDeque<Long>()
         var lastPtsUs = -1L
         var lastAppliedFps = 0f
@@ -147,7 +150,9 @@ object DisplayFrameRateMatcher {
                     lastRequestedRate = target
                     onRateRequested?.invoke(target)
                     val surface = surfaceView.holder.surface
-                    if (surface != null && surface.isValid) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                        surface != null && surface.isValid
+                    ) {
                         runCatching {
                             surface.setFrameRate(
                                 target,

@@ -412,8 +412,20 @@ class SettingsViewModel @Inject constructor(
         viewModelScope.launch { prefs.setMatchContentResolution(value) }
     }
 
+    /** Android#134: refresh-rate matching, independent of resolution. */
+    val matchFrameRate: Flow<Boolean> = prefs.matchFrameRate
+    fun setMatchFrameRate(value: Boolean) {
+        viewModelScope.launch { prefs.setMatchFrameRate(value) }
+    }
+
     fun setRemoteControlMap(map: com.aeriotv.android.core.remote.RemoteControlMap) {
         viewModelScope.launch { prefs.setRemoteControlMap(map.toJson()) }
+    }
+
+    /** Android#114: Learn Button entries. */
+    val learnedRemoteButtons = prefs.learnedRemoteButtons
+    fun setLearnedRemoteButtons(buttons: Collection<com.aeriotv.android.core.remote.LearnedButton>) {
+        viewModelScope.launch { prefs.setLearnedRemoteButtons(buttons) }
     }
     fun setAppleTVChannelFlip(value: Boolean) {
         viewModelScope.launch { prefs.setAppleTVChannelFlip(value) }
@@ -682,6 +694,15 @@ class SettingsViewModel @Inject constructor(
     val multiviewPerfWarningSuppressed: Flow<Boolean> = prefs.multiviewPerfWarningSuppressed
     fun setMultiviewPerfWarningSuppressed(value: Boolean) {
         viewModelScope.launch { prefs.setMultiviewPerfWarningSuppressed(value) }
+    }
+
+    val multiviewPickerShowSubtitles: Flow<Boolean> = prefs.multiviewPickerShowSubtitles
+    fun setMultiviewPickerShowSubtitles(value: Boolean) {
+        viewModelScope.launch { prefs.setMultiviewPickerShowSubtitles(value) }
+    }
+    val multiviewPickerShowDescriptions: Flow<Boolean> = prefs.multiviewPickerShowDescriptions
+    fun setMultiviewPickerShowDescriptions(value: Boolean) {
+        viewModelScope.launch { prefs.setMultiviewPickerShowDescriptions(value) }
     }
 
     // DVR (Phase 9b-3)

@@ -1853,10 +1853,15 @@ class PlaylistRepository @Inject constructor(
      * "id:none" rather than dropping out, so adding or removing one still
      * registers as a change.
      */
+    private val EPG_GRID_DECODER_REVISION = 2
+
     private fun epgSourcesFingerprint(sources: List<DispatcharrEpgSource>): String =
         sources
             .map { "${it.id}:${it.updatedAt?.takeIf { u -> u.isNotBlank() } ?: "none"}" }
             .sorted()
+            // Grid decoder revision: bumping it re-sweeps cached guides once.
+            // r2 = dummy-EPG artwork from custom_properties (Android#132).
+            .plus("grid-decoder:$EPG_GRID_DECODER_REVISION")
             .joinToString(",")
 
     /** Playlists we have already logged an unreadable sources list for, so the
@@ -4060,7 +4065,7 @@ private fun List<DispatcharrEpgEntry>.toProgrammes(): List<EPGProgramme> =
             isRepeat = entry.isPreviouslyShown,
             // Newer grids sometimes carry the programme icon; when they do the
             // banner / Program Info get real art with no detail fetch at all.
-            iconUrl = entry.icon?.takeIf { it.isNotBlank() },
+            iconUrl = entry.artworkUrl,
         )
     }
 

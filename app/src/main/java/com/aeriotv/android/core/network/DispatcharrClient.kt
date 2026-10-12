@@ -3395,10 +3395,36 @@ data class DispatcharrEpgEntry(
      *  slim grid normally strips it (only the detail endpoint has it), so this
      *  is a free upgrade, not something to rely on. */
     val icon: String? = null,
+    /** Free-form program properties. Dispatcharr dummy-EPG programs
+     *  (apps/output/dummy_epg.py dummy_program_to_api_dict) carry their
+     *  poster here as `icon` (and possibly `images`) instead of a top-level
+     *  icon (Android#132). */
+    @SerialName("custom_properties")
+    val customProperties: JsonObject? = null,
 ) {
     /** Best-effort coercion of the heterogeneous `id` field to Int. */
     val programIdInt: Int?
         get() = (id as? JsonPrimitive)?.intOrNull
+
+    /** Program artwork: top-level icon, else custom_properties.icon, else the
+     *  first usable custom_properties.images entry (string or {url}). */
+    val artworkUrl: String?
+        get() {
+            icon?.takeIf { it.isNotBlank() }?.let { return it }
+            val props = customProperties ?: return null
+            (props["icon"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+                ?.takeIf { it.isNotBlank() }?.let { return it }
+            val images = props["images"] as? JsonArray ?: return null
+            for (el in images) {
+                val url = when (el) {
+                    is JsonPrimitive -> el.takeIf { it.isString }?.content
+                    is JsonObject -> (el["url"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+                    else -> null
+                }
+                if (!url.isNullOrBlank()) return url
+            }
+            return null
+        }
 }
 
 /**

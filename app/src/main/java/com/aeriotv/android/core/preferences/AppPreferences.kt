@@ -515,6 +515,14 @@ class AppPreferences @Inject constructor(
         store.edit { it[KEY_REMOTE_CONTROL_MAP] = json }
     }
 
+    /** Android#114: buttons taught with Learn Button (LearnedButtons JSON).
+     *  Device-local and never synced: key codes belong to this box's remote. */
+    val learnedRemoteButtons: Flow<Map<Int, com.aeriotv.android.core.remote.LearnedButton>> =
+        store.data.map { com.aeriotv.android.core.remote.LearnedButtons.fromJson(it[KEY_REMOTE_LEARNED_BUTTONS]) }
+    suspend fun setLearnedRemoteButtons(buttons: Collection<com.aeriotv.android.core.remote.LearnedButton>) {
+        store.edit { it[KEY_REMOTE_LEARNED_BUTTONS] = com.aeriotv.android.core.remote.LearnedButtons.toJson(buttons) }
+    }
+
     /**
      * Whether THIS device shares its remote button map through Drive sync.
      *
@@ -651,6 +659,19 @@ class AppPreferences @Inject constructor(
         store.data.map { it[KEY_MATCH_CONTENT_RESOLUTION] ?: false }
     suspend fun setMatchContentResolution(value: Boolean) {
         store.edit { it[KEY_MATCH_CONTENT_RESOLUTION] = value }
+    }
+
+    /**
+     * Android#134: switch the display's refresh rate to the measured content
+     * rate (50 / 59.94 / 60 class) while keeping the CURRENT resolution.
+     * Independent of [matchContentResolution]. Before 0.5.12 the rate switch
+     * only ran as part of resolution matching, so an unset key inherits that
+     * toggle and existing users keep exactly what they had. Device-local.
+     */
+    val matchFrameRate: Flow<Boolean> =
+        store.data.map { it[KEY_MATCH_FRAME_RATE] ?: it[KEY_MATCH_CONTENT_RESOLUTION] ?: false }
+    suspend fun setMatchFrameRate(value: Boolean) {
+        store.edit { it[KEY_MATCH_FRAME_RATE] = value }
     }
 
     /**
@@ -1287,6 +1308,23 @@ class AppPreferences @Inject constructor(
     }
     suspend fun setMultiviewPerfWarningSuppressed(value: Boolean) {
         store.edit { it[KEY_MULTIVIEW_PERF_WARNING_SUPPRESSED] = value }
+    }
+
+    /** Add to Multiview picker "Show Subtitles" pill: each channel row adds
+     *  the airing program's subtitle (Teamarr carries "Team 1 vs Team 2"
+     *  there). Remembered across launches; default off. */
+    val multiviewPickerShowSubtitles: Flow<Boolean> =
+        store.data.map { it[KEY_MULTIVIEW_PICKER_SHOW_SUBTITLES] ?: false }
+    suspend fun setMultiviewPickerShowSubtitles(value: Boolean) {
+        store.edit { it[KEY_MULTIVIEW_PICKER_SHOW_SUBTITLES] = value }
+    }
+
+    /** Add to Multiview picker "Show Descriptions" pill: each channel row adds
+     *  the program description (two lines max). Default off. */
+    val multiviewPickerShowDescriptions: Flow<Boolean> =
+        store.data.map { it[KEY_MULTIVIEW_PICKER_SHOW_DESCRIPTIONS] ?: false }
+    suspend fun setMultiviewPickerShowDescriptions(value: Boolean) {
+        store.edit { it[KEY_MULTIVIEW_PICKER_SHOW_DESCRIPTIONS] = value }
     }
 
     /**
@@ -2273,6 +2311,7 @@ class AppPreferences @Inject constructor(
         val KEY_PLAYER_VOLUME_GESTURE = booleanPreferencesKey("in_player_gesture_volume")
         val KEY_PLAYER_BRIGHTNESS_EDGE = stringPreferencesKey("in_player_gesture_brightness_edge")
         val KEY_REMOTE_CONTROL_MAP = stringPreferencesKey("remote_control_map")
+        val KEY_REMOTE_LEARNED_BUTTONS = stringPreferencesKey("remote_learned_buttons")
         val KEY_SYNC_REMOTE_CONTROL_MAP = booleanPreferencesKey("sync_remote_control_map")
         val KEY_GUIDE_GROUP_SELECTOR = stringPreferencesKey("guide_group_selector")
         val KEY_GUIDE_SIDEBAR_LAYOUT = stringPreferencesKey("guide_sidebar_layout")
@@ -2287,6 +2326,7 @@ class AppPreferences @Inject constructor(
         val KEY_SERIES_SORT_ORDER = stringPreferencesKey("series_sort_order")
         val KEY_DVR_SORT_ORDER = stringPreferencesKey("dvr_sort_order")
         val KEY_MATCH_CONTENT_RESOLUTION = booleanPreferencesKey("match_content_resolution")
+        val KEY_MATCH_FRAME_RATE = booleanPreferencesKey("match_frame_rate")
         val KEY_AUTO_RECOVER_FROZEN_STREAMS =
             booleanPreferencesKey("app_behaviors_auto_recover_frozen_streams")
         // Player Info Card element toggles (App Behaviors); device-local.
@@ -2354,6 +2394,8 @@ class AppPreferences @Inject constructor(
         val KEY_MULTIVIEW_LOGO_SIZE = intPreferencesKey("multiview_logo_size")
         val KEY_MULTIVIEW_PERF_WARNING_SUPPRESSED =
             booleanPreferencesKey("multiview_perf_warning_suppressed")
+        val KEY_MULTIVIEW_PICKER_SHOW_SUBTITLES = booleanPreferencesKey("multiview_picker_show_subtitles")
+        val KEY_MULTIVIEW_PICKER_SHOW_DESCRIPTIONS = booleanPreferencesKey("multiview_picker_show_descriptions")
         val KEY_CHANNEL_COLLECTIONS = stringPreferencesKey("channel_collections")
         val KEY_DVR_MAX_LOCAL_STORAGE_MB = intPreferencesKey("dvr_max_local_storage_mb")
         val KEY_DVR_DEFAULT_PRE_ROLL = intPreferencesKey("dvr_default_pre_roll_mins")

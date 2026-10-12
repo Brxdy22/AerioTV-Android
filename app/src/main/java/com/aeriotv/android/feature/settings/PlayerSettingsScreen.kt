@@ -129,6 +129,7 @@ fun PlayerSettingsScreen(
 
     val startupRefreshRate by viewModel.startupRefreshRate.collectAsStateWithLifecycle(initialValue = "off")
     val matchContentResolution by viewModel.matchContentResolution.collectAsStateWithLifecycle(initialValue = false)
+    val matchFrameRate by viewModel.matchFrameRate.collectAsStateWithLifecycle(initialValue = false)
 
     SettingsSubPageHost {
     Column(modifier = Modifier.fillMaxSize()) {
@@ -537,13 +538,19 @@ fun PlayerSettingsScreen(
                 if (isTv) {
                     SettingsSection(
                         header = "Display",
-                        footer = "Startup Refresh Rate switches the display once at app launch so it is already on your main content rate before the first channel (changes apply on next launch). Match Content Resolution outputs at the stream's resolution so your TV does the upscaling; the screen blinks briefly on each switch.",
+                        footer = "Startup Refresh Rate switches the display once at app launch so it is already on your main content rate before the first channel (changes apply on next launch). Match Frame Rate switches the refresh rate to the stream's frame rate and keeps the current resolution. Match Content Resolution outputs at the stream's resolution so your TV does the upscaling. The screen blinks briefly on each switch.",
                     ) {
                         SettingsToggleRow(
                             title = "Match Content Resolution",
                             subtitle = "Output 1080p streams at 1080p and let the TV upscale. Off keeps the display at its native mode.",
                             checked = matchContentResolution,
                             onCheckedChange = viewModel::setMatchContentResolution,
+                        )
+                        SettingsToggleRow(
+                            title = "Match Frame Rate",
+                            subtitle = "Switch to 50 Hz or 60 Hz to match the stream so motion stays smooth. The resolution is not changed.",
+                            checked = matchFrameRate,
+                            onCheckedChange = viewModel::setMatchFrameRate,
                         )
                         val rates = listOf(
                             SettingsPickerOption("off", "Off (System Default)"),

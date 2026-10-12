@@ -67,7 +67,28 @@ fun MultiviewStagingBanner(
 ) {
     val staging by store.isStaging.collectAsStateWithLifecycle()
     val tiles by store.selected.collectAsStateWithLifecycle()
-    if (!staging || tiles.isEmpty()) return
+    val background by MultiviewBackground.state.collectAsStateWithLifecycle()
+    if (!staging || tiles.isEmpty()) {
+        // TV: a Multiview left with "Back to Guide" plays on in the
+        // background; this banner is the TV's dock card for it.
+        val bg = background
+        if (isTv && bg != null) {
+            MultiviewBackgroundTvBanner(
+                tiles = bg.tiles,
+                onReturn = onLaunchMultiview,
+                onStop = {
+                    MultiviewBackground.stop()
+                    if (!store.isStaging.value) store.clear()
+                },
+                onReturnFocus = onReturnFocus,
+                playFocusRequester = playFocusRequester,
+                upTarget = upTarget,
+                downTarget = downTarget,
+                modifier = modifier,
+            )
+        }
+        return
+    }
     val count = tiles.size
     val label = if (count == 1) "1 channel staged for Multiview" else "$count channels staged for Multiview"
     val guard = rememberTvMenuGuard()
@@ -259,5 +280,98 @@ private fun TvBannerCapsule(
         horizontalArrangement = Arrangement.spacedBy(5.dp),
     ) {
         content(if (focused) colors.onSurface else null)
+    }
+}
+
+/**
+ * TV counterpart of the background Multiview dock card: the same title
+ * ("Multiview playing in background, N channels") and tile names, with
+ * Return to Multiview (back to
+ * the grid as it was) and Stop (end the tiles). The tile names follow the
+ * live set, so adds and removes from the guide menu show here at once.
+ */
+@Composable
+private fun MultiviewBackgroundTvBanner(
+    tiles: List<MultiviewTile>,
+    onReturn: () -> Unit,
+    onStop: () -> Unit,
+    onReturnFocus: (() -> Boolean)?,
+    playFocusRequester: FocusRequester?,
+    upTarget: FocusRequester?,
+    downTarget: FocusRequester?,
+    modifier: Modifier = Modifier,
+) {
+    val guard = rememberTvMenuGuard()
+    val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
+    val returnFocus: () -> Unit = {
+        val ok = onReturnFocus?.invoke() == true ||
+            focusManager.moveFocus(androidx.compose.ui.focus.FocusDirection.Down)
+        com.aeriotv.android.ui.tv.TvFocusTrace.guide("refocus after=mv-background-banner result=$ok")
+    }
+    val ownFocus = remember { FocusRequester() }
+    val returnFocusRequester = playFocusRequester ?: ownFocus
+    val tvNav = Modifier.focusProperties {
+        if (upTarget != null) up = upTarget
+        if (downTarget != null) down = downTarget
+    }
+    val accent = MaterialTheme.colorScheme.primary
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.92f))
+            .padding(horizontal = 24.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Icon(
+            imageVector = Icons.Filled.GridView,
+            contentDescription = null,
+            tint = accent,
+            modifier = Modifier.size(18.dp),
+        )
+        androidx.compose.foundation.layout.Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = multiviewBackgroundTitle(tiles.size),
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = tiles.joinToString(", ") { it.displayName },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        TvBannerCapsule(
+            onClick = guard.wrap {
+                guard.arm()
+                onReturn()
+            },
+            fill = accent,
+            border = null,
+            modifier = tvNav.focusRequester(returnFocusRequester),
+        ) { _ ->
+            val onAccent = MaterialTheme.colorScheme.onPrimary
+            Icon(Icons.Filled.PlayArrow, contentDescription = null, tint = onAccent, modifier = Modifier.size(12.dp))
+            Text("Return to Multiview", fontSize = com.aeriotv.android.ui.tv.TvChrome.pillFontSize, fontWeight = FontWeight.SemiBold,
+                maxLines = 1, softWrap = false, color = onAccent)
+        }
+        TvBannerCapsule(
+            onClick = guard.wrap {
+                returnFocus()
+                onStop()
+            },
+            fill = null,
+            border = null,
+            modifier = tvNav,
+        ) { ink ->
+            Text("Stop", fontSize = com.aeriotv.android.ui.tv.TvChrome.pillFontSize, fontWeight = FontWeight.SemiBold,
+                maxLines = 1, softWrap = false,
+                color = ink ?: MaterialTheme.colorScheme.onSurfaceVariant)
+        }
     }
 }

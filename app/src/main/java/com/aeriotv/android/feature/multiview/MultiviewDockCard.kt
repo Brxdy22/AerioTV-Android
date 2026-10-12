@@ -55,8 +55,10 @@ import com.aeriotv.android.ui.theme.textAccent
 
 private const val MV_TAG = "AerioCast"
 
-/** Background Multiview dock card title (shared wording with Apple). */
-const val MULTIVIEW_BACKGROUND_TITLE = "Multiview playing in background"
+/** Background Multiview dock card and TV banner title (shared wording with
+ *  Apple): "Multiview playing in background, N channels". */
+fun multiviewBackgroundTitle(count: Int): String =
+    "Multiview playing in background, $count " + if (count == 1) "channel" else "channels"
 
 /** "1 channel staged for Multiview" / "N channels staged for Multiview". */
 fun multiviewStagedTitle(count: Int): String =

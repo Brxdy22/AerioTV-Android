@@ -20,7 +20,8 @@ import kotlinx.coroutines.flow.asStateFlow
  * reads "Multiview playing in background". Tapping the card returns to the
  * fullscreen Multiview as it was (same tiles, order and audio focus; on-demand
  * tiles resume where the headless player is); Stop ends the tiles.
- * Main thread only. TV never enters this state.
+ * Main thread only. TV enters it from Leave Multiview's "Back to Guide"
+ * (2026-10-12) and shows the guide banner instead of the dock card.
  */
 object MultiviewBackground {
     private const val TAG = "MultiviewBg"
