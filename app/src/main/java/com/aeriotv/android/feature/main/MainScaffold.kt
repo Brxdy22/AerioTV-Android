@@ -282,11 +282,7 @@ fun MainScaffold(
     val onLaunchMultiview: () -> Unit = launch@{
         val staged = multiviewStore.selected.value
         val only = staged.singleOrNull()
-        // A Multiview playing in the background stays a Multiview even at one
-        // tile: Return to Multiview restores the grid.
-        if (only != null && only.kind == com.aeriotv.android.feature.multiview.TileKind.Live &&
-            com.aeriotv.android.feature.multiview.MultiviewBackground.state.value == null
-        ) {
+        if (only != null && only.kind == com.aeriotv.android.feature.multiview.TileKind.Live) {
             val channel = state.channels.firstOrNull { it.id == only.id }
             if (channel != null) {
                 android.util.Log.i("AerioMV", "[MV] staged single ${channel.name}: standard player")

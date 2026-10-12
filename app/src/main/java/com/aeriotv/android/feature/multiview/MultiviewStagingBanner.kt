@@ -310,6 +310,21 @@ private fun MultiviewBackgroundTvBanner(
     }
     val ownFocus = remember { FocusRequester() }
     val returnFocusRequester = playFocusRequester ?: ownFocus
+    // Back to Guide lands on Return to Multiview (Apple parity). The guide
+    // restores its grid focus while it composes, so wait for that first,
+    // then take focus; guarded so the OK that chose Back to Guide cannot
+    // fire Return by itself.
+    LaunchedEffect(Unit) {
+        guard.arm()
+        kotlinx.coroutines.delay(350L)
+        repeat(20) {
+            if (runCatching { returnFocusRequester.requestFocus() }.isSuccess) {
+                com.aeriotv.android.ui.tv.TvFocusTrace.guide("mv-background-banner focus -> Return to Multiview")
+                return@LaunchedEffect
+            }
+            kotlinx.coroutines.delay(50L)
+        }
+    }
     val tvNav = Modifier.focusProperties {
         if (upTarget != null) up = upTarget
         if (downTarget != null) down = downTarget

@@ -120,6 +120,13 @@ object MultiviewBackground {
                     .setUserAgent(h.entries.firstOrNull { it.key.equals("User-Agent", true) }?.value ?: ua)
                 if (h.isNotEmpty()) http.setDefaultRequestProperties(h)
                 ExoPlayer.Builder(app)
+                    // The tiles' renderers (bundled FFmpeg audio, PCM out):
+                    // with video off, a plain builder had no renderer for
+                    // AC-3 / E-AC-3 channels, so the player ended at once
+                    // and the background played silence (Onn, 2026-10-12).
+                    .setRenderersFactory(
+                        com.aeriotv.android.core.playback.aerioRenderersFactory(app, audioPassthrough = false),
+                    )
                     .setHandleAudioBecomingNoisy(false)
                     .build()
                     .apply {
@@ -128,7 +135,39 @@ object MultiviewBackground {
                             .setTrackTypeDisabled(C.TRACK_TYPE_VIDEO, true)
                             .build()
                         volume = if (focused) 1f else 0f
-                        setMediaSource(buildTileMediaSource(tile.resolvedUrl, DefaultDataSource.Factory(app, http)))
+                        val player = this
+                        val dsf = DefaultDataSource.Factory(app, http)
+                        var cleanEnds = 0
+                        var lastReconnectAt = 0L
+                        addListener(object : androidx.media3.common.Player.Listener {
+                            override fun onPlaybackStateChanged(state: Int) {
+                                Log.i(TAG, "MultiviewBg: tile ${tile.displayName} state=$state")
+                                // A live tile that ends cleanly (Dispatcharr closes the
+                                // first connection right after the grid tiles hand
+                                // over) reconnects on a short backoff, as the grid
+                                // tiles do. Gives up after 6 quick ends in a row.
+                                if (state != androidx.media3.common.Player.STATE_ENDED || tile.kind != TileKind.Live) return
+                                val now = android.os.SystemClock.elapsedRealtime()
+                                cleanEnds = if (now - lastReconnectAt < 30_000L) cleanEnds + 1 else 1
+                                if (cleanEnds > 6) {
+                                    Log.w(TAG, "MultiviewBg: tile ${tile.displayName} clean end #$cleanEnds; giving up")
+                                    return
+                                }
+                                val backoff = minOf(500L * (1L shl (cleanEnds - 1)), 8_000L)
+                                Log.i(TAG, "MultiviewBg: tile ${tile.displayName} clean end #$cleanEnds; reconnecting in ${backoff}ms")
+                                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+                                    if (players.none { it === player }) return@postDelayed
+                                    lastReconnectAt = android.os.SystemClock.elapsedRealtime()
+                                    player.setMediaSource(buildTileMediaSource(tile.resolvedUrl, dsf))
+                                    player.prepare()
+                                    player.playWhenReady = true
+                                }, backoff)
+                            }
+                            override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
+                                Log.w(TAG, "MultiviewBg: tile ${tile.displayName} error ${error.errorCodeName}", error)
+                            }
+                        })
+                        setMediaSource(buildTileMediaSource(tile.resolvedUrl, dsf))
                         val pos = positionMs
                         if (tile.kind != TileKind.Live && pos != null && pos > 0) seekTo(pos)
                         prepare()

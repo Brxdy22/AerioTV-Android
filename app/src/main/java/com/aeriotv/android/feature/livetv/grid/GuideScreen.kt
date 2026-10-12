@@ -1038,12 +1038,6 @@ fun GuideScreen(
             }
         }
     }
-    // TV, Multiview playing in the background (Back to Guide): Back returns
-    // to it. Declared after the ladder so it takes Back first.
-    val mvBackground by com.aeriotv.android.feature.multiview.MultiviewBackground.state.collectAsStateWithLifecycle()
-    BackHandler(enabled = isTv && tabActive && mvBackground != null && !groupSidebarOpen && menuFor == null && programInfoTarget == null && recordTarget == null) {
-        onLaunchMultiview()
-    }
 
     // Phone drawer rows: collections where their pill placement puts them,
     // around the Favorites / All / group tokens (Apple PhoneGroupDrawer).
