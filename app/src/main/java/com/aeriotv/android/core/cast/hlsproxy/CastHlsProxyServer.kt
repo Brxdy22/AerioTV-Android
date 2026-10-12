@@ -190,6 +190,22 @@ class CastHlsProxyServer(
     private val compositeGenerations = HashSet<Int>()
     private var nextSeq = 0
     private var generation = 0
+    /** When >= 0, media playlists list only segments up to this generation
+     *  (single cast to composite, 2026-10-12): the receiver still playing the
+     *  old channel must not be handed the composite's segments (different
+     *  codecs and target duration; it failed with error 999 and went IDLE)
+     *  before the sender loads the composite. It stalls at the old channel's
+     *  last segment instead, and the load replaces the media. */
+    private var playlistHoldGeneration = -1
+
+    /** Freeze the media playlists at the current generation; returns it. */
+    fun holdPlaylistsAtCurrentGeneration(): Int = synchronized(lock) {
+        playlistHoldGeneration = generation
+        generation
+    }
+
+    /** Release [holdPlaylistsAtCurrentGeneration]. */
+    fun releasePlaylistHold() = synchronized(lock) { playlistHoldGeneration = -1 }
     /** First segment committed after [beginGeneration] gets the
      *  discontinuity flag (reconnect splice or channel change). */
     private var pendingDiscontinuity = false
@@ -290,6 +306,7 @@ class CastHlsProxyServer(
         serverSocket = null
         acceptThread = null
         synchronized(lock) {
+            playlistHoldGeneration = -1
             ring.clear()
             videoInits.clear()
             audioInits.clear()
@@ -728,8 +745,10 @@ class CastHlsProxyServer(
     private fun playlistText(rendition: Rendition): String = synchronized(lock) {
         val initPrefix = if (rendition == Rendition.VIDEO) "vinit" else "ainit"
         val segPrefix = if (rendition == Rendition.VIDEO) "vseg" else "aseg"
-        val composite = currentCompositeLocked()
-        var window = ring.takeLast(if (composite) COMPOSITE_WINDOW_SIZE else WINDOW_SIZE)
+        val hold = playlistHoldGeneration
+        val composite = if (hold >= 0) hold in compositeGenerations else currentCompositeLocked()
+        val source = if (hold >= 0) ring.filter { it.generation <= hold } else ring
+        var window = source.takeLast(if (composite) COMPOSITE_WINDOW_SIZE else WINDOW_SIZE)
         // Composite: only the trailing run of composite segments is listed
         // (the sender always re-loads the receiver when the composite
         // starts), so a leftover 4 s channel segment cannot hold the target

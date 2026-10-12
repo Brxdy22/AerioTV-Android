@@ -209,6 +209,12 @@ class CastHlsProxySession @Inject constructor(
 
     private val server = CastHlsProxyServer(log = { msg -> debugLog(context, TAG, msg) })
 
+    /** See [CastHlsProxyServer.holdPlaylistsAtCurrentGeneration]. */
+    fun holdPlaylists(): Int = server.holdPlaylistsAtCurrentGeneration()
+
+    /** See [CastHlsProxyServer.releasePlaylistHold]. */
+    fun releasePlaylistHold() = server.releasePlaylistHold()
+
     init {
         CastHlsProxyService.stats = {
             "requests=${server.requestCount} lastSeq=${server.lastSequence} " +
@@ -441,6 +447,9 @@ class CastHlsProxySession @Inject constructor(
         val lanIp = wifiLanAddress()
             ?: throw IllegalStateException("phone has no Wi-Fi LAN address to serve the cast proxy on")
         val port = server.start()
+        // A hold only ever spans one composite start; any other channel
+        // start serves its playlists normally.
+        if (localSource == null) server.releasePlaylistHold()
         val isChannelChange = activeUrl != null
         stopIngest()
         activeUrl = rawTsUrl

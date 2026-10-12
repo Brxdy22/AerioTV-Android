@@ -1605,6 +1605,11 @@ class AerioCastSender @Inject constructor(
                 // (a load on a live RemoteMediaClient never relaunches the
                 // receiver app).
                 Log.i(TAG, "[MV-CAST] ${previous.title} -> composite in place: same session, proxy channel change, no unload")
+                // Freeze the receiver's playlists on the old channel until
+                // the composite load below (it errored on the composite's
+                // segments otherwise; Nothing Phone 2026-10-12).
+                val held = runCatching { hlsProxy.holdPlaylists() }.getOrNull()
+                Log.i(TAG, "[MV-CAST] playlists held at gen=$held until the composite load")
                 lastLoadedMediaId = null
                 idleReloadAttempts = 0
             }
@@ -1634,6 +1639,7 @@ class AerioCastSender @Inject constructor(
             )
             pending = ready
             _content.value = ready
+            runCatching { hlsProxy.releasePlaylistHold() }
             currentSession()?.let { loadOnSession(it, ready) }
         }
     }
