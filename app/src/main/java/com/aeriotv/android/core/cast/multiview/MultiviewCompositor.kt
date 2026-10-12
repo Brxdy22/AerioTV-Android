@@ -262,6 +262,24 @@ class MultiviewCompositor(
         return MultiviewCompositeLayout.hitTest(fx, fy, rects)
     }
 
+    /**
+     * The fitted picture rect (frame pixels) at display [pos], from the same
+     * geometry [draw] uses: slot letterboxed to the tile's video aspect, 16:9
+     * until known. Null for a position not showing.
+     */
+    fun pictureRectFrame(pos: Int): CompositeRect? {
+        val order = shown
+        val slot = order.getOrNull(pos) ?: return null
+        val rects = if (order.size == 1) {
+            MultiviewCompositeLayout.tileRects(1)
+        } else {
+            MultiviewCompositeLayout.tileRects(order.size, style.padding, mode = layoutMode)
+        }
+        val cell = rects.getOrNull(pos) ?: return null
+        val t = state.getOrNull(slot) ?: return cell
+        return MultiviewCompositeLayout.pictureRect(cell, t.videoWidth, t.videoHeight, t.pixelRatio)
+    }
+
     /** Slot -> preview notice ([NOTICE_RECONNECTING], [NOTICE_UNAVAILABLE]);
      *  main thread. Each change is handed to [onTileNotices]. */
     private val notices = HashMap<Int, String>()
@@ -1135,16 +1153,18 @@ class MultiviewCompositor(
                 bitmap(t.logoTex, place.logo, 0xFFFFFFFF.toInt(), 1f, sx, sy, h)
             }
             if (isFocus) {
+                // The focus chrome wraps the fitted picture, not the slot.
+                val ring = MultiviewCompositeLayout.pictureRect(cell, t.videoWidth, t.videoHeight, t.pixelRatio)
                 val iconAlpha = MultiviewCompositeLayout.iconAlpha(st, since)
                 if (iconAlpha > 0f && iconTex != 0) {
                     val size = MultiviewCompositeLayout.ICON_PX
                     val icon = CompositeRect(
-                        cell.left + (cell.width - size) / 2, cell.top + (cell.height - size) / 2, size, size,
+                        ring.left + (ring.width - size) / 2, ring.top + (ring.height - size) / 2, size, size,
                     )
                     bitmap(iconTex, icon, accent, iconAlpha, sx, sy, h)
                 }
                 MultiviewCompositeLayout.focusBorderArgb(st, accent, since)?.let { argb ->
-                    solid(cell, radius, MultiviewCompositeLayout.FOCUS_BORDER_PX, argb, sx, sy, h)
+                    solid(ring, radius, MultiviewCompositeLayout.FOCUS_BORDER_PX, argb, sx, sy, h)
                 }
             }
         }

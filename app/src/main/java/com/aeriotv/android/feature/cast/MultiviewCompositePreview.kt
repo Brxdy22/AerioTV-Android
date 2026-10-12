@@ -163,7 +163,6 @@ fun MultiviewCompositePreview(
         val heldTile = if (dragFrom >= 0) dragFrom else movingFrom
         val dropTile = if (dragTarget >= 0 && dragTarget != dragFrom) dragTarget else -1
         if (viewW > 0 && count > 0 && (heldTile >= 0 || dropTile >= 0)) {
-            val rects = MultiviewCompositeLayout.tileRects(count, style.padding, mode = layoutMode)
             val density = LocalDensity.current
             val sx = viewW / MultiviewCompositeLayout.WIDTH.toFloat()
             val sy = viewH / MultiviewCompositeLayout.HEIGHT.toFloat()
@@ -171,7 +170,8 @@ fun MultiviewCompositePreview(
                 heldTile to MaterialTheme.colorScheme.primary,
                 dropTile to MaterialTheme.colorScheme.tertiary,
             ).forEach { (idx, ring) ->
-                val cell = rects.getOrNull(idx) ?: return@forEach
+                // Ring wraps the fitted picture, not the slot.
+                val cell = controller.previewPictureRect(idx) ?: return@forEach
                 with(density) {
                     Box(
                         Modifier
@@ -184,12 +184,11 @@ fun MultiviewCompositePreview(
         }
         // A tile whose ingest is retrying (or gave up) says so over its cell.
         if (viewW > 0 && count > 0 && notices.isNotEmpty()) {
-            val rects = MultiviewCompositeLayout.tileRects(count, style.padding, mode = layoutMode)
             val density = LocalDensity.current
             val sx = viewW / MultiviewCompositeLayout.WIDTH.toFloat()
             val sy = viewH / MultiviewCompositeLayout.HEIGHT.toFloat()
             notices.forEach { (pos, text) ->
-                val cell = rects.getOrNull(pos) ?: return@forEach
+                val cell = controller.previewPictureRect(pos) ?: return@forEach
                 with(density) {
                     Box(
                         Modifier

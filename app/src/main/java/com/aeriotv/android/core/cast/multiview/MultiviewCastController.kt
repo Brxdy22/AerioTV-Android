@@ -503,6 +503,21 @@ class MultiviewCastController @Inject constructor(
         ) ?: MultiviewCompositeLayout.hitTestView(x, y, viewWidth, viewHeight, s.tiles.size, style.value.padding, s.layoutMode)
         return pos.takeIf { it in s.tiles.indices } ?: -1
     }
+    /**
+     * The fitted picture rect (frame pixels) of the tile at display [pos]:
+     * what every preview ring, outline and notice wraps. 16:9 in the slot
+     * when the compositor is not up yet.
+     */
+    fun previewPictureRect(pos: Int): CompositeRect? {
+        val s = _session.value ?: return null
+        if (pos !in s.tiles.indices) return null
+        compositor?.pictureRectFrame(pos)?.let { return it }
+        val n = s.tiles.size
+        val rects = if (n == 1) MultiviewCompositeLayout.tileRects(1)
+        else MultiviewCompositeLayout.tileRects(n, style.value.padding, mode = s.layoutMode)
+        val cell = rects.getOrNull(pos) ?: return null
+        return MultiviewCompositeLayout.pictureRect(cell, 0, 0)
+    }
     fun detachPreview(surface: Surface) { compositor?.detachPreview(surface) }
 
     /** Main thread. Idempotent. */

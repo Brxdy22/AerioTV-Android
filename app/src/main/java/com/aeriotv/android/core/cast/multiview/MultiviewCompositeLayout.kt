@@ -169,6 +169,17 @@ object MultiviewCompositeLayout {
     }
 
     /**
+     * The fitted picture rectangle of a tile inside its slot [area]: the
+     * video's aspect when known, 16:9 until then. Every ring, outline and
+     * badge on a tile wraps this rect, never the slot, so a tall slot does
+     * not leave the chrome floating above and below the picture (same rule
+     * as the local Multiview tiles, 908ef7fc).
+     */
+    fun pictureRect(area: CompositeRect, videoWidth: Int, videoHeight: Int, pixelRatio: Float = 1f): CompositeRect =
+        if (videoWidth > 0 && videoHeight > 0) letterbox(area, videoWidth, videoHeight, pixelRatio)
+        else letterbox(area, 16, 9)
+
+    /**
      * The local TileChannelLogo math in frame pixels: inside the picture
      * [video], 8 dp off the chosen corner, a 4 dp black backdrop around a
      * logo of opaque aspect [logoAspect] (3:1 until known). With
