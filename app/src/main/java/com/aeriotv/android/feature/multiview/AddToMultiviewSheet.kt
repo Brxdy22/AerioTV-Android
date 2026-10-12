@@ -510,18 +510,41 @@ fun AddToMultiviewSheet(
                                 },
                         )
                     } else if (groups.size > 1) {
+                        // Guide parity (LiveTvTopBar): the selected pill glides to
+                        // about a third in from the left whenever the selection
+                        // changes or focus leaves the row, so the row never rests
+                        // scrolled with the selected pill past its start. Focus
+                        // entering the row starts on the selected pill.
+                        val groupRowState = androidx.compose.foundation.lazy.rememberLazyListState()
+                        val selectedPillFocus = remember { androidx.compose.ui.focus.FocusRequester() }
+                        var groupRowFocused by remember { mutableStateOf(false) }
+                        androidx.compose.runtime.LaunchedEffect(selectedGroup, groups, groupRowFocused) {
+                            if (groupRowFocused) return@LaunchedEffect
+                            val idx = groups.indexOf(selectedGroup)
+                            if (idx >= 0) {
+                                val viewport = groupRowState.layoutInfo.viewportEndOffset
+                                groupRowState.animateScrollToItem(idx, scrollOffset = -(viewport / 3))
+                            }
+                        }
                         LazyRow(
-                            modifier = Modifier.weight(1f),
+                            state = groupRowState,
+                            modifier = Modifier
+                                .weight(1f)
+                                .onFocusChanged { groupRowFocused = it.hasFocus }
+                                .focusProperties {
+                                    @OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
+                                    enter = { selectedPillFocus }
+                                },
                             // Start and vertical room so a selected or focused
                             // first pill is not clipped by the row.
                             contentPadding = PaddingValues(start = 4.dp, end = 12.dp, top = 4.dp, bottom = 4.dp),
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                             verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            items(items = groups, key = { it }) { group ->
+                        ) {                            items(items = groups, key = { it }) { group ->
                                 FilterChip(
                                     selected = group == selectedGroup,
                                     onClick = { selectedGroup = group },
+                                    modifier = if (group == selectedGroup) Modifier.focusRequester(selectedPillFocus) else Modifier,
                                     label = {
                                         Text(
                                             com.aeriotv.android.feature.livetv.groupDisplayName(group),
