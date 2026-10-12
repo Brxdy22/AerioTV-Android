@@ -1,5 +1,6 @@
 package com.aeriotv.android.core.playback
 
+import android.os.SystemClock
 import android.util.Log
 import androidx.media3.common.C
 import androidx.media3.common.DataReader
@@ -26,23 +27,24 @@ import androidx.media3.extractor.TrackOutput
  * The guard defers registering each video track with the real output until
  * its format arrives (buffering the bytes the reader writes before that, so
  * the first access unit is replayed intact), and defers endTracks() until all
- * declared video tracks have a format. If audio has advanced
- * [VIDEO_GRACE_US] of media time and a declared video track still has no
- * format, that track is dropped for this connection and endTracks() goes
- * through: the player prepares as audio-only. A stream whose video shows up
- * normally is unaffected (its format lands before any meaningful audio time).
+ * declared video tracks have a format. The drop decision is made by
+ * [AudioOnlyGraceRule] in WALL-CLOCK time since the first audio sample (a
+ * proxy burst can carry several seconds of audio media time ahead of the
+ * video SPS/PPS, so media time is not a usable clock). A declared video track
+ * that has sent zero bytes after [AudioOnlyGraceRule.SILENT_GRACE_MS] is
+ * dropped (radio case); one that has sent bytes is live with a late format
+ * and waits up to [AudioOnlyGraceRule.LIVE_CAP_MS]. Once every pending track
+ * is resolved, endTracks() goes through.
  */
 @UnstableApi
 class AudioOnlyTrackGuard(
     private val inner: Extractor,
     private val log: (String) -> Unit = { Log.i(TAG, it) },
+    private val nowMs: () -> Long = { SystemClock.elapsedRealtime() },
 ) : Extractor by inner {
 
     companion object {
         private const val TAG = "AerioExoPlayer"
-
-        /** Audio media time a declared video track may stay formatless. */
-        const val VIDEO_GRACE_US = 3_000_000L
 
         /** Pre-format bytes kept per pending video track (the tail only:
          *  the first sample is always the most recent bytes). */
@@ -52,7 +54,7 @@ class AudioOnlyTrackGuard(
     private var guardOutput: GuardOutput? = null
 
     override fun init(output: ExtractorOutput) {
-        val g = GuardOutput(output, log)
+        val g = GuardOutput(output, log, nowMs)
         guardOutput = g
         inner.init(g)
     }
@@ -65,12 +67,13 @@ class AudioOnlyTrackGuard(
     private class GuardOutput(
         private val real: ExtractorOutput,
         private val log: (String) -> Unit,
+        private val nowMs: () -> Long,
     ) : ExtractorOutput {
         private val tracks = HashMap<Int, TrackOutput>()
         private val pending = LinkedHashMap<Int, PendingVideoTrack>()
         private var endTracksRequested = false
         private var endTracksForwarded = false
-        private var firstAudioUs = C.TIME_UNSET
+        private var firstAudioWallMs = -1L
 
         override fun track(id: Int, type: Int): TrackOutput {
             tracks[id]?.let { return it }
@@ -98,7 +101,7 @@ class AudioOnlyTrackGuard(
 
         fun onSeek() {
             pending.values.forEach { it.clearTail() }
-            firstAudioUs = C.TIME_UNSET
+            firstAudioWallMs = -1L
         }
 
         private fun maybeForwardEndTracks() {
@@ -109,19 +112,26 @@ class AudioOnlyTrackGuard(
 
         private fun onAudioSample(timeUs: Long) {
             if (endTracksForwarded || pending.isEmpty() || timeUs == C.TIME_UNSET) return
-            val first = firstAudioUs
-            if (first == C.TIME_UNSET || timeUs < first) {
-                firstAudioUs = timeUs
+            val now = nowMs()
+            if (firstAudioWallMs < 0) {
+                firstAudioWallMs = now
                 return
             }
-            if (timeUs - first < VIDEO_GRACE_US || !endTracksRequested) return
-            log(
-                "[AUDIO-ONLY] detected: no video track (declared video PID sent no " +
-                    "picture in ${(timeUs - first) / 1000}ms of audio; dropping " +
-                    "${pending.size} video track(s) for this connection)",
-            )
-            pending.values.forEach { it.drop() }
-            pending.clear()
+            if (!endTracksRequested) return
+            val elapsed = now - firstAudioWallMs
+            val toDrop = pending.values.filter {
+                AudioOnlyGraceRule.shouldDrop(elapsed, it.receivedBytes)
+            }
+            if (toDrop.isEmpty()) return
+            for (t in toDrop) {
+                log(
+                    "[AUDIO-ONLY] detected: no video track (declared video PID " +
+                        (if (t.receivedBytes) "sent bytes but no format" else "sent no bytes") +
+                        " in ${elapsed}ms wall time of audio; dropping it for this connection)",
+                )
+                t.drop()
+                pending.remove(t.id)
+            }
             maybeForwardEndTracks()
         }
 
@@ -142,11 +152,14 @@ class AudioOnlyTrackGuard(
 
         /** A video track not yet registered with the real output. */
         private inner class PendingVideoTrack(
-            private val id: Int,
+            val id: Int,
             private val type: Int,
         ) : TrackOutput {
             private var target: TrackOutput? = null
             private var dropped = false
+            /** Any payload byte seen for this PID on this connection. */
+            var receivedBytes = false
+                private set
             private var tail = ByteArray(0)
             private var tailLen = 0
             private val scratch = ByteArray(16 * 1024)
@@ -163,6 +176,7 @@ class AudioOnlyTrackGuard(
 
             private fun append(src: ByteArray, off: Int, len: Int) {
                 if (len <= 0) return
+                receivedBytes = true
                 if (len >= PENDING_TAIL_BYTES) {
                     if (tail.size < PENDING_TAIL_BYTES) tail = ByteArray(PENDING_TAIL_BYTES)
                     System.arraycopy(src, off + len - PENDING_TAIL_BYTES, tail, 0, PENDING_TAIL_BYTES)
