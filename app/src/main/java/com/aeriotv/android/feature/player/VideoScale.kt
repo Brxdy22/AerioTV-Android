@@ -253,14 +253,15 @@ fun VideoScaleOptionRow(settingsVm: SettingsViewModel) {
 }
 
 /**
- * Tablet pinch-to-minimize callback for [videoScalePinch], or null on phones
- * (sw < 600 dp) and when [enabled] is false. Dispatches a system Back, the
- * same path as the top-strip minimize swipe. Kept out of PlayerScreen so its
- * top-level composable gains no locals (JVM register limit).
+ * Pinch-to-minimize callback for [videoScalePinch], or null when [enabled]
+ * is false. Phones and tablets alike (the iPhone minimizes on pinch-in since
+ * 2026-10-11; before that this was tablet only). Dispatches a system Back,
+ * the same path as the top-strip minimize swipe. Kept out of PlayerScreen so
+ * its top-level composable gains no locals (JVM register limit).
  */
 @androidx.compose.runtime.Composable
 fun tabletPinchMinimize(enabled: Boolean): (() -> Unit)? {
-    val tablet = androidx.compose.ui.platform.LocalConfiguration.current.smallestScreenWidthDp >= 600
+    val tablet = true
     val context = androidx.compose.ui.platform.LocalContext.current
     val action = androidx.compose.runtime.remember(context) {
         {
