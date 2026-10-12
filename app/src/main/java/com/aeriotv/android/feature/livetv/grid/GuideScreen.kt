@@ -1,5 +1,6 @@
 package com.aeriotv.android.feature.livetv.grid
 
+import com.aeriotv.android.core.data.guideMatchKey
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.ui.draw.clip
@@ -526,6 +527,24 @@ fun GuideScreen(
             ) { GuideGridRows(displayChannels, state.epgByChannel as? GuideCatalog, windowStartMs, windowEndMs) }
         }
     }
+    // Streamer empty-guide-at-launch diagnosis: once per process, state at
+    // the first non-empty row install (catalog, coverage of now, window).
+    LaunchedEffect(rows) {
+        if (rows.isEmpty || !RetainedGuideGrid.markFirstPaintLogged()) return@LaunchedEffect
+        val now = System.currentTimeMillis()
+        val cat = state.epgByChannel
+        val withNow = rows.channels.count { ch ->
+            cat[ch.guideMatchKey]?.any { now >= it.startMillis && now < it.endMillis } == true
+        }
+        android.util.Log.i(
+            "AerioTV",
+            "[GUIDE] first paint: catalog=${if (cat is GuideCatalog) "built" else "none"} " +
+                "catalogChannels=${cat.size} rows=${rows.size} rowsWithNow=$withNow " +
+                "windowStart=${rows.windowStartMs} windowEnd=${rows.windowEndMs} " +
+                "viewportStart=${grid.viewportStartMs} now=$now " +
+                "windowCoversNow=${now >= rows.windowStartMs && now < rows.windowEndMs}",
+        )
+    }
     LaunchedEffect(rows) {
         // Same rows object as the retained state already holds: the install
         // only lands focus (cheap, no row invalidation); log which it was.
@@ -937,7 +956,14 @@ fun GuideScreen(
                 else if (miniActive) miniPlayerVm.session.requestResume()
                 true
             }
-            com.aeriotv.android.core.remote.GuideRemoteAction.CLOSE_MINI_PLAYER -> { if (miniActive) miniPlayerVm.session.dismiss(); true }
+            com.aeriotv.android.core.remote.GuideRemoteAction.CLOSE_MINI_PLAYER -> {
+                // Same close (and keep-live decision) as hold-Right in MainActivity.
+                if (miniActive) {
+                    (context as? com.aeriotv.android.MainActivity)?.closeTvMini("guide-action")
+                        ?: miniPlayerVm.session.dismiss()
+                }
+                true
+            }
             com.aeriotv.android.core.remote.GuideRemoteAction.PROGRAM_INFO -> {
                 val row = grid.focusRow; val cell = grid.focusedCell()
                 if (row >= 0 && cell != null && !cell.isPlaceholder) {
@@ -1760,6 +1786,10 @@ private const val WINDOW_ROLL_REUSE_MAX_MS = 2 * 3_600_000L
 
 internal object RetainedGuideGrid {
     private val held = HashMap<Boolean, GuideGridState>()
+    private val firstPaintLogged = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /** True exactly once per process. */
+    fun markFirstPaintLogged(): Boolean = firstPaintLogged.compareAndSet(false, true)
 
     fun take(favoritesOnly: Boolean, initialViewportStartMs: Long): GuideGridState {
         val kept = synchronized(held) { held.remove(favoritesOnly) }

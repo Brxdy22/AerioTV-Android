@@ -621,14 +621,17 @@ class TimeshiftController @Inject constructor(
      * player is stopped so only one connection is open at a time. No-op when
      * the setting is off or the minimized channel had no buffer.
      */
-    fun onMiniClosed() {
+    fun onMiniClosed(via: String = "mini-x") {
         scope.launch {
-            val c = miniKeepCandidate ?: return@launch
+            val c = miniKeepCandidate ?: run {
+                Log.i(APP_TAG, "[RETAIN] not kept on mini close ($via): no buffered channel was minimized")
+                return@launch
+            }
             miniKeepCandidate = null
             runCatching {
                 val keep = prefs.liveRewindEnabled.first() && prefs.liveRewindKeepRecent.first()
                 if (!keep) {
-                    Log.i(APP_TAG, "[RETAIN] not kept on mini close ${c.channelName}: Keep Recent Channels Live off")
+                    Log.i(APP_TAG, "[RETAIN] not kept on mini close ${c.channelName} ($via): Keep Recent Channels Live off")
                     return@launch
                 }
                 val depthMin = prefs.liveRewindDepthMinutes.first()
@@ -655,7 +658,7 @@ class TimeshiftController @Inject constructor(
                 evictPastCap(keepCount)
                 startRetainedFill(session)
                 publishRetained()
-                Log.i(APP_TAG, "[RETAIN] kept on mini close ${c.channelName}")
+                Log.i(APP_TAG, "[RETAIN] kept on close: ${c.channelName} (mini, via $via)")
             }.onFailure { Log.w(TAG, "mini close keep failed: $it") }
         }
     }

@@ -938,22 +938,18 @@ fun MainScaffold(
     androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
         val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
             if (event == androidx.lifecycle.Lifecycle.Event.ON_START) {
-                // Quiet EPG sweep (Logan 2026-09-12): the sweep only spends
-                // requests while the app is in the foreground, and a return to
-                // the foreground is also when the sources gate is re-checked
-                // (rate limited to once per 15 min in the repository).
-                com.aeriotv.android.core.data.repository.EpgSweepGate.appInForeground = true
+                // EpgSweepGate.appInForeground follows the process lifecycle
+                // (Android#131): this destination's lifecycle reads STOPPED
+                // while the full-screen player route is on top. A return here
+                // re-checks the sources gate (rate limited in the repository)
+                // and repaints a guide a background trim shed.
+                viewModel.repaintGuideIfShed("main-start")
                 if (sawFirstStart) {
                     viewModel.refreshEpgIfStale()
                     viewModel.checkEpgSourcesForChanges()
                 } else {
                     sawFirstStart = true
                 }
-            }
-            if (event == androidx.lifecycle.Lifecycle.Event.ON_STOP) {
-                // Backgrounded: the sweep pauses where it is and resumes at the
-                // same chunk on the next ON_START.
-                com.aeriotv.android.core.data.repository.EpgSweepGate.appInForeground = false
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)

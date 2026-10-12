@@ -179,12 +179,8 @@ class MainActivity : ComponentActivity() {
             when (remoteMap.guideAction(com.aeriotv.android.core.remote.RemoteSlot.PLAY_PAUSE)) {
                 com.aeriotv.android.core.remote.GuideRemoteAction.RESUME_PLAYER ->
                     miniPlayerSession.requestResume()
-                com.aeriotv.android.core.remote.GuideRemoteAction.CLOSE_MINI_PLAYER -> {
-                    runCatching { miniPlayerSession.dismiss() }
-                    runCatching { exoWindowState.hide() }
-                    runCatching { exoHolder.stop() }
-                    AerioMediaPlaybackService.stop(this)
-                }
+                com.aeriotv.android.core.remote.GuideRemoteAction.CLOSE_MINI_PLAYER ->
+                    closeTvMini("play-pause")
                 else -> { /* NONE or an action wired in Phase A2: no-op */ }
             }
             return true
@@ -226,12 +222,8 @@ class MainActivity : ComponentActivity() {
                     // for ANY mapped action so a still-held Right can't fly
                     // focus across the guide after the action fires.
                     when (rightLongAction) {
-                        com.aeriotv.android.core.remote.GuideRemoteAction.CLOSE_MINI_PLAYER -> {
-                            runCatching { miniPlayerSession.dismiss() }
-                            runCatching { exoWindowState.hide() }
-                            runCatching { exoHolder.stop() }
-                            AerioMediaPlaybackService.stop(this)
-                        }
+                        com.aeriotv.android.core.remote.GuideRemoteAction.CLOSE_MINI_PLAYER ->
+                            closeTvMini("hold-right")
                         com.aeriotv.android.core.remote.GuideRemoteAction.RESUME_PLAYER ->
                             miniPlayerSession.requestResume()
                         else -> Unit
@@ -625,10 +617,30 @@ class MainActivity : ComponentActivity() {
      * Multiview then exits on return, the same end state as a Cast stop, so
      * the user never comes back to a grid of stopped tiles.
      */
-    private fun stopTvPlaybackOnLeave(from: String) {
+    /**
+     * TV mini player close (hold-Right, a Play/Pause mapped to Close mini
+     * player, the guide's mapped close). Same teardown as before, then the
+     * phone mini X's Keep Recent Channels Live decision
+     * ([com.aeriotv.android.core.timeshift.TimeshiftController.onMiniClosed]),
+     * AFTER the holder stops so only one connection is open at a time.
+     */
+    fun closeTvMini(via: String) {
+        android.util.Log.i("AerioTV", "[RETAIN] TV mini close via $via")
         runCatching { miniPlayerSession.dismiss() }
         runCatching { exoWindowState.hide() }
         runCatching { exoHolder.stop() }
+        AerioMediaPlaybackService.stop(this)
+        runCatching { timeshiftController.onMiniClosed(via) }
+    }
+
+    private fun stopTvPlaybackOnLeave(from: String) {
+        val miniWasActive = miniPlayerSession.state.value is MiniPlayerSession.State.Active
+        runCatching { miniPlayerSession.dismiss() }
+        runCatching { exoWindowState.hide() }
+        runCatching { exoHolder.stop() }
+        // Leaving the app is not an exit for Keep Recent Channels Live (see
+        // onStop): a mini that was up keeps its channel like the mini's close.
+        if (miniWasActive) runCatching { timeshiftController.onMiniClosed("tv-leave ($from)") }
         if (!com.aeriotv.android.feature.multiview.MultiviewTilePlayers.isEmpty) {
             com.aeriotv.android.feature.multiview.MultiviewTilePlayers.stopAll("TV leave ($from)")
             deepLinkTarget.value = DeepLinkTarget.ExitPlayer

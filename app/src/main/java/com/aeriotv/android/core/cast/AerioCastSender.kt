@@ -1594,8 +1594,17 @@ class AerioCastSender @Inject constructor(
         Log.i(TAG, "[MV-CAST] cast composite \"${base.subtitle}\" previous=${previous?.title ?: "none"} epoch=$epoch")
         proxyLoadJob = senderScope.launch {
             if (previous != null) {
-                runCatching { currentSession()?.remoteMediaClient?.stop() }
-                kotlinx.coroutines.withContext(Dispatchers.IO) { runCatching { hlsProxy.stop() } }
+                // Switch IN PLACE (session leftover 2026-10-12): no
+                // remoteMediaClient.stop() and no proxy teardown. The stop
+                // unloaded the receiver, which sat blank (IDLE) for the whole
+                // composite start. Now the proxy keeps its listener and ring
+                // and startLocalChannel runs as a channel change (new
+                // generation behind a discontinuity), the receiver keeps
+                // playing the old channel's buffered segments meanwhile, and
+                // the load below replaces the media on the SAME Cast session
+                // (a load on a live RemoteMediaClient never relaunches the
+                // receiver app).
+                Log.i(TAG, "[MV-CAST] ${previous.title} -> composite in place: same session, proxy channel change, no unload")
                 lastLoadedMediaId = null
                 idleReloadAttempts = 0
             }

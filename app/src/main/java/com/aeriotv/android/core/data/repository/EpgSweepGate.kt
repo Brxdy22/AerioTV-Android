@@ -1,6 +1,11 @@
 package com.aeriotv.android.core.data.repository
 
 import android.os.SystemClock
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ProcessLifecycleOwner
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
 
 /**
  * Process-wide "is it a good moment to spend a background request?" gate for
@@ -13,11 +18,49 @@ import android.os.SystemClock
  * flow: nothing here should cost a subscription or a recomposition.
  */
 object EpgSweepGate {
-    /** Set from the app scaffold's ProcessLifecycle observer. Starts true so a
-     *  cold launch (which is by definition foreground) never stalls the sweep
-     *  waiting for an ON_START it already missed. */
+    /** True while ANY activity of the process is started (on screen).
+     *  Driven by [ProcessLifecycleOwner] via [install], never by a nav
+     *  destination's lifecycle: the MAIN destination reads STOPPED while the
+     *  full-screen player route sits on top of it (Android#131), which made a
+     *  RUNNING_CRITICAL trim during playback shed the guide as if the app
+     *  were backgrounded. Starts true so a cold launch (which is by definition
+     *  foreground) never stalls the sweep waiting for an ON_START it already
+     *  missed. */
     @Volatile
     var appInForeground: Boolean = true
+        private set
+
+    private val _returnedToForeground = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+
+    /** Emits on every process ON_START after a process ON_STOP (not on the
+     *  cold-launch start), so the guide owner can repaint a shed guide. */
+    val returnedToForeground: SharedFlow<Unit> = _returnedToForeground
+
+    @Volatile
+    private var installed = false
+
+    /** Hook the process lifecycle. Call once from Application.onCreate (main
+     *  thread). Idempotent. */
+    fun install() {
+        if (installed) return
+        installed = true
+        ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
+            override fun onStart(owner: LifecycleOwner) = onProcessStart()
+            override fun onStop(owner: LifecycleOwner) = onProcessStop()
+        })
+    }
+
+    /** Process became visible. Internal for the unit test. */
+    internal fun onProcessStart() {
+        val wasBackground = !appInForeground
+        appInForeground = true
+        if (wasBackground) _returnedToForeground.tryEmit(Unit)
+    }
+
+    /** Process left the screen (every activity stopped). */
+    internal fun onProcessStop() {
+        appInForeground = false
+    }
 
     @Volatile
     private var tuneStartedAtMs: Long = 0L

@@ -151,6 +151,9 @@ class AerioTVApplication : Application(), Configuration.Provider, SingletonImage
         }
         // Time Format: seed the process-wide clock mode and follow the pref.
         com.aeriotv.android.core.ui.ClockFormat.init(this)
+        // Android#131: guide-keep and EPG sweep decisions follow the PROCESS
+        // lifecycle, not a nav destination's.
+        com.aeriotv.android.core.data.repository.EpgSweepGate.install()
         appScope.launch {
             appPreferences.timeFormat.collect {
                 com.aeriotv.android.core.ui.ClockFormat.mode.value =

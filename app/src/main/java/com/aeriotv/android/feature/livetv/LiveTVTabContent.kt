@@ -105,6 +105,9 @@ fun LiveTVTabContent(
     // flip or a form-factor change, so a TV without the List view is snapped
     // to the Guide before anything renders.
     val effectiveMode = if (formFactor.listAvailable) mode else LiveTVViewMode.Guide
+    // Android#131: a trim that shed the in-memory guide is repainted from the
+    // Room cache the moment the Live TV tab (guide or list) is shown.
+    androidx.compose.runtime.LaunchedEffect(Unit) { viewModel.repaintGuideIfShed("guide-open") }
 
     // EPG-search / aeriotv://guide deep-link jump: force the SESSION view to Guide
     // so the target programme's cell exists for GuideScreen to scroll/focus (it

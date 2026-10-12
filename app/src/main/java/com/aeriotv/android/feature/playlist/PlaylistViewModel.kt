@@ -38,6 +38,7 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -464,7 +465,61 @@ class PlaylistViewModel @Inject constructor(
      *  return-to-foreground hook) rebuilds it from the Room cache. */
     @Volatile private var guideShedByTrim = false
 
+    private val repaintMutex = kotlinx.coroutines.sync.Mutex()
+
+    /**
+     * Android#131: rebuild a trim-shed guide from the Room cache (no network).
+     * Called on process return to foreground, on MAIN re-entry (back from the
+     * player), and when the guide opens. No-op unless a shed happened.
+     */
+    fun repaintGuideIfShed(trigger: String) {
+        if (!guideShedByTrim) return
+        viewModelScope.launch { repaintShedGuide(trigger) }
+    }
+
+    private suspend fun repaintShedGuide(trigger: String) = repaintMutex.withLock {
+        if (!guideShedByTrim) return@withLock
+        val playlist = _state.value.playlist ?: return@withLock
+        if (_state.value.channels.isEmpty()) return@withLock
+        guideShedByTrim = false
+        Log.i(TAG, "guide repaint after trim: trigger=$trigger (cache only)")
+        // Same two-step paint as launch: the quick window first
+        // (~4 s on a Shield), then the full window (~18 s).
+        val (fromMs, toMs) = guideWindow(playlist)
+        val nowMs = System.currentTimeMillis()
+        val quick = runCatching {
+            repository.loadCachedEpg(
+                playlist.id,
+                maxOf(fromMs, nowMs - QUICK_PAINT_BACK_MS),
+                minOf(toMs, nowMs + QUICK_PAINT_AHEAD_MS),
+            )
+        }.getOrDefault(emptyList())
+        if (quick.isNotEmpty()) rebuildGuideCatalog(playlist, "after-trim-quick", preloadedRows = quick)
+        rebuildGuideCatalog(playlist, "after-trim")
+    }
+
+    /** Playlist whose catalog rebuild was skipped for want of channels. */
+    @Volatile private var pendingCatalogRebuild: String? = null
+
+    private fun observeDeferredCatalogRebuild() {
+        viewModelScope.launch {
+            _state.map { it.channels.isNotEmpty() }.distinctUntilChanged().collect { has ->
+                if (!has) return@collect
+                val pending = pendingCatalogRebuild ?: return@collect
+                val playlist = _state.value.playlist?.takeIf { it.id == pending } ?: return@collect
+                pendingCatalogRebuild = null
+                rebuildGuideCatalog(playlist, "deferred")
+            }
+        }
+    }
+
     private fun observeMemoryPressure() {
+        observeDeferredCatalogRebuild()
+        viewModelScope.launch {
+            com.aeriotv.android.core.data.repository.EpgSweepGate.returnedToForeground.collect {
+                repaintGuideIfShed("process-start")
+            }
+        }
         viewModelScope.launch {
             memoryPressureBus.level.collect { level ->
                 if (MemoryPressureBus.isCritical(level)) {
@@ -1065,7 +1120,14 @@ class PlaylistViewModel @Inject constructor(
         preloadedRows: List<EPGProgramme>? = null,
     ) {
         val channels = _state.value.channels
-        if (channels.isEmpty()) return
+        if (channels.isEmpty()) {
+            // Used to return silently: a cached paint that ran before the
+            // channels landed left the guide with no catalog (filler rows)
+            // until a manual refresh. Re-run once channels arrive.
+            pendingCatalogRebuild = playlist.id
+            Log.i(TAG, "guide catalog rebuild ($reason) deferred: no channels yet")
+            return
+        }
         val (fromMillis, toMillis) = guideWindow(playlist)
         val t0 = android.os.SystemClock.elapsedRealtime()
         val rows = preloadedRows
@@ -1768,24 +1830,7 @@ class PlaylistViewModel @Inject constructor(
         viewModelScope.launch {
             // A background trim shed the in-memory guide: repaint it from the
             // cache before anything else (the staleness gate below may skip).
-            if (guideShedByTrim) {
-                guideShedByTrim = false
-                _state.value.playlist?.let { playlist ->
-                    // Same two-step paint as launch: the quick window first
-                    // (~4 s on a Shield), then the full window (~18 s).
-                    val (fromMs, toMs) = guideWindow(playlist)
-                    val nowMs = System.currentTimeMillis()
-                    val quick = runCatching {
-                        repository.loadCachedEpg(
-                            playlist.id,
-                            maxOf(fromMs, nowMs - QUICK_PAINT_BACK_MS),
-                            minOf(toMs, nowMs + QUICK_PAINT_AHEAD_MS),
-                        )
-                    }.getOrDefault(emptyList())
-                    if (quick.isNotEmpty()) rebuildGuideCatalog(playlist, "after-trim-quick", preloadedRows = quick)
-                    rebuildGuideCatalog(playlist, "after-trim")
-                }
-            }
+            repaintShedGuide("stale-check")
             val s = _state.value
             if (s.isLoading || s.isEpgLoading) return@launch
             val active = repository.activePlaylist() ?: return@launch
