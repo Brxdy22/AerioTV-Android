@@ -125,6 +125,7 @@ class MiniPlayerSession @Inject constructor() {
             "Active->Pending + emit channel id=${ch.id} name=${ch.name} urlBlank=${ch.url.isBlank()}",
         )
         _state.value = State.Pending(ch)
+        expandStartedAtMs = android.os.SystemClock.uptimeMillis()
         val emitted = _resumeRequests.tryEmit(ch)
         android.util.Log.i("MiniPlayerResume", "tryEmit returned $emitted")
     }
@@ -153,9 +154,28 @@ class MiniPlayerSession @Inject constructor() {
     /** User tapped the mini-player to resume; caller navigates back into PlayerScreen. */
     fun resumeChannel(): M3UChannel? {
         val channel = (_state.value as? State.Active)?.channel
-        if (channel != null) _state.value = State.Pending(channel)
+        if (channel != null) {
+            _state.value = State.Pending(channel)
+            expandStartedAtMs = android.os.SystemClock.uptimeMillis()
+        }
         return channel
     }
+
+    /** When the mini last started expanding to full screen (uptime ms). */
+    @Volatile var expandStartedAtMs: Long = 0L
+        private set
+
+    /**
+     * True for [EXPAND_GUARD_MS] after an expand: the mini leaves Active at
+     * once, which re-enables the guide's Back handler before the player
+     * route has registered its own. A second Back of a slow double landing
+     * in that gap was run as a guide Back (TV, 2026-10-12).
+     */
+    fun expandInFlight(): Boolean =
+        expandStartedAtMs != 0L &&
+            android.os.SystemClock.uptimeMillis() - expandStartedAtMs < EXPAND_GUARD_MS
+
+    private companion object { const val EXPAND_GUARD_MS = 1_000L }
 
     sealed interface State {
         /** No mini-player; no playback context. */

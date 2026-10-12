@@ -1082,6 +1082,10 @@ fun GuideScreen(
     // exactly as the old guide: the ladder must never finish the Activity
     // while a stream is playing.
     BackHandler(enabled = tabActive && !miniActive && !groupSidebarOpen && menuFor == null && programInfoTarget == null && recordTarget == null) {
+        if (miniPlayerVm.session.expandInFlight()) {
+            android.util.Log.i("AerioTV", "[GUIDE] Back ignored: mini expand in flight")
+            return@BackHandler
+        }
         when (grid.back(nowMs)) {
             GuideGridState.BackStep.RESTORED_NOW_AND_TOP, GuideGridState.BackStep.TOP -> Unit
             GuideGridState.BackStep.NONE -> {
