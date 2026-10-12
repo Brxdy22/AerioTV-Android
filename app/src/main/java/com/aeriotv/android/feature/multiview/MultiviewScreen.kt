@@ -739,6 +739,7 @@ fun MultiviewScreen(
                 if (idx >= 0) {
                     if (selected.size <= 1) {
                         // Apple parity: the last tile stays selected.
+                        android.util.Log.i("AerioMV", "[MV] picker: last channel kept (${selected.first().displayName})")
                         android.widget.Toast.makeText(mvContext, "Last channel in the Multiview", android.widget.Toast.LENGTH_SHORT).show()
                     } else {
                         removeTileAt(idx)

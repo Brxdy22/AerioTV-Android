@@ -179,7 +179,14 @@ fun GuidePreviewBanner(
                 url = result?.detail?.bestPosterString?.let { raw -> resolvePreviewArtUrl(raw, base) }
             }
         }
-        if (url == null && p.title.isNotBlank() && playlist.programPostersTmdbEnabled.first()) {
+        // Order on every art surface: server detail icon, then the program's
+        // OWN feed icon (XMLTV `<icon src>`), then TMDB by title only when
+        // both are empty. Sports events match nothing useful on TMDB (an
+        // NFL pregame matched an unrelated movie poster, Onn 2026-10-12).
+        if (url == null) url = p.iconUrl?.takeIf { it.isNotBlank() }
+        // A failed detail lookup never falls through to TMDB: the right art
+        // may arrive on the next try, and a TMDB guess would be cached.
+        if (url == null && !detailSkipped && p.title.isNotBlank() && playlist.programPostersTmdbEnabled.first()) {
             val apiKey = playlist.tmdbApiKey.first()
             if (apiKey.isNotBlank()) {
                 val isMovie = p.category.lowercase().let { it.contains("movie") || it.contains("film") }
@@ -198,12 +205,9 @@ fun GuidePreviewBanner(
                 }.getOrNull()
             }
         }
-        // Last stop: the program's OWN icon from the feed (XMLTV `<icon src>`).
-        // Sports events ("Tomorrow at 21:00 - Villarreal v Real Betis") match
-        // nothing on TMDB, but the feed ships a real picture for them.
-        if (url == null) url = p.iconUrl?.takeIf { it.isNotBlank() }
-        // A miss caused by the skipped detail step is not final.
-        if (url != null || !detailSkipped) previewArt[key] = url
+        // Nothing is cached after a skipped or failed detail step, so the
+        // next focus asks the server again.
+        if (!detailSkipped) previewArt[key] = url
     }
     val art = artKey?.let { previewArt[it] }
     val artKnown = artKey != null && previewArt.containsKey(artKey)

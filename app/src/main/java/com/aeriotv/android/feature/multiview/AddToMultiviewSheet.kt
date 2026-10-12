@@ -278,7 +278,10 @@ fun AddToMultiviewSheet(
         ) == Configuration.UI_MODE_TYPE_TELEVISION
     // Tile count gates the Play action: need the seeded current channel PLUS
     // at least one picked channel (>= 2 tiles) for a real multiview grid.
-    val canLaunch = selected.size >= 2
+    // Over a running Multiview (onRemoveTile set) Play only closes the picker
+    // back to the grid, which is valid at any tile count, as on Apple; a new
+    // Multiview from the player still needs two.
+    val canLaunch = if (onRemoveTile != null) selected.isNotEmpty() else selected.size >= 2
 
     // TV: first result when the search has any, else Play when it can launch,
     // else the search toggle (Play is disabled below two tiles and cannot hold

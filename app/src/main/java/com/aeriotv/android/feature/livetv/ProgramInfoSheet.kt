@@ -111,28 +111,31 @@ fun ProgramInfoSheet(
     // Dispatcharr serves Direct Connect guides from carries no repeat field.
     var enrichedRepeat by remember(target) { mutableStateOf(false) }
 
-    // Program poster: server detail artwork first (SD proxy / XMLTV image /
-    // icon), then TMDB-by-title when that opt-in is enabled and a key is
-    // stored. Null = no poster, render nothing. Mirrors iOS ProgramInfoView
-    // (posterURL state at ProgramInfoView.swift:96).
-    // Art resolved by a lookup (server detail, then TMDB). Null means every
-    // lookup missed, and [posterUrl] below then falls back to what the guide
-    // already resolved for this program and finally to the program's own
-    // icon, which is exactly the order the guide preview banner uses.
-    var resolvedPoster by remember(target.id) { mutableStateOf<String?>(null) }
-    // Art the guide preview banner already resolved for this program, so the
-    // sheet opens with the SAME picture the banner is showing, immediately.
+    // Art order on every surface: the server detail icon (resolved through a
+    // regenerated program id when needed), then the program's own feed icon,
+    // then TMDB by title only when both are empty and the detail lookup did
+    // not fail (an NFL pregame matched an unrelated movie poster on TMDB,
+    // Onn 2026-10-12, while the detail icon was available).
+    var detailPoster by remember(target.id) { mutableStateOf<String?>(null) }
+    var tmdbPoster by remember(target.id) { mutableStateOf<String?>(null) }
+    // Art the guide preview banner already resolved for this program (it
+    // follows the same order), so the sheet opens with the same picture.
     val bannerPoster = remember(target.id) {
         com.aeriotv.android.feature.livetv.grid.cachedPreviewArt(
             target.dispatcharrProgramId,
             target.title,
         )
     }
-    val posterUrl = resolvedPoster
-        ?: bannerPoster
-        ?: target.iconUrl?.takeIf { it.isNotBlank() }
+    val feedIcon = target.iconUrl?.takeIf { it.isNotBlank() }
+    val posterUrl = detailPoster ?: bannerPoster ?: feedIcon ?: tmdbPoster
 
-    LaunchedEffect(target.id) {
+    // Keyed on the playlist too: this sheet's PlaylistViewModel can still be
+    // loading when it opens, and running with no playlist skipped the detail
+    // lookup and let TMDB answer first. The effect waits for the playlist and
+    // runs again when it arrives, so the art updates in place.
+    val loadedPlaylistId = playlistState.playlist?.id
+    LaunchedEffect(target.id, loadedPlaylistId) {
+        if (loadedPlaylistId == null) return@LaunchedEffect
         val entry = EntryPointAccessors.fromApplication(
             context.applicationContext,
             ProgramInfoEntryPoint::class.java,
@@ -147,18 +150,22 @@ fun ProgramInfoSheet(
             playlist.sourceType == SourceType.DispatcharrApiKey.name ||
                 playlist.sourceType == SourceType.DispatcharrUserPass.name
             )
-        if (programId != null && playlist != null && isDispatcharr &&
-            (categoryNeeded || resolvedPoster == null || !target.isRepeat)
-        ) {
+        var detailFailed = false
+        if (programId != null && playlist != null && isDispatcharr) {
             val baseUrl = playlist.urlString
             val playlistId = playlist.id
-            runCatching {
+            val result = runCatching {
                 fetchProgramDetailResolving(
                     entry, baseUrl, playlistId, programId,
                     listOfNotNull(target.epgChannelKey),
                     target.startMillis, target.title,
-                ).detail ?: error("program detail unavailable")
-            }.onSuccess { detail ->
+                )
+            }.getOrNull()
+            val detail = result?.detail
+            if (detail == null) {
+                detailFailed = true
+                android.util.Log.i("AerioGuide", "[PREVIEW-ART] Program Info detail unavailable for $programId (${target.title})")
+            } else {
                 val joined = detail.categories.filter { it.isNotBlank() }.joinToString(",")
                 if (categoryNeeded && joined.isNotBlank()) effectiveCategory = joined
                 // The bulk grid has no repeat field, but this endpoint does:
@@ -167,18 +174,20 @@ fun ProgramInfoSheet(
                 detail.bestPosterString?.let { raw ->
                     // Server-relative icon paths (protected /media/ etc.) need
                     // the playlist origin prefixed before Coil can load them.
-                    resolvedPoster = if (raw.startsWith("/")) baseUrl.trimEnd('/') + raw else raw
+                    detailPoster = if (raw.startsWith("/")) baseUrl.trimEnd('/') + raw else raw
                 }
             }
         }
-        // TMDB-by-title fallback for ANY source: opt-in pref + the user's own
-        // key only (iOS loadTMDBPosterIfNeeded, ProgramInfoView.swift:369).
-        if (resolvedPoster == null && bannerPoster == null && target.title.isNotBlank()) {
+        // TMDB-by-title, last: opt-in pref + the user's own key only (iOS
+        // loadTMDBPosterIfNeeded, ProgramInfoView.swift:369).
+        if (!detailFailed && detailPoster == null && bannerPoster == null && feedIcon == null &&
+            target.title.isNotBlank()
+        ) {
             val prefs = entry.appPreferences()
             if (prefs.programPostersTmdbEnabled.first()) {
                 val key = prefs.tmdbApiKey.first()
                 if (key.isNotBlank()) {
-                    resolvedPoster = entry.tmdbService().posterUrlForTitle(target.title, key)
+                    tmdbPoster = entry.tmdbService().posterUrlForTitle(target.title, key)
                 }
             }
         }
