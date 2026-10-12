@@ -1044,6 +1044,26 @@ fun GuideScreen(
         // belongs to the previous playlist and must not be put back.
         if (groupSidebarOpen) { sidebarOriginalGroup = null; groupSidebarOpen = false }
     }
+    // Android#137: double Back on the TV mini emits guideTopRequests
+    // (Navigation.kt TvMiniPlayerOverlay onJumpToTop), but the guide rebuild
+    // (fd886fab) dropped the only collector, so the request went nowhere in
+    // every Play Channels In mode. Land now + the top channel; the mini keeps
+    // playing.
+    val tuneModeVm: com.aeriotv.android.feature.settings.SettingsViewModel = hiltViewModel()
+    val tuneInMiniMode by tuneModeVm.guideTuneInMini.collectAsStateWithLifecycle(initialValue = false)
+    val tabActiveNow by androidx.compose.runtime.rememberUpdatedState(tabActive)
+    LaunchedEffect(miniPlayerVm.session) {
+        miniPlayerVm.session.guideTopRequests.collect {
+            if (!tabActiveNow) return@collect
+            android.util.Log.i(
+                "AerioTV",
+                "[GUIDE] double Back -> top channel (mode=${if (tuneInMiniMode) "mini" else "fullscreen"})",
+            )
+            grid.back(System.currentTimeMillis())
+            runCatching { gridListState.scrollToItem(0) }
+            runCatching { gridFocus.requestFocus() }
+        }
+    }
     BackHandler(enabled = tabActive && groupSidebarOpen) {
         restoreSidebarGroup()
         sidebarOriginalGroup = null
