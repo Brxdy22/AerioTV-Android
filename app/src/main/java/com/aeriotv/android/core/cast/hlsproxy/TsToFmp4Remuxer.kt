@@ -1,5 +1,6 @@
 package com.aeriotv.android.core.cast.hlsproxy
 
+import com.aeriotv.android.core.playback.AudioOnlyGraceRule
 import java.io.ByteArrayOutputStream
 
 /**
@@ -97,12 +98,17 @@ class TsToFmp4Remuxer(
     private val audioOnlyPolicy: AudioOnlyPolicy = AudioOnlyPolicy.AUTO,
     /** Segment target in audio-only mode, cut on audio frame boundaries. */
     private val audioOnlySegmentTicks: Long = 2 * TICKS_PER_SECOND,
+    /** Monotonic wall clock in ms for the audio-only grace
+     *  ([AudioOnlyGraceRule]); the unit tests inject a fake. */
+    private val clockMs: () -> Long = { System.nanoTime() / 1_000_000L },
 ) {
     /** How the remuxer treats a program with no usable video. */
     enum class AudioOnlyPolicy {
         /** Audio-only when the PMT lists no video, or when the video PID
-         *  sends no parameter sets within [AUDIO_ONLY_FALLBACK_TICKS] of
-         *  audio (the AudioOnlyTrackGuard rule on the local player). */
+         *  is given up on by [AudioOnlyGraceRule] (wall clock from the
+         *  first audio PES: 4 s if the video PID sent zero bytes, 12 s if
+         *  it sent bytes but no parameter sets). Same rule as the
+         *  AudioOnlyTrackGuard on the local player. */
         AUTO,
         /** Always audio-only: any video PID is ignored. */
         FORCE,
@@ -246,10 +252,6 @@ class TsToFmp4Remuxer(
 
         private const val STREAM_TYPE_AAC_ADTS = 0x0F
 
-        /** Audio span after which a video PID that never produced
-         *  parameter sets is dropped and the program runs audio-only.
-         *  Same 3 s as AudioOnlyTrackGuard on the local player. */
-        const val AUDIO_ONLY_FALLBACK_TICKS = 3 * TICKS_PER_SECOND
 
         /** Names for the refusal message; anything not listed reports the
          *  raw stream_type. */
@@ -305,13 +307,18 @@ class TsToFmp4Remuxer(
 
     /** Audio-only mode (GH AerioTV#90): no video rendition, segments cut
      *  on audio frame boundaries. Set at the PMT (no video stream) or by
-     *  the 3 s fallback (video PID silent). */
+     *  the [AudioOnlyGraceRule] fallback (video PID silent). */
     var isAudioOnly = false
         private set
 
-    /** First audio PES PTS (unwrapped) seen while the video PID has not
-     *  produced parameter sets yet; the 3 s fallback measures from it. */
-    private var firstAudioPtsBeforeVideo = -1L
+    /** Wall clock (ms) of the first audio PES seen while the video PID
+     *  has not produced parameter sets yet; the grace measures from it. */
+    private var firstAudioWallMsBeforeVideo = -1L
+
+    /** Whether the video PID has delivered any TS payload bytes. A live
+     *  video PID only has late parameter sets (a Dispatcharr burst can
+     *  carry 3 s of audio media time ahead of the SPS/PPS). */
+    private var videoPidReceivedBytes = false
 
     private val videoPes = PesAssembler { payload, pts, dts -> onVideoAccessUnit(payload, pts, dts) }
     private val audioPes = PesAssembler { payload, pts, _ -> onAudioPes(payload, pts) }
@@ -559,7 +566,10 @@ class TsToFmp4Remuxer(
         when {
             pid == 0 -> parsePat(buf, payloadStart, payloadLen, pusi)
             pid == pmtPid && !pmtSeen -> parsePmt(buf, payloadStart, payloadLen, pusi)
-            pid == videoPid -> videoPes.feed(buf, payloadStart, payloadLen, pusi)
+            pid == videoPid -> {
+                if (payloadLen > 0) videoPidReceivedBytes = true
+                videoPes.feed(buf, payloadStart, payloadLen, pusi)
+            }
             pid == audioPid -> audioPes.feed(buf, payloadStart, payloadLen, pusi)
         }
     }
@@ -998,28 +1008,25 @@ class TsToFmp4Remuxer(
         if (source == null) onAdtsAudioPes(payload, pts33) else onAc3AudioPes(source, payload, pts33)
     }
 
-    /** The AudioOnlyTrackGuard rule: a video PID that has produced no
-     *  parameter sets after [AUDIO_ONLY_FALLBACK_TICKS] of audio is
-     *  dropped and the program runs audio-only. Only before any init went
-     *  out, and never when the session pins video. */
-    private fun maybeFallBackToAudioOnly(pts33: Long) {
+    /** The AudioOnlyTrackGuard rule ([AudioOnlyGraceRule]), in WALL
+     *  time from the first audio PES: audio MEDIA time is no clock here,
+     *  since one proxy burst can carry 3 s of audio before the video
+     *  parameter sets. A video PID with zero bytes is dropped after 4 s
+     *  (GH AerioTV#90 radio); one that sent bytes waits up to 12 s. Only
+     *  before any init went out, and never when the session pins video. */
+    private fun maybeFallBackToAudioOnly(@Suppress("UNUSED_PARAMETER") pts33: Long) {
         if (isAudioOnly || initSent || videoPid < 0 || sps != null) return
         if (audioOnlyPolicy != AudioOnlyPolicy.AUTO) return
-        val pts = pts33 // raw 33-bit; the wrap is folded into the span below
-        if (firstAudioPtsBeforeVideo < 0) {
-            firstAudioPtsBeforeVideo = pts
+        val now = clockMs()
+        if (firstAudioWallMsBeforeVideo < 0) {
+            firstAudioWallMsBeforeVideo = now
             return
         }
-        var span = pts - firstAudioPtsBeforeVideo
-        if (span < -(PTS_WRAP / 2)) span += PTS_WRAP
-        if (span < 0) {
-            firstAudioPtsBeforeVideo = pts // a splice backwards: start over
-            return
-        }
-        if (span < AUDIO_ONLY_FALLBACK_TICKS) return
+        val elapsed = now - firstAudioWallMsBeforeVideo
+        if (!AudioOnlyGraceRule.shouldDrop(elapsed, videoPidReceivedBytes)) return
         log(
-            "[AUDIO-ONLY] no video parameter sets after ${"%.1f".format(span / TICKS_PER_SECOND.toDouble())} s " +
-                "of audio: dropping video PID $videoPid, serving audio-only",
+            "[AUDIO-ONLY] no video parameter sets after ${"%.1f".format(elapsed / 1000.0)} s " +
+                "(video PID bytes=$videoPidReceivedBytes): dropping video PID $videoPid, serving audio-only",
         )
         videoPid = -1
         isAudioOnly = true

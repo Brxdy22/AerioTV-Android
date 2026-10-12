@@ -10,7 +10,7 @@ import org.junit.Test
 
 /**
  * Audio-only cast (GH AerioTV#90): a TS program with audio and no video
- * PID (or a video PID that never sends parameter sets within 3 s of audio)
+ * PID (or a video PID that never sends parameter sets within the AudioOnlyGraceRule wall-clock grace)
  * is served as a single audio rendition: an audio-only init, segments cut
  * on AAC frame boundaries about every 2 s with a continuous tfdt, and a
  * master playlist whose only variant is the audio media playlist. A
@@ -234,20 +234,44 @@ class TsToFmp4RemuxerAudioOnlyTest {
     }
 
     @Test
-    fun `silent video PID falls back to audio-only after 3 s of audio`() {
+    fun `silent video PID falls back to audio-only after 4 s wall clock`() {
         val cap = Capture()
-        val remuxer = TsToFmp4Remuxer(cap)
+        var now = 0L
+        val remuxer = TsToFmp4Remuxer(cap, clockMs = { now })
         feed(remuxer, patPacket() + pmtPacket(withVideo = true) + pmtPacket(withVideo = true))
-        // 2.9 s of audio: still waiting for video.
-        feedAudio(remuxer, startPts = 0L, pesCount = 28) // 27 x 9600 = 2.88 s span
+        // 8 s of audio MEDIA time in one burst: wall clock has not moved.
+        feedAudio(remuxer, startPts = 0L, pesCount = 80)
         assertFalse(remuxer.isAudioOnly)
-        assertNull(cap.audioOnlyInit)
-        // Past 3 s with no SPS: the video PID is dropped.
-        feedAudio(remuxer, startPts = 28L * framesPerPes * aacFrameTicks, pesCount = 60)
+        now = 3_900L
+        feedAudio(remuxer, startPts = 80L * framesPerPes * aacFrameTicks, pesCount = 1)
+        assertFalse(remuxer.isAudioOnly)
+        // Past 4 s with a zero-byte video PID (GH #90 radio): dropped.
+        now = 4_000L
+        feedAudio(remuxer, startPts = 81L * framesPerPes * aacFrameTicks, pesCount = 60)
         assertTrue(remuxer.isAudioOnly)
         assertNotNull(cap.audioOnlyInit)
         assertTrue(cap.audioOnlySegments.isNotEmpty())
-        assertEquals(0L, tfdt(cap.audioOnlySegments.first()))
+    }
+
+    @Test
+    fun `burst of audio ahead of a live video PID is not audio-only`() {
+        // The 2026-10-11 Onn cast: 3 s of audio media time arrived 163 ms
+        // after connect, before the SPS/PPS, while video bytes were flowing.
+        val cap = Capture()
+        var now = 0L
+        val remuxer = TsToFmp4Remuxer(cap, clockMs = { now })
+        feed(remuxer, patPacket() + pmtPacket(withVideo = true) + pmtPacket(withVideo = true))
+        // Video PES bytes with no parameter sets (a non-IDR slice).
+        feed(remuxer, packetize(0x101, pes(0xE0, byteArrayOf(0, 0, 0, 1, 0x41, 0x9A.toByte(), 0x10), 0L)))
+        feedAudio(remuxer, startPts = 0L, pesCount = 80)
+        now = 11_900L
+        feedAudio(remuxer, startPts = 80L * framesPerPes * aacFrameTicks, pesCount = 1)
+        assertFalse(remuxer.isAudioOnly)
+        assertNull(cap.audioOnlyInit)
+        // 12 s cap: a live PID that never sends parameter sets is given up on.
+        now = 12_000L
+        feedAudio(remuxer, startPts = 81L * framesPerPes * aacFrameTicks, pesCount = 1)
+        assertTrue(remuxer.isAudioOnly)
     }
 
     @Test
