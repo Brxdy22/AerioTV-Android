@@ -130,6 +130,8 @@ fun PlayerSettingsScreen(
     val startupRefreshRate by viewModel.startupRefreshRate.collectAsStateWithLifecycle(initialValue = "off")
     val matchContentResolution by viewModel.matchContentResolution.collectAsStateWithLifecycle(initialValue = false)
     val matchFrameRate by viewModel.matchFrameRate.collectAsStateWithLifecycle(initialValue = false)
+    val multiviewPickerShowSubtitles by viewModel.multiviewPickerShowSubtitles.collectAsStateWithLifecycle(initialValue = false)
+    val multiviewPickerShowDescriptions by viewModel.multiviewPickerShowDescriptions.collectAsStateWithLifecycle(initialValue = false)
 
     SettingsSubPageHost {
     Column(modifier = Modifier.fillMaxSize()) {
@@ -504,6 +506,18 @@ fun PlayerSettingsScreen(
                         leadingIcon = if (isTv) Icons.Filled.Image else null,
                         checked = multiviewShowLogos,
                         onCheckedChange = viewModel::setMultiviewShowLogos,
+                    )
+                    SettingsToggleRow(
+                        title = "Show Subtitles",
+                        subtitle = "Show the program subtitle in the Add to Multiview picker",
+                        checked = multiviewPickerShowSubtitles,
+                        onCheckedChange = viewModel::setMultiviewPickerShowSubtitles,
+                    )
+                    SettingsToggleRow(
+                        title = "Show Descriptions",
+                        subtitle = "Show the program description in the Add to Multiview picker",
+                        checked = multiviewPickerShowDescriptions,
+                        onCheckedChange = viewModel::setMultiviewPickerShowDescriptions,
                     )
                     if (multiviewShowLogos) {
                         val corners = listOf(

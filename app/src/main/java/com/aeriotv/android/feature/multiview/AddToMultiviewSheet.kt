@@ -167,8 +167,8 @@ fun AddToMultiviewSheet(
     val recentIds by settingsVm.recentChannelIds.collectAsStateWithLifecycle(initialValue = emptyList())
     val selectedIds = selected.map { it.id }.toSet()
     val scope = rememberCoroutineScope()
-    // Picker pills "Show Subtitles" / "Show Descriptions" (2026-10-12):
-    // extra lines on every channel row, remembered across launches.
+    // Settings > Player > Multiview "Show Subtitles" / "Show Descriptions"
+    // (2026-10-12): extra lines on every channel row, read live.
     val showSubtitles by settingsVm.multiviewPickerShowSubtitles.collectAsStateWithLifecycle(initialValue = false)
     val showDescriptions by settingsVm.multiviewPickerShowDescriptions.collectAsStateWithLifecycle(initialValue = false)
     val removeSelected: (String) -> Unit = { id ->
@@ -402,33 +402,13 @@ fun AddToMultiviewSheet(
                 if (hasSeries) add(PickerSource.Series)
                 if (hasRecordings) add(PickerSource.Recordings)
             }
-            // Show Subtitles / Show Descriptions ride this row (right-aligned
-            // on TV and tablet, wrapped onto their own row below on phones),
-            // so the row renders even when Channels is the only source.
-            val wideRow = isTvDevice ||
-                androidx.compose.ui.platform.LocalConfiguration.current.smallestScreenWidthDp >= 600
-            val detailPills: @Composable () -> Unit = {
-                PickerTogglePill(
-                    label = "Show Subtitles",
-                    selected = showSubtitles,
-                    onClick = { settingsVm.setMultiviewPickerShowSubtitles(!showSubtitles) },
-                )
-                PickerTogglePill(
-                    label = "Show Descriptions",
-                    selected = showDescriptions,
-                    onClick = { settingsVm.setMultiviewPickerShowDescriptions(!showDescriptions) },
-                )
-            }
             // Pill rows keep start and vertical room inside the LazyRow's
             // clip, so a selected or focused first pill is never cut at its
             // left edge (Apple TV showed "Channels" clipped by the inset).
             val pillRowPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 4.dp, bottom = 4.dp)
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
+            if (availableSources.size > 1) {
                 LazyRow(
-                    modifier = Modifier.weight(1f),
+                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
                     contentPadding = pillRowPadding,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                     verticalAlignment = Alignment.CenterVertically,
@@ -448,20 +428,6 @@ fun AddToMultiviewSheet(
                         )
                     }
                 }
-                if (wideRow) {
-                    Row(
-                        modifier = Modifier.padding(start = 4.dp, end = 12.dp, top = 4.dp, bottom = 4.dp),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) { detailPills() }
-                }
-            }
-            if (!wideRow) {
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(start = 12.dp, end = 12.dp, top = 2.dp, bottom = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) { detailPills() }
             }
 
             // Control row (Channels only): a search TOGGLE button to the LEFT of
@@ -1158,26 +1124,6 @@ private fun ChannelPickerRow(
             }
         }
     }
-}
-
-/** Picker detail toggle ("Show Subtitles" / "Show Descriptions"): a filter
- *  chip like the source pills, with a check while on. */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun PickerTogglePill(label: String, selected: Boolean, onClick: () -> Unit) {
-    FilterChip(
-        selected = selected,
-        onClick = onClick,
-        label = { Text(label, maxLines = 1, softWrap = false) },
-        leadingIcon = if (selected) {
-            { Icon(Icons.Filled.Check, contentDescription = null, modifier = Modifier.size(16.dp)) }
-        } else null,
-        colors = FilterChipDefaults.filterChipColors(
-            selectedContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.22f),
-            selectedLabelColor = MaterialTheme.colorScheme.primary,
-            selectedLeadingIconColor = MaterialTheme.colorScheme.primary,
-        ),
-    )
 }
 
 /** Multiview picker content source. Mirrors iOS PickerSource. */
