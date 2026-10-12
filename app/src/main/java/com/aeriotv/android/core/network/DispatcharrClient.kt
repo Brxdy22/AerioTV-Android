@@ -738,6 +738,9 @@ class DispatcharrClient @Inject constructor() {
         val url = "${baseUrl.trimEnd('/')}/api/epg/programs/$programId/"
         val response: HttpResponse = client.get(url) { applyAuth(apiKey) }
         unauthorizedCheck(response, url)
+        if (response.status.value == 404) {
+            throw DispatcharrError.NotFound("Program detail failed: HTTP 404")
+        }
         if (!response.status.isSuccess()) {
             throw DispatcharrError.Transport("Program detail failed: HTTP ${response.status.value}")
         }
@@ -3348,6 +3351,24 @@ fun JsonElement?.flexString(): String? {
     return null
 }
 
+/** `custom_properties.icon`, else the first usable `custom_properties.images`
+ *  entry (a string or an object with `url`). Dummy-EPG artwork (Android#132). */
+internal fun customPropertiesArtwork(props: JsonObject?): String? {
+    if (props == null) return null
+    (props["icon"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+        ?.takeIf { it.isNotBlank() }?.let { return it }
+    val images = props["images"] as? JsonArray ?: return null
+    for (el in images) {
+        val url = when (el) {
+            is JsonPrimitive -> el.takeIf { it.isString }?.content
+            is JsonObject -> (el["url"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+            else -> null
+        }
+        if (!url.isNullOrBlank()) return url
+    }
+    return null
+}
+
 @Serializable
 data class DispatcharrEpgEntry(
     // `id` accepted as a JsonElement so the parser tolerates both shapes
@@ -3411,19 +3432,7 @@ data class DispatcharrEpgEntry(
     val artworkUrl: String?
         get() {
             icon?.takeIf { it.isNotBlank() }?.let { return it }
-            val props = customProperties ?: return null
-            (props["icon"] as? JsonPrimitive)?.takeIf { it.isString }?.content
-                ?.takeIf { it.isNotBlank() }?.let { return it }
-            val images = props["images"] as? JsonArray ?: return null
-            for (el in images) {
-                val url = when (el) {
-                    is JsonPrimitive -> el.takeIf { it.isString }?.content
-                    is JsonObject -> (el["url"] as? JsonPrimitive)?.takeIf { it.isString }?.content
-                    else -> null
-                }
-                if (!url.isNullOrBlank()) return url
-            }
-            return null
+            return customPropertiesArtwork(customProperties)
         }
 }
 
@@ -3457,6 +3466,10 @@ data class DispatcharrProgramDetail(
      *  Connect (mikec79, 2026-08-19). */
     @SerialName("is_previously_shown")
     val isPreviouslyShown: Boolean = false,
+    /** Free-form program properties; dummy-EPG programs keep their poster
+     *  here as `icon` / `images` (Android#132, same as the grid decoder). */
+    @SerialName("custom_properties")
+    val customProperties: JsonObject? = null,
 ) {
     val tmdbId: String?
         get() = (tmdbIdRaw as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
@@ -3468,7 +3481,8 @@ data class DispatcharrProgramDetail(
         get() {
             posterUrl?.takeIf { it.isNotBlank() }?.let { return it }
             images.firstNotNullOfOrNull { it.url?.takeIf(String::isNotBlank) }?.let { return it }
-            return icon?.takeIf { it.isNotBlank() }
+            icon?.takeIf { it.isNotBlank() }?.let { return it }
+            return customPropertiesArtwork(customProperties)
         }
 }
 

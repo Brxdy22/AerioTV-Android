@@ -152,14 +152,12 @@ fun ProgramInfoSheet(
         ) {
             val baseUrl = playlist.urlString
             val playlistId = playlist.id
-            val broker = entry.dispatcharrAuth()
-            val client = entry.dispatcharrClient()
             runCatching {
-                withContext(Dispatchers.IO) {
-                    broker.withApiKeyRetry(playlistId) { key ->
-                        client.getProgramDetail(baseUrl, key, programId)
-                    }
-                }
+                fetchProgramDetailResolving(
+                    entry, baseUrl, playlistId, programId,
+                    listOfNotNull(target.epgChannelKey),
+                    target.startMillis, target.title,
+                ).detail ?: error("program detail unavailable")
             }.onSuccess { detail ->
                 val joined = detail.categories.filter { it.isNotBlank() }.joinToString(",")
                 if (categoryNeeded && joined.isNotBlank()) effectiveCategory = joined
@@ -614,7 +612,43 @@ interface ProgramInfoEntryPoint {
     fun dispatcharrAuth(): DispatcharrAuthBroker
     fun tmdbService(): TMDBService
     fun appPreferences(): AppPreferences
+    fun epgProgrammeDao(): com.aeriotv.android.core.data.db.dao.EpgProgrammeDao
 }
+
+/**
+ * Program detail through [com.aeriotv.android.core.network.ProgramDetailResolver]:
+ * a 404 for a regenerated program id is re-resolved by tvg_id and start, and
+ * the cached guide rows move to the new id. Null on any failure (never a
+ * cached miss). Shared by the guide preview banner and Program Info.
+ */
+suspend fun fetchProgramDetailResolving(
+    entry: ProgramInfoEntryPoint,
+    baseUrl: String,
+    playlistId: String,
+    programId: Int,
+    tvgIds: List<String>,
+    startMillis: Long,
+    title: String,
+): com.aeriotv.android.core.network.ProgramDetailResolver.Result =
+    withContext(Dispatchers.IO) {
+        val broker = entry.dispatcharrAuth()
+        val client = entry.dispatcharrClient()
+        val result = com.aeriotv.android.core.network.ProgramDetailResolver.resolve(
+            programId = programId,
+            tvgIds = tvgIds,
+            startMillis = startMillis,
+            title = title,
+            fetchDetail = { id -> broker.withApiKeyRetry(playlistId) { k -> client.getProgramDetail(baseUrl, k, id) } },
+            listByTvgId = { tvg -> broker.withApiKeyRetry(playlistId) { k -> client.getProgramsByTvgId(baseUrl, k, tvg) } },
+            log = { android.util.Log.i("AerioGuide", it) },
+        )
+        val stale = result.staleFrom
+        if (stale != null && result.detail != null) {
+            runCatching { entry.epgProgrammeDao().remapProgramId(playlistId, stale, result.programId) }
+                .onFailure { android.util.Log.w("AerioGuide", "[PREVIEW-ART] program id remap failed", it) }
+        }
+        result
+    }
 
 private fun formatDuration(millis: Long): String {
     if (millis <= 0L) return "–"

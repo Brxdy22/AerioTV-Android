@@ -45,6 +45,9 @@ data class ProgramInfoTarget(
      * program that ships art never shows an empty art slot.
      */
     val iconUrl: String? = null,
+    /** The guide row's channel key (the grid's tvg_id for Dispatcharr), for
+     *  re-resolving a regenerated program id by tvg_id and start. */
+    val epgChannelKey: String? = null,
     /** DVR extras when the sheet opens from a recording (Apple parity). */
     val recording: RecordingFacts? = null,
 ) {
@@ -73,6 +76,7 @@ fun EPGProgramme.toInfoTarget(
         isFinale = isFinale,
         isRepeat = isRepeat,
         iconUrl = iconUrl,
+        epgChannelKey = channelId,
     )
 
 /**

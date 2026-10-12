@@ -39,6 +39,7 @@ object GuideMerge {
         isPremiere = existing.isPremiere || incoming.isPremiere,
         isFinale = existing.isFinale || incoming.isFinale,
         isRepeat = existing.isRepeat || incoming.isRepeat,
+        iconUrl = existing.iconUrl?.takeIf { it.isNotBlank() } ?: incoming.iconUrl?.takeIf { it.isNotBlank() },
     )
 
     /** Collapse duplicates in a start-sorted list, keeping the earlier row. */

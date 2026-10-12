@@ -165,17 +165,18 @@ fun GuidePreviewBanner(
                 // after launch. Do not cache a miss for that; retry next time.
                 detailSkipped = true
             } else {
-                url = runCatching {
-                    withContext(Dispatchers.IO) {
-                        val broker = entry.dispatcharrAuth()
-                        val client = entry.dispatcharrClient()
-                        broker.withApiKeyRetry(playlistId) { k ->
-                            client.getProgramDetail(base, k, pid).bestPosterString?.let { raw ->
-                                resolvePreviewArtUrl(raw, base)
-                            }
-                        }
-                    }
+                // A failed detail lookup (a 404 for a regenerated program id
+                // that could not be re-resolved, or any network error) is
+                // never cached as "no art"; the next focus retries.
+                val result = runCatching {
+                    com.aeriotv.android.feature.livetv.fetchProgramDetailResolving(
+                        entry, base, playlistId, pid,
+                        listOfNotNull(p.channelId, channel?.tvgID),
+                        p.startMillis, p.title,
+                    )
                 }.getOrNull()
+                if (result == null || result.failed) detailSkipped = true
+                url = result?.detail?.bestPosterString?.let { raw -> resolvePreviewArtUrl(raw, base) }
             }
         }
         if (url == null && p.title.isNotBlank() && playlist.programPostersTmdbEnabled.first()) {

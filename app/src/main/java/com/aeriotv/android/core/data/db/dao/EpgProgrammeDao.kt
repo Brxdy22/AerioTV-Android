@@ -28,6 +28,11 @@ interface EpgProgrammeDao {
     @Query("SELECT * FROM epg_programme WHERE playlistId = :playlistId")
     suspend fun forPlaylist(playlistId: String): List<EpgProgrammeEntity>
 
+    /** A regenerated Dispatcharr program id found again by tvg_id and start
+     *  (ProgramDetailResolver): point the cached rows at the new id. */
+    @Query("UPDATE epg_programme SET dispatcharrProgramId = :newId WHERE playlistId = :playlistId AND dispatcharrProgramId = :oldId")
+    suspend fun remapProgramId(playlistId: String, oldId: Int, newId: Int): Int
+
     /**
      * Time-windowed variant of [forPlaylist] (iOS GuideStore parity --
      * EPGGuideView.swift `loadFromCache` predicate). Returns only programmes

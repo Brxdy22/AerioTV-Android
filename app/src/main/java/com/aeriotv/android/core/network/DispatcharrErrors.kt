@@ -30,7 +30,11 @@ sealed class DispatcharrError(message: String) : Exception(message) {
     class Unauthorized(message: String) : DispatcharrError(message)
     class RefreshExpired(message: String) : DispatcharrError(message)
     class UnexpectedResponse(message: String) : DispatcharrError(message)
-    class Transport(message: String) : DispatcharrError(message)
+    open class Transport(message: String) : DispatcharrError(message)
+
+    /** HTTP 404 from a by-id lookup (a regenerated program id, for one).
+     *  A [Transport] so every existing catch keeps handling it. */
+    class NotFound(message: String) : Transport(message)
 
     /**
      * A 403 from an endpoint whose permission class is a CAPABILITY check
