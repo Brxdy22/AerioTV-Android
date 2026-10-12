@@ -648,6 +648,12 @@ suspend fun fetchProgramDetailResolving(
             startMillis = startMillis,
             title = title,
             fetchDetail = { id -> broker.withApiKeyRetry(playlistId) { k -> client.getProgramDetail(baseUrl, k, id) } },
+            cachedGridId = {
+                tvgIds.firstNotNullOfOrNull { key ->
+                    entry.epgProgrammeDao().currentProgramId(playlistId, key, startMillis, programId)
+                }
+            },
+            fetchGrid = { broker.withApiKeyRetry(playlistId) { k -> client.getEpgGrid(baseUrl, k) } },
             listByTvgId = { tvg -> broker.withApiKeyRetry(playlistId) { k -> client.getProgramsByTvgId(baseUrl, k, tvg) } },
             log = { android.util.Log.i("AerioGuide", it) },
         )

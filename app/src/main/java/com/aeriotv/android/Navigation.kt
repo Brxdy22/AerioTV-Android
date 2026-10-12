@@ -1717,6 +1717,11 @@ fun AerioTVNavHost(
                             navController.popBackStack()
                         }
                     },
+                    onPlaySingleChannel = { channelId ->
+                        navController.navigate(Routes.player(channelId)) {
+                            popUpTo(Routes.MULTIVIEW) { inclusive = true }
+                        }
+                    },
                     httpHeaders = headers,
                     // Pass the PLAYLIST_GRAPH-scoped VM so the re-entrant
                     // "Add streams" picker reuses this single instance.

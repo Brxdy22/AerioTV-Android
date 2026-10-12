@@ -1853,7 +1853,9 @@ class PlaylistRepository @Inject constructor(
      * "id:none" rather than dropping out, so adding or removing one still
      * registers as a change.
      */
-    private val EPG_GRID_DECODER_REVISION = 2
+    // r3: rows a start-only program id re-resolve (pre-release build,
+    // 2026-10-12) pointed at another channel's program are re-fetched.
+    private val EPG_GRID_DECODER_REVISION = 3
 
     private fun epgSourcesFingerprint(sources: List<DispatcharrEpgSource>): String =
         sources

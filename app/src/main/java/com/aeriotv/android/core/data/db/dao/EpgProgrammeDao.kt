@@ -28,6 +28,11 @@ interface EpgProgrammeDao {
     @Query("SELECT * FROM epg_programme WHERE playlistId = :playlistId")
     suspend fun forPlaylist(playlistId: String): List<EpgProgrammeEntity>
 
+    /** The current program id a cached guide row carries for this channel key
+     *  and start, when it differs from [excludeId] (the guide refreshed). */
+    @Query("SELECT dispatcharrProgramId FROM epg_programme WHERE playlistId = :playlistId AND channelId = :channelId AND startMillis BETWEEN :startMillis - 999 AND :startMillis + 999 AND dispatcharrProgramId IS NOT NULL AND dispatcharrProgramId != :excludeId LIMIT 1")
+    suspend fun currentProgramId(playlistId: String, channelId: String, startMillis: Long, excludeId: Int): Int?
+
     /** A regenerated Dispatcharr program id found again by tvg_id and start
      *  (ProgramDetailResolver): point the cached rows at the new id. */
     @Query("UPDATE epg_programme SET dispatcharrProgramId = :newId WHERE playlistId = :playlistId AND dispatcharrProgramId = :oldId")

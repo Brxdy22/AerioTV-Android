@@ -164,6 +164,9 @@ private const val TAG = "MultiviewScreen"
 @Composable
 fun MultiviewScreen(
     onClose: () -> Unit,
+    /** Logan 2026-10-12: a running Multiview reduced to one live channel
+     *  hands that channel to the standard single-channel player. */
+    onPlaySingleChannel: ((String) -> Unit)? = null,
     httpHeaders: Map<String, String> = emptyMap(),
     storeHandle: MultiviewStoreHandle = rememberMultiviewStoreHandle(),
     settingsVm: SettingsViewModel = hiltViewModel(),
@@ -425,6 +428,23 @@ fun MultiviewScreen(
         finishedTiles = shift(finishedTiles)
         scrubberTiles = shift(scrubberTiles)
         storeHandle.removeAt(idx)
+    }
+
+    // One channel left after removals (picker deselects or a tile's Remove)
+    // plays in the standard player once the picker is closed: Play, swipe
+    // down and Back all close it. Same rule as MainScaffold's single-staged
+    // and one-background-channel paths. Only after the grid had 2 or more
+    // tiles, and only for a live tile (on-demand tiles have no channel).
+    var hadMultipleTiles by remember { mutableStateOf(false) }
+    LaunchedEffect(selected.size, addPickerOpen, tileMenuIndex) {
+        if (selected.size >= 2) hadMultipleTiles = true
+        val only = selected.singleOrNull() ?: return@LaunchedEffect
+        if (!hadMultipleTiles || addPickerOpen || tileMenuIndex != null) return@LaunchedEffect
+        if (only.kind != TileKind.Live || onPlaySingleChannel == null) return@LaunchedEffect
+        android.util.Log.i("AerioMV", "[MV] one channel left (${only.displayName}): standard player")
+        hadMultipleTiles = false
+        exitClearRequested.value = true
+        onPlaySingleChannel(only.id)
     }
 
     if (selected.isEmpty()) {
