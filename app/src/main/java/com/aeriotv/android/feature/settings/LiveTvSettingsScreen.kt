@@ -224,19 +224,6 @@ fun LiveTvSettingsScreen(
                         )
                         // GH #127 (Apple d051505): phone and tablet only; TV
                         // reaches Program Info from the long-press menu.
-                        // Apple parity (2026-10-13): where the button shows,
-                        // Guide View and List View independently; the
-                        // picker below applies to both.
-                        if (!isTv) SettingsToggleRow(
-                            title = "Guide View",
-                            checked = pibGuide,
-                            onCheckedChange = viewModel::setProgramInfoButtonGuide,
-                        )
-                        if (!isTv) SettingsToggleRow(
-                            title = "List View",
-                            checked = pibList,
-                            onCheckedChange = viewModel::setProgramInfoButtonList,
-                        )
                         if (!isTv) SettingsPickerRow(
                             title = "Program Info Button",
                             inlineTitle = true,
@@ -248,7 +235,23 @@ fun LiveTvSettingsScreen(
                             selected = programInfoButton,
                             onSelect = viewModel::setGuideProgramInfoButton,
                             leadingIcon = Icons.Outlined.Info,
-                            footer = "Adds an info button to guide program cells that opens Program Info in one tap. Current Programs shows it on programs airing now; All Programs shows it on every cell wide enough for it.",
+                            // Apple parity (2026-10-13): where the button
+                            // shows comes first on the picker's own page.
+                            headerContent = {
+                                SettingsToggleRow(
+                                    title = "Guide View",
+                                    subtitle = "Program Info button on guide program cells.",
+                                    checked = pibGuide,
+                                    onCheckedChange = viewModel::setProgramInfoButtonGuide,
+                                )
+                                SettingsToggleRow(
+                                    title = "List View",
+                                    subtitle = "Program Info button on channel list rows.",
+                                    checked = pibList,
+                                    onCheckedChange = viewModel::setProgramInfoButtonList,
+                                )
+                            },
+                            footer = "Adds an info button that opens Program Info in one tap. Guide View puts it on guide program cells; List View puts it on channel list rows. Current Programs shows it on programs airing now; All Programs shows it on every cell wide enough for it.",
                         )
                     }
                 }

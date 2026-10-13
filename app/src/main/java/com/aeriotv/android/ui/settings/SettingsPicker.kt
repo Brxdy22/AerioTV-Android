@@ -103,6 +103,9 @@ fun <T> ColumnScope.SettingsPickerRow(
      * sheet closes on pick. Off keeps the inline option list (Guide Layout).
      */
     tvChoiceSheet: Boolean = false,
+    /** Rows drawn first on the picker's page, above the choices (Program
+     *  Info Button's Guide View / List View toggles). Inline too. */
+    headerContent: (@Composable ColumnScope.() -> Unit)? = null,
 ) {
     if (tvChoiceSheet && rememberIsTvDevice()) {
         // The sheet opens with focus on the CURRENT value (a long list such
@@ -136,6 +139,7 @@ fun <T> ColumnScope.SettingsPickerRow(
     val push = settingsPushesSubPages()
     val host = rememberSubPageRegistration(pageKey) {
         val controller = LocalSettingsSubPageHost.current
+        headerContent?.invoke(this)
         options.forEach { option ->
             SettingsSelectionRow(
                 label = option.label,
@@ -171,6 +175,7 @@ fun <T> ColumnScope.SettingsPickerRow(
                 modifier = Modifier.padding(start = 6.dp, top = 4.dp),
             )
         }
+        headerContent?.invoke(this)
         options.forEach { option ->
             SettingsSelectionRow(
                 label = option.label,
