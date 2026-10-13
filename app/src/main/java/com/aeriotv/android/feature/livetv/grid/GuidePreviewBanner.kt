@@ -288,16 +288,19 @@ fun GuidePreviewBanner(
                     .padding(end = if (miniActive) 211.dp else 0.dp),
                 verticalArrangement = Arrangement.spacedBy(3.dp),
             ) {
-                // tvOS: title and channel name share the first text baseline.
-                Row(horizontalArrangement = Arrangement.spacedBy(7.dp)) {
-                    Text(
-                        program.title, fontSize = 18.sp, fontWeight = FontWeight.Bold, color = colors.onBackground,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f, fill = false).alignByBaseline(),
-                    )
-                    if (channel != null) {
-                        Text(channel.name, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = colors.textAccent, maxLines = 1, modifier = Modifier.alignByBaseline())
-                    }
+                // Apple parity (2026-10-12): the title wraps to 2 lines and the
+                // channel name sits on its own line under it (long Teamarr
+                // titles were cut short sharing one line with the channel).
+                // The banner height stays fixed, so a 2-line title takes its
+                // extra line from the description and nothing below moves.
+                var titleLines by remember(program.title) { androidx.compose.runtime.mutableIntStateOf(1) }
+                Text(
+                    program.title, fontSize = 18.sp, fontWeight = FontWeight.Bold, color = colors.onBackground,
+                    maxLines = 2, overflow = TextOverflow.Ellipsis,
+                    onTextLayout = { titleLines = it.lineCount },
+                )
+                if (channel != null) {
+                    Text(channel.name, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = colors.textAccent, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
                 val sub = program.subTitle?.takeIf { !subtitleIsRedundant(it, program.title, program.description) }
                 if (sub != null) {
@@ -334,8 +337,10 @@ fun GuidePreviewBanner(
                         // baseline), so large Text Sizes trade a description
                         // line for room instead of pushing the title out the top.
                         color = colors.onBackground.copy(alpha = 0.85f).forText(),
+                        // Up to 2 lines (Apple), 1 when the title wrapped or
+                        // a large Text Size needs the room.
                         maxLines = (androidx.compose.ui.platform.LocalDensity.current.fontScale * com.aeriotv.android.ui.scale.LocalSubtextScale.current).let { fs ->
-                            when { fs >= 1.35f -> 1; fs >= 1.1f -> 2; else -> 3 }
+                            if (fs >= 1.1f || titleLines > 1) 1 else 2
                         },
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier

@@ -38,6 +38,12 @@ object RadioMode {
 
     /** The active playlist's stream headers, kept current by the nav layer
      *  (menus that start Radio Mode have no playlist of their own). */
+    /** uptime ms of the last app leave while in Radio Mode (Home). */
+    @Volatile var leftAppAtMs: Long = 0L
+
+    /** uptime ms of the last [start] (the TV banner's OK guard). */
+    @Volatile var startedAtMs: Long = 0L
+
     @Volatile var headersProvider: (() -> Map<String, String>)? = null
 
     /** Neighbour in the current channel order (+1 next, -1 previous), kept
@@ -76,9 +82,11 @@ object RadioMode {
         val e = entry(context)
         val holder = e.exoPlayerHolder()
         _state.value = Session(channel)
+        startedAtMs = android.os.SystemClock.uptimeMillis()
         holder.remoteAudioOnly = true
         holder.setVideoTrackEnabled(false)
         e.exoWindowState().hide()
+        if (com.aeriotv.android.core.pip.PipState.nowPlayingTitle != channel.name) notifyNowPlaying(channel, "")
         Log.i(TAG, "[RADIO] start ${channel.name}")
         AerioMediaPlaybackService.startBackground(context)
         Log.i(TAG, "[RADIO] service started")
@@ -131,6 +139,10 @@ object RadioMode {
             holder.setVideoTrackEnabled(false)
         }
         _state.value = Session(channel)
+        notifyNowPlaying(channel, subtitle)
+        // Re-post the service's notification so its title follows the switch
+        // (the placeholder reads PipState; Nothing Phone kept the old name).
+        if (log) AerioMediaPlaybackService.startBackground(context)
         if (log) Log.i(TAG, "[RADIO] switch -> ${channel.name}")
     }
 
@@ -159,6 +171,12 @@ object RadioMode {
         Log.i(TAG, "[RADIO] service stopped")
         runCatching { e.timeshiftController().onMiniClosed("radio-$reason") }
         Log.i(TAG, "[RADIO] stop ($reason) ${s.channel.name}")
+    }
+
+    private fun notifyNowPlaying(channel: M3UChannel, subtitle: String) {
+        com.aeriotv.android.core.pip.PipState.nowPlayingTitle = channel.name
+        com.aeriotv.android.core.pip.PipState.nowPlayingSubtitle = subtitle
+        com.aeriotv.android.core.pip.PipState.nowPlayingLogo = channel.tvgLogo.takeIf { it.isNotBlank() }
     }
 
     private const val TAG = "AerioTV"

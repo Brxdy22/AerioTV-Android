@@ -675,8 +675,10 @@ class MainActivity : ComponentActivity() {
             // audio-only + API<31 video branches on TV.
             // Radio Mode keeps playing in the background on every device
             // (Android#127): the media service carries the notification.
-            com.aeriotv.android.feature.player.RadioMode.isActive ->
+            com.aeriotv.android.feature.player.RadioMode.isActive -> {
+                com.aeriotv.android.feature.player.RadioMode.leftAppAtMs = android.os.SystemClock.uptimeMillis()
                 AerioMediaPlaybackService.startBackground(this)
+            }
             isTelevisionDevice() -> stopTvPlaybackOnLeave("onUserLeaveHint")
             // Audio-only: never enter PiP. Keep a foreground media notification
             // alive so audio continues with status-bar + lock-screen controls.

@@ -224,6 +224,29 @@ class AerioMediaPlaybackService : MediaLibraryService() {
             }
         }
 
+        // Radio Mode on Google TV: the system pauses the active media session
+        // when the user presses Home (Streamer 2026-10-12, MediaSessionRecord
+        // pause from "android" right after the leave), which would end the
+        // background listening Radio Mode exists for. Ignore exactly that
+        // pause; any later pause (notification, remote, Assistant) works.
+        @Deprecated("Media3 1.4 API")
+        override fun onPlayerCommandRequest(
+            session: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            playerCommand: Int,
+        ): Int {
+            if (playerCommand == androidx.media3.common.Player.COMMAND_PLAY_PAUSE &&
+                com.aeriotv.android.feature.player.RadioMode.isActive &&
+                controller.packageName == "android" &&
+                android.os.SystemClock.uptimeMillis() - com.aeriotv.android.feature.player.RadioMode.leftAppAtMs < 3_000L
+            ) {
+                android.util.Log.i("AerioTV", "[RADIO] ignored system pause on leave")
+                return androidx.media3.session.SessionResult.RESULT_ERROR_PERMISSION_DENIED
+            }
+            @Suppress("DEPRECATION")
+            return super.onPlayerCommandRequest(session, controller, playerCommand)
+        }
+
         override fun onCustomCommand(
             session: MediaSession,
             controller: MediaSession.ControllerInfo,

@@ -432,7 +432,9 @@ private fun RadioTvBanner(
     val ownFocus = remember { FocusRequester() }
     val returnFocusRequester = playFocusRequester ?: ownFocus
     LaunchedEffect(Unit) {
-        guard.arm()
+        // Guard only the OK that just chose Radio Mode; a banner re-shown
+        // after Home (Streamer 2026-10-12) swallowed the first Return press.
+        if (android.os.SystemClock.uptimeMillis() - com.aeriotv.android.feature.player.RadioMode.startedAtMs < 1_500L) guard.arm()
         kotlinx.coroutines.delay(350L)
         repeat(20) {
             if (runCatching { returnFocusRequester.requestFocus() }.isSuccess) return@LaunchedEffect

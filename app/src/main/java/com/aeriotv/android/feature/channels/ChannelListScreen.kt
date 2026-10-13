@@ -1441,6 +1441,7 @@ internal fun ChannelRow(
                     TvActionMenuDialog(
                         title = channel.name,
                         actions = buildList {
+                            com.aeriotv.android.feature.player.radioMenuAction(context, channel, nowProgramme?.title.orEmpty())?.let { add(it) }
                             add(
                                 TvMenuAction(
                                     if (isFavorite) "Remove from Favorites" else "Add to Favorites",
@@ -1453,7 +1454,6 @@ internal fun ChannelRow(
                             }
                             // #45: Add to Collection + the contextual remove
                             // (iOS cardMenuButtons order: right after Favorites).
-                            com.aeriotv.android.feature.player.radioMenuAction(context, channel, nowProgramme?.title.orEmpty())?.let { add(it) }
                             collectionsMenu?.let { cm ->
                                 add(
                                     TvMenuAction("Add to Collection…", Icons.Outlined.Folder) {
@@ -1524,6 +1524,7 @@ internal fun ChannelRow(
                     subtitle = nowProgramme?.title ?: " ",
                     actions = buildList {
                         add(TvMenuAction("Watch", Icons.Filled.PlayArrow) { onPlay() })
+                        com.aeriotv.android.feature.player.radioMenuAction(context, channel, nowProgramme?.title.orEmpty())?.let { add(it) }
                         add(
                             TvMenuAction(
                                 if (isFavorite) "Remove from Favorites" else "Add to Favorites",
@@ -1543,7 +1544,6 @@ internal fun ChannelRow(
                                 ) { toggle() },
                             )
                         }
-                        com.aeriotv.android.feature.player.radioMenuAction(context, channel, nowProgramme?.title.orEmpty())?.let { add(it) }
                         collectionsMenu?.let { cm ->
                             add(TvMenuAction("Add Channel to Collection", Icons.Outlined.Folder) { cm.onOpenPicker(channel.id, channel.name, -1, 0L) })
                             val active = cm.activeCollectionId?.let { id -> cm.collections.firstOrNull { it.id == id } }

@@ -1612,12 +1612,12 @@ fun GuideScreen(
             val sheetActions = buildList {
                 if (isLive && channel.url.isNotBlank()) add(TvMenuAction("Watch", Icons.Filled.PlayArrow) { onChannelClick(channel) })
                 else if (replayable) add(TvMenuAction("Watch from Start", Icons.Outlined.History, onClick = watchFromStart))
+                com.aeriotv.android.feature.player.radioMenuAction(context, channel, if (isLive) cell.title else "") { miniPlayerVm.dismiss() }?.let { add(it) }
                 add(TvMenuAction(if (isFavorite) "Remove from Favorites" else "Add to Favorites", if (isFavorite) Icons.Outlined.StarOutline else Icons.Filled.Star) { favoritesVm.toggle(channel) })
                 // GH #130 (Apple d051505): only while the channel is in Recently Watched.
                 if (isRecent) add(TvMenuAction("Remove from Recently Watched", Icons.Outlined.History, destructive = true) { settingsVm.removeRecentChannel(channel.id) })
                 add(TvMenuAction(if (inMultiview) "Remove from Multiview" else "Add to Multiview", Icons.Outlined.GridView, enabled = canAddToMultiview) { multiviewStore.stageToggle(channel) })
                 add(TvMenuAction("Add Channel to Collection", Icons.Outlined.CreateNewFolder) { collectionPickerFor = channel.id to channel.name })
-                com.aeriotv.android.feature.player.radioMenuAction(context, channel, if (isLive) cell.title else "") { miniPlayerVm.dismiss() }?.let { add(it) }
                 if (!cell.isPlaceholder) {
                     add(TvMenuAction("Program Info", Icons.Outlined.Info) { programInfoTarget = cell.toInfoTarget(channel.name, channel.dispatcharrChannelId) })
                     if (canRecord) add(TvMenuAction(if (isLive) "Record from Now" else "Record", Icons.Outlined.FiberManualRecord) { recordTarget = cell.toInfoTarget(channel.name, channel.dispatcharrChannelId) })
@@ -1632,11 +1632,12 @@ fun GuideScreen(
             )
         } else {
         val actions = buildList {
+            // Apple order: Radio Mode first on TV (no Watch row here).
+            com.aeriotv.android.feature.player.radioMenuAction(context, channel, if (isLive) cell.title else "") { miniPlayerVm.dismiss() }?.let { add(it) }
             add(TvMenuAction(if (isFavorite) "Remove from Favorites" else "Add to Favorites") { favoritesVm.toggle(channel) })
             if (isRecent) add(TvMenuAction("Remove from Recently Watched", destructive = true) { settingsVm.removeRecentChannel(channel.id) })
             add(TvMenuAction(if (inMultiview) "Remove from Multiview" else "Add to Multiview", enabled = canAddToMultiview) { multiviewStore.stageToggle(channel) })
             add(TvMenuAction("Add Channel to Collection") { collectionPickerFor = channel.id to channel.name })
-            com.aeriotv.android.feature.player.radioMenuAction(context, channel, if (isLive) cell.title else "") { miniPlayerVm.dismiss() }?.let { add(it) }
             // Jump To and Back to Now live on the clock cell now (tvOS parity).
             if (!cell.isPlaceholder) {
                 add(TvMenuAction("Program Info") { programInfoTarget = cell.toInfoTarget(channel.name, channel.dispatcharrChannelId) })
