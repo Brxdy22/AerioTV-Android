@@ -775,6 +775,7 @@ fun VODPlayerScreen(
                 scrubAccelCount = 0
                 scrubLastDirection = 0
                 val fwd = mode == VodHiddenChromeScrub.SKIP_FORWARD
+                val skipFromMs = positionMs
                 if (fwd) {
                     seekPlayer(min(
                         if (durationMs <= 0L) Long.MAX_VALUE
@@ -794,7 +795,10 @@ fun VODPlayerScreen(
                             if (fwd) "+${SkipIntervals.forwardMs / 1000} s" else "-${SkipIntervals.backMs / 1000} s",
                     )
                 }
-                com.aeriotv.android.ui.tv.TvFocusTrace.player("vod hidden-chrome skip fwd=$fwd from=$positionMs")
+                // seekPlayer has already set positionMs to the target, so log
+                // the press-time position captured above (the old line read
+                // "from=<target>", which looked like a seek landing short).
+                com.aeriotv.android.ui.tv.TvFocusTrace.player("vod hidden-chrome skip fwd=$fwd from=$skipFromMs to=$positionMs")
             }
             VodHiddenChromeScrub.PLAY_PAUSE -> exoPlayer?.let { it.playWhenReady = !it.playWhenReady }
             else -> Unit
