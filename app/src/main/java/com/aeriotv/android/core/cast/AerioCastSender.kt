@@ -1687,8 +1687,6 @@ class AerioCastSender @Inject constructor(
         sendControl(CastControl.command(CastControl.CMD_SET_ASPECT) { put(CastControl.KEY_ASPECT, mode.key) })
 
     /** Toggle audio-only (drop the TV's video track) on the receiver. */
-    fun setRemoteAudioOnly(on: Boolean) =
-        sendControl(CastControl.command(CastControl.CMD_SET_AUDIO_ONLY) { put(CastControl.KEY_AUDIO_ONLY, on) })
 
     // GH #33 live-rewind controls: drive the receiver's timeshift buffer. The
     // receiver clamps to its own rewind window and echoes a fresh state snapshot.

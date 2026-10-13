@@ -71,7 +71,9 @@ fun RadioTransportCard(
         EntryPointAccessors.fromApplication(context.applicationContext, MainScaffoldEntryPoint::class.java)
             .exoPlayerHolder()
     }
-    val player = holder.player
+    // Follow the holder's live instance so a rebuilt player keeps the card's
+    // Play/Pause in step with the real paused state.
+    val player by holder.playerInstance.collectAsStateWithLifecycle()
     val tsController = remember {
         EntryPointAccessors.fromApplication(context.applicationContext, MainScaffoldEntryPoint::class.java)
             .timeshiftController()
@@ -79,7 +81,7 @@ fun RadioTransportCard(
     val tsState by tsController.state.collectAsStateWithLifecycle()
     // 1 Hz playhead for the scrubber while the sheet is open.
     var wallNow by remember { mutableStateOf(0L) }
-    var playing by remember { mutableStateOf(player?.playWhenReady == true) }
+    var playing by remember(player) { mutableStateOf(player?.playWhenReady == true) }
     var tracksTick by remember { mutableIntStateOf(0) }
     DisposableEffect(player) {
         val l = object : androidx.media3.common.Player.Listener {
@@ -190,7 +192,6 @@ fun RadioTransportCard(
             onSetTextTrack = {},
             onSetSpeed = {},
             onSetAspect = {},
-            onSetAudioOnly = {},
             onSwitchStream = {
                 val chPk = channel.dispatcharrChannelId
                 if (chPk != null) {

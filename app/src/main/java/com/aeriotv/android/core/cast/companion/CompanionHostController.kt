@@ -498,11 +498,7 @@ class CompanionHostController @Inject constructor(
             tickerJob?.cancel(); tickerJob = null
             // No phone left to turn it back off: don't leave the TV stuck on a
             // dark screen after the controlling phone goes away.
-            if (holder.remoteAudioOnly) {
-                Log.i(TAG, "last phone disconnected while audioOnly -> restoring video")
-                holder.remoteAudioOnly = false
-                scope.launch { runCatching { holder.setVideoTrackEnabled(true) } }
-            }
+
         }
     }
 
@@ -599,13 +595,8 @@ class CompanionHostController @Inject constructor(
                     // (the position tick maps window [0, duration] onto it).
                     if (ext != null) ext.seekTo(target.coerceAtLeast(0L)) else commitRewindSeek(target)
                 }
-                CastControl.CMD_SET_AUDIO_ONLY -> runCatching {
-                    val on = json.optBoolean(CastControl.KEY_AUDIO_ONLY)
-                    // Sticky: re-primes must not silently restore video.
-                    holder.remoteAudioOnly = on
-                    holder.setVideoTrackEnabled(!on)
-                    Log.i(TAG, "companion audioOnly=$on (video ${if (on) "disabled" else "enabled"})")
-                }
+                // Audio Only was removed (Radio Mode replaces it, 2026-10-13).
+                CastControl.CMD_SET_AUDIO_ONLY -> Log.i(TAG, "companion setAudioOnly ignored (Audio Only removed)")
                 // Options parity with the Cast receiver (GH #33): the phone's full
                 // The cast remote sheet drives the companion path too, so mirror the
                 // receiver's audio/subtitle/speed/aspect handlers verbatim.

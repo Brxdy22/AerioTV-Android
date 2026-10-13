@@ -594,9 +594,6 @@ fun CastTransportCard(
             onSetAspect = { mode ->
                 if (isCompanion) companionRemote.setRemoteAspect(mode) else castSender.setRemoteAspect(mode)
             },
-            onSetAudioOnly = { on ->
-                if (isCompanion) companionRemote.setRemoteAudioOnly(on) else castSender.setRemoteAudioOnly(on)
-            },
             onSwitchStream = {
                 // Server-side change_stream: works the same whether the stream is
                 // playing here or on the other screen.

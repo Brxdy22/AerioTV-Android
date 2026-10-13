@@ -290,8 +290,6 @@ class CompanionRemoteController @Inject constructor(
         send(CastControl.command(CastControl.CMD_SET_SPEED) { put(CastControl.KEY_SPEED, speed.toDouble()) })
     fun setRemoteAspect(mode: CastControl.AspectMode) =
         send(CastControl.command(CastControl.CMD_SET_ASPECT) { put(CastControl.KEY_ASPECT, mode.key) })
-    fun setRemoteAudioOnly(on: Boolean) =
-        send(CastControl.command(CastControl.CMD_SET_AUDIO_ONLY) { put(CastControl.KEY_AUDIO_ONLY, on) })
     fun requestRemoteState() = send(CastControl.command(CastControl.CMD_GET_STATE))
 
     /** Stop playback on the TV without dropping the link (the card's X sends this

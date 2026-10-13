@@ -179,8 +179,6 @@ fun PlayerChromeOverlay(
     onShowPlaybackSpeed: () -> Unit,
     videoScaleLabel: String,
     onCycleVideoScale: () -> Unit,
-    onToggleAudioOnly: () -> Unit,
-    audioOnly: Boolean,
     /** Radio Mode from the options menu; null hides it (casting, VOD). */
     onRadioMode: (() -> Unit)? = null,
     onSetSleepMinutes: (Int) -> Unit,
@@ -514,7 +512,6 @@ fun PlayerChromeOverlay(
                         onDismiss = { moreOpen = false },
                         isTv = true,
                         canRecord = canRecord,
-                        audioOnly = audioOnly,
                         sleepActive = sleepRemainingMillis != null,
                         scaleLabel = videoScaleLabel,
                         onCycleScale = onCycleVideoScale,
@@ -546,10 +543,6 @@ fun PlayerChromeOverlay(
                         onSwitchStream = {
                             moreOpen = false
                             onShowSwitchStream()
-                        },
-                        onAudioOnly = {
-                            moreOpen = false
-                            onToggleAudioOnly()
                         },
                         onRadioMode = onRadioMode?.let { r -> { moreOpen = false; r() } },
                         keptLive = keptLive,
@@ -683,7 +676,6 @@ fun PlayerChromeOverlay(
                         expanded = moreOpen,
                         onDismiss = { moreOpen = false },
                         canRecord = canRecord,
-                        audioOnly = audioOnly,
                         sleepActive = sleepRemainingMillis != null,
                         scaleLabel = videoScaleLabel,
                         onCycleScale = onCycleVideoScale,
@@ -715,10 +707,6 @@ fun PlayerChromeOverlay(
                         onSwitchStream = {
                             moreOpen = false
                             onShowSwitchStream()
-                        },
-                        onAudioOnly = {
-                            moreOpen = false
-                            onToggleAudioOnly()
                         },
                         onRadioMode = onRadioMode?.let { r -> { moreOpen = false; r() } },
                         keptLive = keptLive,
@@ -1178,7 +1166,6 @@ private fun PlayerMoreMenu(
     onDismiss: () -> Unit,
     isTv: Boolean = false,
     canRecord: Boolean,
-    audioOnly: Boolean,
     sleepActive: Boolean,
     scaleLabel: String,
     onCycleScale: () -> Unit,
@@ -1190,7 +1177,6 @@ private fun PlayerMoreMenu(
     onStreamInfo: () -> Unit,
     canSwitchStream: Boolean,
     onSwitchStream: () -> Unit,
-    onAudioOnly: () -> Unit,
     /** Radio Mode (null = hidden, e.g. while casting). */
     onRadioMode: (() -> Unit)? = null,
     keptLive: List<com.aeriotv.android.core.timeshift.TimeshiftController.RetainedChannel> = emptyList(),
@@ -1340,28 +1326,6 @@ private fun PlayerMoreMenu(
             )
         }
         HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
-        DropdownMenuItem(
-            leadingIcon = {
-                Icon(
-                    imageVector = if (audioOnly)
-                        Icons.Filled.MusicNote
-                    else
-                        Icons.Outlined.MusicNote,
-                    contentDescription = null,
-                    tint = if (audioOnly)
-                        MaterialTheme.colorScheme.primary
-                    else
-                        MaterialTheme.colorScheme.onSurface,
-                )
-            },
-            text = {
-                // iOS toggles the label to "Show Video" when in Audio
-                // Only mode so the action describes what tapping does,
-                // not what state it shows. Port that.
-                Text(if (audioOnly) "Show Video" else "Audio Only")
-            },
-            onClick = onAudioOnly,
-        )
         if (onRadioMode != null) {
             DropdownMenuItem(
                 leadingIcon = {

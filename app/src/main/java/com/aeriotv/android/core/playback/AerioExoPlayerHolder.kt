@@ -2531,7 +2531,7 @@ class AerioExoPlayerHolder @Inject constructor(
         currentChannelId = channelId
         clearPauseStamp("adopted live")
         resetWatchdogStateForNewStream()
-        setVideoTrackEnabled(!remoteAudioOnly)
+        setVideoTrackEnabled(!radioVideoOff)
         liveFailover.disarm()
         tracer.markTuneStart(title, "live")
         primeGeneration += 1
@@ -2679,7 +2679,7 @@ class AerioExoPlayerHolder @Inject constructor(
         lastCatchupSubtitle = subtitle
         lastCatchupArtworkUri = artworkUri
         resetWatchdogStateForNewStream()
-        setVideoTrackEnabled(!remoteAudioOnly)
+        setVideoTrackEnabled(!radioVideoOff)
         val mediaMetadata = MediaMetadata.Builder()
             .setTitle(title)
             .setArtist(subtitle)
@@ -2874,7 +2874,7 @@ class AerioExoPlayerHolder @Inject constructor(
         // session previously dropped the video track on this shared player --
         // UNLESS a companion remote explicitly asked for Audio Only, which a
         // watchdog/poller re-prime must not undo.
-        setVideoTrackEnabled(!remoteAudioOnly)
+        setVideoTrackEnabled(!radioVideoOff)
         tracer.markTuneStart(title, kind)
         primeGeneration += 1
         resetForceHlsCushion("prime")
@@ -3235,17 +3235,15 @@ class AerioExoPlayerHolder @Inject constructor(
     }
 
     /**
-     * Sticky Audio Only requested by a companion remote / cast sender
-     * (GH #33). [playUrl]'s unconditional video re-enable exists for the
-     * Android Auto case; without this flag any re-prime (follow-poller,
-     * stall watchdog, LAN/WAN flip) silently restored video seconds after
-     * a phone toggled Audio Only on (2026-07-17 Streamer test: state
-     * flipped On -> video back -> state self-healed to Off). Set/cleared
-     * only by the remote command paths; the foreground re-enables consult
-     * it.
+     * Radio Mode keeps the video track off (RadioMode sets and clears it).
+     * [playUrl]'s unconditional video re-enable exists for the Android Auto
+     * case; without this flag any re-prime (follow-poller, stall watchdog,
+     * LAN/WAN flip, a Radio channel switch) would bring video back while
+     * Radio Mode plays. The user-facing Audio Only mode it used to back was
+     * removed (Radio Mode replaces it, 2026-10-13).
      */
     @Volatile
-    var remoteAudioOnly = false
+    var radioVideoOff = false
 
     /** Full teardown for the X-close button. Releases the codec,
      *  audio renderer, and DataSource. Next acquire creates fresh. */

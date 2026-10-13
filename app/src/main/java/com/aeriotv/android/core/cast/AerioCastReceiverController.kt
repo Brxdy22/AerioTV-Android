@@ -486,12 +486,9 @@ class AerioCastReceiverController @Inject constructor(
                         if (id.isNotBlank()) requestCastChannel(id)
                         return@launch
                     }
-                    CastControl.CMD_SET_AUDIO_ONLY -> {
-                        val on = json.optBoolean(CastControl.KEY_AUDIO_ONLY)
-                        // Sticky: re-primes must not silently restore video.
-                        holder.remoteAudioOnly = on
-                        runCatching { holder.setVideoTrackEnabled(!on) }
-                    }
+                    // Audio Only was removed (Radio Mode replaces it,
+                    // 2026-10-13): an older sender's command is ignored.
+                    CastControl.CMD_SET_AUDIO_ONLY -> android.util.Log.i("CastReceiver", "setAudioOnly ignored (Audio Only removed)")
                     // Live-rewind seeks drive the SAME timeshift buffer the on-TV
                     // chrome scrubs (holder.playTimeshift/goLive). Falls through to
                     // replyState so the phone gets the post-seek position echo.

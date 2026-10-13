@@ -83,7 +83,7 @@ object RadioMode {
         val holder = e.exoPlayerHolder()
         _state.value = Session(channel)
         startedAtMs = android.os.SystemClock.uptimeMillis()
-        holder.remoteAudioOnly = true
+        holder.radioVideoOff = true
         holder.setVideoTrackEnabled(false)
         e.exoWindowState().hide()
         if (com.aeriotv.android.core.pip.PipState.nowPlayingTitle != channel.name) notifyNowPlaying(channel, "")
@@ -104,7 +104,7 @@ object RadioMode {
         subtitle: String,
     ) {
         val e = entry(context)
-        e.exoPlayerHolder().remoteAudioOnly = true
+        e.exoPlayerHolder().radioVideoOff = true
         _state.value = Session(channel)
         switchTo(context, channel, headers, subtitle, log = false)
         start(context, channel)
@@ -163,7 +163,7 @@ object RadioMode {
     fun requestReturn(context: Context) {
         val s = _state.value ?: return
         val holder = entry(context).exoPlayerHolder()
-        holder.remoteAudioOnly = false
+        holder.radioVideoOff = false
         holder.setVideoTrackEnabled(true)
         _state.value = null
         Log.i(TAG, "[RADIO] return to ${s.channel.name}")
@@ -177,7 +177,7 @@ object RadioMode {
         val e = entry(context)
         val holder = e.exoPlayerHolder()
         _state.value = null
-        holder.remoteAudioOnly = false
+        holder.radioVideoOff = false
         runCatching { e.exoWindowState().hide() }
         runCatching { holder.stop() }
         AerioMediaPlaybackService.stop(context)

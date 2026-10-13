@@ -36,7 +36,6 @@ import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Videocam
-import androidx.compose.material.icons.filled.VideocamOff
 import androidx.compose.material.icons.outlined.AspectRatio
 import androidx.compose.material.icons.outlined.MusicNote
 import androidx.compose.material3.Icon
@@ -103,7 +102,6 @@ fun CastRemoteSheet(
     onSetTextTrack: (String?) -> Unit,
     onSetSpeed: (Float) -> Unit,
     onSetAspect: (CastControl.AspectMode) -> Unit,
-    onSetAudioOnly: (Boolean) -> Unit,
     onSwitchStream: () -> Unit,
     onSleepMinutes: (Int) -> Unit,
     /** Sleep Timer row subtitle: "N min remaining" while armed, else "Off". */
@@ -621,9 +619,6 @@ fun CastRemoteSheet(
                 OptionRow(Icons.Filled.Timer, "Sleep Timer", sleepLabel) {
                     optionsOpen = false
                     sleepOpen = true
-                }
-                OptionRow(Icons.Filled.VideocamOff, "Audio Only", if (remoteState.audioOnly) "On" else "Off") {
-                    onSetAudioOnly(!remoteState.audioOnly)
                 }
                 }
                 OptionRow(Icons.Filled.Info, "Stream Info", null) {
