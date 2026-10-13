@@ -1606,6 +1606,7 @@ internal fun ChannelRow(
                 channelDispatcharrId = channel.dispatcharrChannelId,
                 programmes = programmes,
                 onShowProgramInfo = onShowProgramInfo,
+                infoButtonMode = infoButtonMode,
                 onShowRecord = onShowRecord,
                 onWatchPast = onWatchPast,
             )
@@ -1630,8 +1631,16 @@ private fun ChannelGuidePanel(
     onShowProgramInfo: (ProgramInfoTarget) -> Unit,
     onShowRecord: (ProgramInfoTarget) -> Unit,
     onWatchPast: ((EPGProgramme) -> Unit)? = null,
+    /** Program Info Button > List View mode for the schedule rows. */
+    infoButtonMode: String = com.aeriotv.android.core.preferences.GuideProgramInfoButton.OFF,
 ) {
     val now = System.currentTimeMillis()
+    // List View info button on a schedule row: All shows it on every
+    // program, Current only on the one airing now (guide cell rule).
+    fun infoFor(p: EPGProgramme): (() -> Unit)? =
+        if (!p.isPlaceholder &&
+            com.aeriotv.android.core.preferences.GuideProgramInfoButton.shows(infoButtonMode, now in p.startMillis until p.endMillis)
+        ) ({ onShowProgramInfo(p.toInfoTarget(channelName, channelDispatcharrId)) }) else null
     val current = programmes.nowPlaying(now)
     val upcoming = remember(programmes, current) {
         programmes
@@ -1725,6 +1734,7 @@ private fun ChannelGuidePanel(
                         onTap = watchPast
                             ?: { onShowProgramInfo(programme.toInfoTarget(channelName, channelDispatcharrId)) },
                         onShowRecord = { onShowRecord(programme.toInfoTarget(channelName, channelDispatcharrId)) },
+                        onInfo = infoFor(programme),
                     )
                 }
                 if (recentlyAired.isNotEmpty() && upcoming.isNotEmpty()) {
@@ -1784,6 +1794,7 @@ private fun ChannelGuidePanel(
                         channelId = channelId,
                         onTap = { onShowProgramInfo(programme.toInfoTarget(channelName, channelDispatcharrId)) },
                         onShowRecord = { onShowRecord(programme.toInfoTarget(channelName, channelDispatcharrId)) },
+                        onInfo = infoFor(programme),
                     )
                 }
             }
@@ -1806,6 +1817,8 @@ private fun UpcomingProgrammeRow(
     replayable: Boolean = false,
     /** Plays the programme from the archive; the menu leads with Watch. */
     onWatch: (() -> Unit)? = null,
+    /** Program Info Button > List View: the row's info button; null hides it. */
+    onInfo: (() -> Unit)? = null,
     remindersVm: RemindersViewModel = hiltViewModel(),
 ) {
     val context = LocalContext.current
@@ -1901,6 +1914,21 @@ private fun UpcomingProgrammeRow(
                 // (epgEntryRow), a rung dimmer than the description.
                 color = MaterialTheme.colorScheme.tertiary,
             )
+            if (onInfo != null) {
+                // Same glyph, size, tint and hit target as the row and the
+                // guide cell button.
+                IconButton(
+                    onClick = onInfo,
+                    modifier = Modifier.size(com.aeriotv.android.feature.livetv.grid.GUIDE_INFO_BUTTON_HIT),
+                ) {
+                    Icon(
+                        imageVector = Icons.Outlined.Info,
+                        contentDescription = "Program Info",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(com.aeriotv.android.feature.livetv.grid.GUIDE_INFO_BUTTON_SIZE),
+                    )
+                }
+            }
         }
         // One source of truth for the long-press actions; rendered as the
         // Material bottom sheet on phone and as the shared centered
