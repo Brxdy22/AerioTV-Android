@@ -29,7 +29,7 @@ fun radioMenuAction(
     if (entry.castSender().state.value is com.aeriotv.android.core.cast.AerioCastSender.State.Connected) return null
     val playingHere = RadioMode.state.value?.channel?.id == channel.id
     if (playingHere) {
-        return TvMenuAction("Exit Radio Mode", Icons.Filled.Radio) { RadioMode.stop(context, "menu") }
+        return TvMenuAction("Exit Radio Mode", Icons.Filled.Radio) { RadioMode.stop(context, "menu Exit") }
     }
     return TvMenuAction("Radio Mode", Icons.Filled.Radio) {
         beforeStart()

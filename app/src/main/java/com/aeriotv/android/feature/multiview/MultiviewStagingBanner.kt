@@ -410,7 +410,7 @@ private fun MultiviewBackgroundTvBanner(
 }
 
 /** Radio Mode banner on TV (Android#127): the background Multiview banner's
- *  slot and shape, with "Return to Channel" and "Stop". */
+ *  slot and shape, with "Switch to Video Mode" and "Stop". */
 @Composable
 private fun RadioTvBanner(
     channelName: String,
@@ -488,7 +488,7 @@ private fun RadioTvBanner(
         ) { _ ->
             val onAccent = MaterialTheme.colorScheme.onPrimary
             Icon(Icons.Filled.PlayArrow, contentDescription = null, tint = onAccent, modifier = Modifier.size(12.dp))
-            Text("Return to Channel", fontSize = com.aeriotv.android.ui.tv.TvChrome.pillFontSize, fontWeight = FontWeight.SemiBold,
+            Text("Switch to Video Mode", fontSize = com.aeriotv.android.ui.tv.TvChrome.pillFontSize, fontWeight = FontWeight.SemiBold,
                 maxLines = 1, softWrap = false, color = onAccent)
         }
         TvBannerCapsule(

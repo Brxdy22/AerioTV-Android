@@ -1736,6 +1736,10 @@ fun MainScaffold(
                 // Radio Mode (Android#127): the cast card's place and style.
                 val radio by com.aeriotv.android.feature.player.RadioMode.state
                     .collectAsStateWithLifecycle()
+                var showRadioSheet by remember { mutableStateOf(false) }
+                if (showRadioSheet && radio != null) {
+                    com.aeriotv.android.feature.player.RadioSheet(onDismiss = { showRadioSheet = false })
+                }
                 @Composable
                 fun DockRadio() {
                     val r = radio
@@ -1746,7 +1750,7 @@ fun MainScaffold(
                                     channelName = r.channel.name,
                                     logoUrl = r.channel.tvgLogo.takeIf { it.isNotBlank() },
                                     tablet = tabletNav,
-                                    onOpen = { com.aeriotv.android.feature.player.RadioMode.requestReturn(context) },
+                                    onOpen = { showRadioSheet = true },
                                     onStop = { com.aeriotv.android.feature.player.RadioMode.stop(context, "card") },
                                     modifier = Modifier.weight(1f),
                                 )

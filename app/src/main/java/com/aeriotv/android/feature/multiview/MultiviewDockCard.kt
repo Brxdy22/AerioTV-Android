@@ -426,7 +426,7 @@ private fun StagedRows(
 /**
  * Radio Mode dock card (Android#127), phones and tablets: the cast card's
  * shape and place. Channel logo, channel name, "Playing channel audio", and
- * an accent Stop. Tap returns to the channel with video.
+ * an accent Stop. Tap opens the Radio sheet (RadioSheet).
  */
 @Composable
 fun RadioDockCard(
