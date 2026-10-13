@@ -2309,6 +2309,9 @@ fun SwitchStreamSheet(
     saving: Boolean = false,
     /** The full new stream id order to persist. */
     onReorder: (List<Int>) -> Unit = {},
+    /** Replaces the footer's first sentence (Radio Mode: "Audio keeps
+     *  playing while the stream switches."). */
+    footerText: String? = null,
 ) {
     // Reorder mode: the sheet never drags or swipes away. A handle drag owns
     // the finger, and a quick drag on a row body (Onn 2026-10-04 23:20:45,
@@ -2408,11 +2411,8 @@ fun SwitchStreamSheet(
             // Apple SwitchStreamView footer, phones and tablets only.
             if (streams.isNotEmpty() && !isTv) {
                 com.aeriotv.android.ui.settings.SettingsSectionFooter(
-                    text = if (canReorderList) {
-                        "Switches the active upstream for this channel. The picture follows in a few seconds. Tap Reorder to change the stream priority."
-                    } else {
-                        "Switches the active upstream for this channel. The picture follows in a few seconds."
-                    },
+                    text = (footerText ?: "Switches the active upstream for this channel. The picture follows in a few seconds.") +
+                        if (canReorderList) " Tap Reorder to change the stream priority." else "",
                 )
             }
             Spacer(Modifier.height(12.dp))

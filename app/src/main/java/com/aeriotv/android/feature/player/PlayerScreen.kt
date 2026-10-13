@@ -655,6 +655,13 @@ fun PlayerScreen(
     // Buffered segments stay on disk until the retention reaper runs.
     DisposableEffect(Unit) {
         onDispose {
+            // Radio Mode owns the player now: the Live Rewind buffer keeps
+            // rolling (seekable from the Radio sheet) and the playhead stays
+            // where it is. RadioMode.stop ends it with the full-close rules.
+            if (com.aeriotv.android.feature.player.RadioMode.isActive) {
+                Log.i("AerioTV", "[RADIO] buffer kept on player close")
+                return@onDispose
+            }
             // Adopted kept channel: the buffer's own connection is still
             // live and goes straight back to the kept list; a Go Live here
             // would open a direct connection only to close it.

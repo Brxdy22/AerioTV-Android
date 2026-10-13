@@ -44,14 +44,13 @@ private const val TAG = "AerioTV"
  * card itself ([CastMiniController] in the cast card's frame) and the full
  * [CastRemoteSheet], driven by the local holder instead of a receiver.
  *
- * Controls with no Radio meaning keep the sheet's own disabled look:
- * - Back / Forward (inline skips) are drawn but inert, and the timeline is
- *   read-only: the Live Rewind buffer session ends when the full-screen
- *   player closes (TimeshiftController.onFullscreenLiveStopped), so a Radio
- *   stream has no seekable window. Same states Cast shows with no window.
- * - Options: Audio Track works (the holder's audio groups). Subtitles,
- *   Aspect, Audio Only and Playback Speed are inert: there is no picture,
- *   it is already audio only, and a live stream plays at 1x.
+ * Seeking: the Live Rewind buffer keeps rolling while Radio Mode owns the
+ * player (RadioMode.switchTo starts it, PlayerScreen's dispose leaves it),
+ * so Back / Forward, the scrubber and Go Live work on it exactly as the cast
+ * sheet does with a seekable receiver. With Pause and Rewind Live TV off
+ * there is no buffer and they keep the dimmed no-window state Cast shows.
+ * Options are Apple's Radio set: Switch Stream, Record Current Program,
+ * Audio Track, Stream Info (from the local player).
  */
 @Composable
 fun RadioTransportCard(
@@ -73,6 +72,13 @@ fun RadioTransportCard(
             .exoPlayerHolder()
     }
     val player = holder.player
+    val tsController = remember {
+        EntryPointAccessors.fromApplication(context.applicationContext, MainScaffoldEntryPoint::class.java)
+            .timeshiftController()
+    }
+    val tsState by tsController.state.collectAsStateWithLifecycle()
+    // 1 Hz playhead for the scrubber while the sheet is open.
+    var wallNow by remember { mutableStateOf(0L) }
     var playing by remember { mutableStateOf(player?.playWhenReady == true) }
     var tracksTick by remember { mutableIntStateOf(0) }
     DisposableEffect(player) {
@@ -84,21 +90,13 @@ fun RadioTransportCard(
         onDispose { player?.removeListener(l) }
     }
     var sheetOpen by remember { mutableStateOf(false) }
-    var sleepEndsAt by remember { mutableStateOf<Long?>(null) }
     var recordTarget by remember { mutableStateOf<com.aeriotv.android.core.data.ProgramInfoTarget?>(null) }
     var switchStreams by remember { mutableStateOf<List<StreamOption>?>(null) }
     var switchCurrentId by remember { mutableStateOf<Int?>(null) }
     val scope = rememberCoroutineScope()
-    val togglePlay: () -> Unit = { holder.player?.let { it.playWhenReady = !it.playWhenReady } }
+    val togglePlay: () -> Unit = { RadioMode.togglePlayPause(context) }
     val logo = channel.tvgLogo.takeIf { it.isNotBlank() }
     val programme = nowProgramme(channel)
-
-    // Sleep Timer: ends Radio Mode like Stop.
-    LaunchedEffect(sleepEndsAt) {
-        val end = sleepEndsAt ?: return@LaunchedEffect
-        kotlinx.coroutines.delay((end - System.currentTimeMillis()).coerceAtLeast(0L))
-        RadioMode.stop(context, "sleep timer")
-    }
 
     Box(
         modifier = if (tabletWidth != null) {
@@ -125,6 +123,12 @@ fun RadioTransportCard(
     }
 
     if (sheetOpen) {
+        LaunchedEffect(Unit) {
+            while (true) {
+                wallNow = RadioMode.positionWallMs(context)
+                kotlinx.coroutines.delay(1_000L)
+            }
+        }
         @Suppress("UNUSED_EXPRESSION") tracksTick
         val audio = remember(tracksTick, player) {
             val out = mutableListOf<CastControl.Track>()
@@ -150,13 +154,22 @@ fun RadioTransportCard(
             programmeEndMs = programme?.endMillis ?: 0L,
             remoteState = CastControl.RemoteState(audio = audio, audioOnly = true),
             isPlaying = playing,
-            position = CastControl.PositionSnapshot(canSeek = false, isPlaying = playing),
+            position = CastControl.PositionSnapshot(
+                canSeek = tsState.buffering && tsState.headWallMs > tsState.tailWallMs,
+                isLive = !tsState.timeshifting,
+                positionWallMs = if (wallNow > 0) wallNow else tsState.headWallMs,
+                windowStartMs = tsState.tailWallMs,
+                windowEndMs = tsState.headWallMs,
+                isPlaying = playing,
+            ),
+            radioOptions = true,
+            streamInfoRows = radioStreamInfoRows(holder),
             transportIcon = Icons.Filled.Radio,
             statusLineOverride = RADIO_SUBTITLE,
             stopLabel = "Stop",
             canChangeChannel = true,
             showInlineSkip = true,
-            inlineSkipEnabled = false,
+            inlineSkipEnabled = tsState.buffering,
             allowWebScrub = false,
             canSwitchStream = canSwitchStream,
             onTogglePlayPause = togglePlay,
@@ -191,20 +204,12 @@ fun RadioTransportCard(
                     }
                 }
             },
-            sleepLabel = sleepEndsAt?.let { end ->
-                val minutes = ((end - System.currentTimeMillis()) + 59_999L) / 60_000L
-                when {
-                    minutes < 60L -> "$minutes min remaining"
-                    minutes % 60L == 0L -> "${minutes / 60L} h remaining"
-                    else -> "${minutes / 60L} h ${minutes % 60L} min remaining"
-                }
-            } ?: "Off",
-            onSleepMinutes = { m -> sleepEndsAt = if (m == 0) null else System.currentTimeMillis() + m * 60_000L },
             recordProgramTitle = programme?.title,
             onRecordCurrentProgram = programme?.let { pr -> { recordTarget = pr.toInfoTarget(channel.name, channel.dispatcharrChannelId) } },
-            onSeekBy = {},
-            onSeekToWall = {},
-            onGoLive = {},
+            onSeekBy = { delta -> RadioMode.seekToWall(context, RadioMode.positionWallMs(context) + delta) },
+            onSeekToWall = { target -> RadioMode.seekToWall(context, target) },
+            onGoLive = { RadioMode.goLive(context) },
+            onSleepMinutes = {},
             onDismiss = { sheetOpen = false },
         )
     }
@@ -236,6 +241,53 @@ fun RadioTransportCard(
                 }
             },
             onDismiss = { switchStreams = null },
+            footerText = "Audio keeps playing while the stream switches.",
         )
     }
+}
+
+/** Radio Stream Info (Apple): MODE, VIA, SOURCE, FORMAT, VIDEO (not decoded),
+ *  AUDIO, RATE, BUFFER, HEALTH, all from the local player. No TV row. */
+private fun radioStreamInfoRows(
+    holder: com.aeriotv.android.core.playback.AerioExoPlayerHolder,
+): List<Pair<String, String>> {
+    val p = holder.player
+    val url = holder.currentPlayUrl
+    val host = url?.let { runCatching { android.net.Uri.parse(it).host }.getOrNull() } ?: "-"
+    // The video track is disabled in Radio Mode, so read its format from
+    // the track groups rather than the (null) active video format.
+    val video = p?.currentTracks?.groups?.firstOrNull { it.type == C.TRACK_TYPE_VIDEO }?.let { g ->
+        if (g.length > 0) g.getTrackFormat(0) else null
+    }
+    val audio = p?.audioFormat
+    fun codec(mime: String?) = when (mime) {
+        androidx.media3.common.MimeTypes.VIDEO_H264 -> "H.264"
+        androidx.media3.common.MimeTypes.VIDEO_H265 -> "HEVC"
+        androidx.media3.common.MimeTypes.AUDIO_AC3 -> "AC-3"
+        androidx.media3.common.MimeTypes.AUDIO_E_AC3 -> "E-AC-3"
+        androidx.media3.common.MimeTypes.AUDIO_AAC -> "AAC"
+        androidx.media3.common.MimeTypes.AUDIO_MPEG, androidx.media3.common.MimeTypes.AUDIO_MPEG_L2 -> "MPEG audio"
+        null -> "-"
+        else -> mime.substringAfter('/')
+    }
+    val videoLine = video?.let { "${codec(it.sampleMimeType)} ${it.width}x${it.height} (not decoded)" } ?: "none"
+    val audioLine = audio?.let { "${codec(it.sampleMimeType)} ${it.channelCount}ch ${it.sampleRate} Hz" } ?: "-"
+    val bitrate = listOfNotNull(video?.bitrate?.takeIf { it > 0 }, audio?.bitrate?.takeIf { it > 0 }).sum()
+    val health = when (p?.playbackState) {
+        androidx.media3.common.Player.STATE_READY -> if (p.playWhenReady) "Playing" else "Paused"
+        androidx.media3.common.Player.STATE_BUFFERING -> "Buffering"
+        androidx.media3.common.Player.STATE_ENDED -> "Ended"
+        else -> "Idle"
+    }
+    return listOf(
+        "MODE" to "Radio Mode",
+        "VIA" to "ExoPlayer (local)",
+        "SOURCE" to host,
+        "FORMAT" to (if (url != null && holder.canBufferLiveRewind(url)) "MPEG-TS" else (video?.containerMimeType ?: audio?.containerMimeType ?: "-")),
+        "VIDEO" to videoLine,
+        "AUDIO" to audioLine,
+        "RATE" to (if (bitrate > 0) "${bitrate / 1000} kbps" else "measuring"),
+        "BUFFER" to "${(p?.totalBufferedDuration ?: 0L) / 1000} s ahead",
+        "HEALTH" to health,
+    )
 }

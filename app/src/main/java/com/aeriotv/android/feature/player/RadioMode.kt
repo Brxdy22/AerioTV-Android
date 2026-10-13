@@ -137,6 +137,19 @@ object RadioMode {
             // playUrl re-enables video unless the sticky flag says otherwise;
             // set it again in case a re-prime raced the switch.
             holder.setVideoTrackEnabled(false)
+            // Live Rewind for the radio stream, exactly as a full-screen
+            // tune does (the controller checks Pause and Rewind Live TV and
+            // demotes the previous channel under Keep Recent rules).
+            val ts = entry(context).timeshiftController()
+            if (holder.canBufferLiveRewind(channel.url)) {
+                ts.currentPlayUrlProvider = { holder.currentPlayUrl }
+                ts.onFullscreenLiveStarted(
+                    channel.id, channel.name, channel.url, headers, logoUrl = channel.tvgLogo,
+                )
+            } else {
+                ts.onFullscreenLiveStopped()
+            }
+            livePauseWallMs = 0L
         }
         _state.value = Session(channel)
         notifyNowPlaying(channel, subtitle)
@@ -169,8 +182,75 @@ object RadioMode {
         runCatching { holder.stop() }
         AerioMediaPlaybackService.stop(context)
         Log.i(TAG, "[RADIO] service stopped")
-        runCatching { e.timeshiftController().onMiniClosed("radio-$reason") }
+        // Release the buffer with the full-screen close rules (Keep Recent
+        // Channels Live decides), the same call the player's X makes.
+        livePauseWallMs = 0L
+        runCatching {
+            e.timeshiftController().onFullscreenLiveStopped(keepIfEnabled = !holder.lastTuneWasForcedHls)
+        }
         Log.i(TAG, "[RADIO] stop ($reason) ${s.channel.name}")
+    }
+
+    /** Wall time a buffered live pause began (0 = not paused on live). */
+    @Volatile private var livePauseWallMs = 0L
+
+    /**
+     * Play / Pause with the full-screen player's Live Rewind rules: a pause
+     * on live freezes the stream while the filler keeps the buffer growing;
+     * a resume within 6 s continues live, a longer one switches onto the
+     * buffer at the pause point. Without a buffer it is a plain toggle.
+     */
+    fun togglePlayPause(context: Context) {
+        val e = entry(context)
+        val holder = e.exoPlayerHolder()
+        val ts = e.timeshiftController()
+        val buffering = ts.state.value.buffering
+        when {
+            holder.isTimeshifting || !buffering -> holder.setPaused(!holder.isPaused())
+            !holder.isPaused() -> {
+                livePauseWallMs = System.currentTimeMillis()
+                holder.setPaused(true)
+                ts.onLivePaused()
+            }
+            livePauseWallMs > 0 -> {
+                if (System.currentTimeMillis() - livePauseWallMs <= 6_000) {
+                    holder.setPaused(false)
+                    ts.onLiveResumedAtEdge()
+                } else {
+                    holder.setPaused(false)
+                    holder.playTimeshift(livePauseWallMs - 1_000)
+                }
+                livePauseWallMs = 0L
+            }
+            else -> holder.setPaused(!holder.isPaused())
+        }
+    }
+
+    /** Current playhead on the wall clock (the buffer head when live). */
+    fun positionWallMs(context: Context): Long {
+        val e = entry(context)
+        val st = e.timeshiftController().state.value
+        val holder = e.exoPlayerHolder()
+        return if (st.timeshifting) st.baseWallMs + (holder.player?.currentPosition ?: 0L) else st.headWallMs
+    }
+
+    /** Seek on the buffer, the full-screen player's commit rule: within 5 s
+     *  of the head goes live, otherwise into the buffer at [target]. */
+    fun seekToWall(context: Context, target: Long) {
+        val e = entry(context)
+        val ts = e.timeshiftController()
+        val holder = e.exoPlayerHolder()
+        val w = ts.activeWriter
+        val head = w?.headWallMs ?: ts.state.value.headWallMs
+        val tail = w?.tailWallMs ?: ts.state.value.tailWallMs
+        livePauseWallMs = 0L
+        if (target >= head - 5_000) holder.goLive() else holder.playTimeshift(target.coerceAtLeast(tail))
+        Log.i(TAG, "[RADIO] seek to ${target} (window $tail..$head)")
+    }
+
+    fun goLive(context: Context) {
+        livePauseWallMs = 0L
+        entry(context).exoPlayerHolder().goLive()
     }
 
     private fun notifyNowPlaying(channel: M3UChannel, subtitle: String) {

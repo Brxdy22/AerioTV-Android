@@ -195,6 +195,9 @@ fun CastRemoteSheet(
     /** Radio Mode: "Switch to Video Mode" above Stop (back to the full
      *  player, no re-tune). Null hides it. */
     onSwitchToVideo: (() -> Unit)? = null,
+    /** Radio Mode's Options set (Apple): Switch Stream, Record Current
+     *  Program, Audio Track and Stream Info only. */
+    radioOptions: Boolean = false,
 ) {
     var optionsOpen by remember { mutableStateOf(false) }
     var audioOpen by remember { mutableStateOf(false) }
@@ -603,6 +606,7 @@ fun CastRemoteSheet(
                     optionsOpen = false
                     audioOpen = true
                 }
+                if (!radioOptions) {
                 OptionRow(Icons.Filled.Subtitles, "Subtitles", if (remoteState.textOff) "Off" else remoteState.text.firstOrNull { it.selected }?.label ?: "On") {
                     optionsOpen = false
                     subsOpen = true
@@ -620,6 +624,7 @@ fun CastRemoteSheet(
                 }
                 OptionRow(Icons.Filled.VideocamOff, "Audio Only", if (remoteState.audioOnly) "On" else "Off") {
                     onSetAudioOnly(!remoteState.audioOnly)
+                }
                 }
                 OptionRow(Icons.Filled.Info, "Stream Info", null) {
                     optionsOpen = false
