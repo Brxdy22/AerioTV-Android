@@ -598,8 +598,19 @@ fun PlaylistDetailScreen(
                         status = state.epgRefreshStatus,
                     )
                     playlist.lastEpgRefreshedAt?.let { ts ->
+                        // GH #136 diagnosis: the stamp is epoch millis, so the
+                        // label can only be off by the device zone's offset.
+                        // Log what was formatted and in which zone.
+                        androidx.compose.runtime.LaunchedEffect(ts) {
+                            val tz = java.util.TimeZone.getDefault()
+                            android.util.Log.i(
+                                "AerioTV",
+                                "[EPG] last refreshed label: stamp=$ts ageMin=${(System.currentTimeMillis() - ts) / 60_000} " +
+                                    "zone=${tz.id} offsetMin=${tz.getOffset(ts) / 60_000} dst=${tz.inDaylightTime(Date(ts))}",
+                            )
+                        }
                         Text(
-                            text = "Last refreshed: ${DateFormat.getDateTimeInstance().format(Date(ts))}",
+                            text = "Last refreshed: ${LastRefreshedFormat.format(ts)}",
                             style = MaterialTheme.typography.bodySmall.subtext(),
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
@@ -849,4 +860,15 @@ private fun ActionRow(
             )
         }
     }
+}
+
+/** "Last refreshed" label formatting (GH #136), zone explicit for the test. */
+internal object LastRefreshedFormat {
+    fun format(
+        epochMs: Long,
+        zone: java.util.TimeZone = java.util.TimeZone.getDefault(),
+        locale: java.util.Locale = java.util.Locale.getDefault(),
+    ): String = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.MEDIUM, locale)
+        .apply { timeZone = zone }
+        .format(Date(epochMs))
 }

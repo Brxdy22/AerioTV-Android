@@ -1023,9 +1023,12 @@ class MainActivity : ComponentActivity() {
                     com.aeriotv.android.core.remote.RemoteSlot.RIGHT_SHORT,
                     com.aeriotv.android.core.remote.RemoteSlot.RIGHT_LONG,
                 )
-                com.aeriotv.android.feature.player.VodHiddenChromeScrub.customHorizontalMap =
-                    map.preset == com.aeriotv.android.core.remote.RemotePreset.CUSTOM &&
+                val custom = map.preset == com.aeriotv.android.core.remote.RemotePreset.CUSTOM &&
                     slots.any { map.playerAction(it) != defaults.playerAction(it) }
+                com.aeriotv.android.feature.player.VodHiddenChromeScrub.customLeftShort =
+                    if (custom) map.playerAction(com.aeriotv.android.core.remote.RemoteSlot.LEFT_SHORT) else null
+                com.aeriotv.android.feature.player.VodHiddenChromeScrub.customRightShort =
+                    if (custom) map.playerAction(com.aeriotv.android.core.remote.RemoteSlot.RIGHT_SHORT) else null
             }
         }
         lifecycleScope.launch {

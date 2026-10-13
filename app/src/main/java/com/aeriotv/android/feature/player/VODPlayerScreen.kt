@@ -766,6 +766,40 @@ fun VODPlayerScreen(
         player.playWhenReady = true
         Log.i(TAG, "Catch-up re-tune to ${target / 1000}s (window ${windowOffset / 1000}s)")
     }
+    // GH #135: hidden-chrome Left/Right outcome from VodHiddenChromeScrub
+    // (Custom map SEEK_* / PLAY_PAUSE, or Skip Without Controls).
+    val vodHiddenChromeAction: (Int, Boolean) -> Unit = { mode, isLeft ->
+        when (mode) {
+            VodHiddenChromeScrub.SKIP_BACK, VodHiddenChromeScrub.SKIP_FORWARD -> {
+                scrubTargetMs = null
+                scrubAccelCount = 0
+                scrubLastDirection = 0
+                val fwd = mode == VodHiddenChromeScrub.SKIP_FORWARD
+                if (fwd) {
+                    seekPlayer(min(
+                        if (durationMs <= 0L) Long.MAX_VALUE
+                        else if (dvrActive) (durationMs - DVR_WRITTEN_END_GUARD_MS).coerceAtLeast(0L) else durationMs,
+                        positionMs + SkipIntervals.forwardMs,
+                    ))
+                } else {
+                    seekPlayer(max(0L, positionMs - SkipIntervals.backMs))
+                }
+                val mapped = if (isLeft) VodHiddenChromeScrub.customLeftShort else VodHiddenChromeScrub.customRightShort
+                if (mapped == com.aeriotv.android.core.remote.PlayerRemoteAction.SEEK_BACKWARD ||
+                    mapped == com.aeriotv.android.core.remote.PlayerRemoteAction.SEEK_FORWARD
+                ) {
+                    Log.i(
+                        TAG,
+                        "[VOD] remote map ${if (isLeft) "Left" else "Right"} -> seek " +
+                            if (fwd) "+${SkipIntervals.forwardMs / 1000} s" else "-${SkipIntervals.backMs / 1000} s",
+                    )
+                }
+                com.aeriotv.android.ui.tv.TvFocusTrace.player("vod hidden-chrome skip fwd=$fwd from=$positionMs")
+            }
+            VodHiddenChromeScrub.PLAY_PAUSE -> exoPlayer?.let { it.playWhenReady = !it.playWhenReady }
+            else -> Unit
+        }
+    }
     // Commit an in-progress scrub immediately (OK press, iOS "Select commits
     // an in-progress scrub right away"). Setting scrubTargetMs back to null
     // also cancels the pending debounce commit.
@@ -1021,16 +1055,9 @@ fun VODPlayerScreen(
                         // A long press that STARTS with the chrome hidden scrubs
                         // exactly as it does with the chrome showing, revealing the
                         // chrome and the scrub position as it goes.
-                        val skipMode = VodHiddenChromeScrub.skipDecision(isRepeat, chromeVisible, now)
+                        val skipMode = VodHiddenChromeScrub.skipDecision(true, isRepeat, chromeVisible, now)
                         if (skipMode != VodHiddenChromeScrub.NOT_SKIP) {
-                            // Skip Without Controls: seek, chrome stays hidden.
-                            if (skipMode == VodHiddenChromeScrub.SKIP) {
-                                scrubTargetMs = null
-                                scrubAccelCount = 0
-                                scrubLastDirection = 0
-                                seekPlayer(max(0L, positionMs - SkipIntervals.backMs))
-                                com.aeriotv.android.ui.tv.TvFocusTrace.player("vod hidden-chrome skip dir=-1 from=$positionMs")
-                            }
+                            vodHiddenChromeAction(skipMode, true)
                             return@onPreviewKeyEvent true
                         }
                         if (VodHiddenChromeScrub.shouldScrub(isRepeat, chromeVisible)) {
@@ -1052,20 +1079,9 @@ fun VODPlayerScreen(
                         // A long press that STARTS with the chrome hidden scrubs
                         // exactly as it does with the chrome showing, revealing the
                         // chrome and the scrub position as it goes.
-                        val skipMode = VodHiddenChromeScrub.skipDecision(isRepeat, chromeVisible, now)
+                        val skipMode = VodHiddenChromeScrub.skipDecision(false, isRepeat, chromeVisible, now)
                         if (skipMode != VodHiddenChromeScrub.NOT_SKIP) {
-                            // Skip Without Controls: seek, chrome stays hidden.
-                            if (skipMode == VodHiddenChromeScrub.SKIP) {
-                                scrubTargetMs = null
-                                scrubAccelCount = 0
-                                scrubLastDirection = 0
-                                seekPlayer(min(
-                                    if (durationMs <= 0L) Long.MAX_VALUE
-                                    else if (dvrActive) (durationMs - DVR_WRITTEN_END_GUARD_MS).coerceAtLeast(0L) else durationMs,
-                                    positionMs + SkipIntervals.forwardMs,
-                                ))
-                                com.aeriotv.android.ui.tv.TvFocusTrace.player("vod hidden-chrome skip dir=+1 from=$positionMs")
-                            }
+                            vodHiddenChromeAction(skipMode, false)
                             return@onPreviewKeyEvent true
                         }
                         if (VodHiddenChromeScrub.shouldScrub(isRepeat, chromeVisible)) {

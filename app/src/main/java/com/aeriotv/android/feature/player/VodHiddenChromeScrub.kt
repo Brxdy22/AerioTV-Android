@@ -26,9 +26,13 @@ internal object VodHiddenChromeScrub {
      *  live TV never sees its keys; the VOD handler asks here instead. */
     @Volatile var skipWithoutControls = false
 
-    /** A Custom remote map assigns Left/Right player slots. It wins over Skip
-     *  Without Controls, as it does for live TV. */
-    @Volatile var customHorizontalMap = false
+    /** Left / Right short-press player actions from a Custom remote map
+     *  (null = not custom-mapped). GH #135: the VOD
+     *  player never enters ExoWindowState Fullscreen, so MainActivity's live
+     *  map dispatch never sees its keys; the VOD handler asks here. Kept hot
+     *  by MainActivity. */
+    @Volatile var customLeftShort: com.aeriotv.android.core.remote.PlayerRemoteAction? = null
+    @Volatile var customRightShort: com.aeriotv.android.core.remote.PlayerRemoteAction? = null
 
     private var lastSkipAt = 0L
 
@@ -36,22 +40,54 @@ internal object VodHiddenChromeScrub {
     private const val SKIP_REPEAT_MS = 250L
 
     const val NOT_SKIP = 0
-    const val SKIP = 1
+    /** Seek back by the Skip Back interval, chrome stays hidden. */
+    const val SKIP_BACK = 1
     const val SWALLOW = 2
+    /** Seek forward by the Skip Forward interval, chrome stays hidden. */
+    const val SKIP_FORWARD = 3
+    /** Custom map: Play/Pause. */
+    const val PLAY_PAUSE = 4
 
     /**
      * Call for each handled Left/Right KeyDown before [shouldScrub].
      *
-     * @return [NOT_SKIP] when the press keeps its normal meaning, [SKIP] when
-     *  it should seek by the Skip Back / Skip Forward interval with the chrome
-     *  left hidden, [SWALLOW] for a held repeat inside the pacing window.
+     * With the chrome hidden a Custom map's Left/Right short slot wins:
+     * SEEK_BACKWARD / SEEK_FORWARD skip by the Skip interval (in the
+     * action's direction), PLAY_PAUSE toggles. Any other mapping, or no
+     * custom mapping for that key, falls to Skip Without Controls (skip in
+     * the key's direction), else [NOT_SKIP]. Held repeats inside the pacing
+     * window return [SWALLOW].
      */
-    fun skipDecision(isRepeat: Boolean, chromeVisible: Boolean, now: Long): Int {
-        if (chromeVisible || !skipWithoutControls || customHorizontalMap) return NOT_SKIP
+    fun skipDecision(isLeft: Boolean, isRepeat: Boolean, chromeVisible: Boolean, now: Long): Int =
+        decide(
+            isLeft, isRepeat, chromeVisible, now,
+            if (isLeft) customLeftShort else customRightShort,
+            skipWithoutControls,
+        )
+
+    internal fun decide(
+        isLeft: Boolean,
+        isRepeat: Boolean,
+        chromeVisible: Boolean,
+        now: Long,
+        mapped: com.aeriotv.android.core.remote.PlayerRemoteAction?,
+        skipWithoutControls: Boolean,
+    ): Int {
+        if (chromeVisible) return NOT_SKIP
+        val result = when (mapped) {
+            com.aeriotv.android.core.remote.PlayerRemoteAction.SEEK_BACKWARD -> SKIP_BACK
+            com.aeriotv.android.core.remote.PlayerRemoteAction.SEEK_FORWARD -> SKIP_FORWARD
+            com.aeriotv.android.core.remote.PlayerRemoteAction.PLAY_PAUSE -> PLAY_PAUSE
+            else -> if (skipWithoutControls) (if (isLeft) SKIP_BACK else SKIP_FORWARD) else NOT_SKIP
+        }
+        if (result == NOT_SKIP) return NOT_SKIP
+        if (result == PLAY_PAUSE) return if (isRepeat) SWALLOW else PLAY_PAUSE
         if (isRepeat && now - lastSkipAt < SKIP_REPEAT_MS) return SWALLOW
         lastSkipAt = now
-        return SKIP
+        return result
     }
+
+    internal fun resetForTest() { lastSkipAt = 0L }
 
     /**
      * Call once per handled Left/Right KeyDown, before the chrome is revealed.
