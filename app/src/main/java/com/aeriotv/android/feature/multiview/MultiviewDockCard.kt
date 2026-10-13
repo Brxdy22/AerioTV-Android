@@ -423,4 +423,4 @@ private fun StagedRows(
 }
 
 /** Radio Mode card subtitle (Apple wording). */
-const val RADIO_SUBTITLE = "Playing channel audio"
+const val RADIO_SUBTITLE = "Playing in Radio Mode"
