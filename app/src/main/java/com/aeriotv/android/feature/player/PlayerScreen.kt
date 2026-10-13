@@ -663,7 +663,9 @@ fun PlayerScreen(
             // hold-Back stop, PiP X) keeps the channel live like a flip.
             // Minimize to the mini keeps PLAYING it, and multiview launch
             // hands off to tiles, so neither is retained.
-            val toMini = exoWindowState.mode.value == ExoWindowState.Mode.Mini
+            // Radio Mode keeps the holder playing exactly like a minimize.
+            val toMini = exoWindowState.mode.value == ExoWindowState.Mode.Mini ||
+                com.aeriotv.android.feature.player.RadioMode.isActive
             val toMultiview = PlayerCloseIntent.consumeMultiviewLaunch()
             val hlsSession = exoHolder.lastTuneWasForcedHls
             if (hlsSession) Log.i("AerioTV", "[FORCE-HLS] keep live skipped on HLS session")
@@ -3121,6 +3123,15 @@ private fun LiveRewindChromeSection(
             }
         },
         audioOnly = audioOnly,
+        // Radio Mode (Android#127): keep this channel's audio, drop to the
+        // Live TV tab with the Radio card. Hidden while casting or remote.
+        onRadioMode = if (castSender.state.value is com.aeriotv.android.core.cast.AerioCastSender.State.Connected || isCatchupMode || currentChannel == null) null else ({
+            currentChannel?.let { ch ->
+                com.aeriotv.android.feature.player.RadioMode.start(context, ch)
+                miniPlayerVm.dismiss()
+                onClose()
+            }
+        }),
         onSetSleepMinutes = { minutes ->
             sleepEndsAt = if (minutes == 0) null else System.currentTimeMillis() + minutes * 60_000L
         },

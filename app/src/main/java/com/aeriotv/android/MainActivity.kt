@@ -382,6 +382,14 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+        // Radio Mode (Android#127): Channel Up / Down switch the audio.
+        if (event.action == KeyEvent.ACTION_DOWN &&
+            (event.keyCode == KeyEvent.KEYCODE_CHANNEL_UP || event.keyCode == KeyEvent.KEYCODE_CHANNEL_DOWN) &&
+            com.aeriotv.android.feature.player.RadioMode.isActive &&
+            com.aeriotv.android.feature.player.RadioMode.step(
+                this, if (event.keyCode == KeyEvent.KEYCODE_CHANNEL_UP) 1 else -1,
+            )
+        ) return true
         // Remote Control A2: extended media keys while the fullscreen live
         // player is frontmost (BT/Shield/Onn remotes; the stock Google TV
         // remote lacks them). Slots per the plan's default map: FF/RW =
@@ -586,7 +594,9 @@ class MainActivity : ComponentActivity() {
      * so the mini-player keeps playing -- only a real leave triggers this.
      */
     override fun onStop() {
-        if (isTelevisionDevice() && !isChangingConfigurations) {
+        if (isTelevisionDevice() && !isChangingConfigurations &&
+            !com.aeriotv.android.feature.player.RadioMode.isActive
+        ) {
             android.util.Log.i("AerioLeave", "onStop: TV leave -> stopping playback")
             stopTvPlaybackOnLeave("onStop")
         }
@@ -663,6 +673,10 @@ class MainActivity : ComponentActivity() {
             // destroy()) so a quick relaunch reuses the holder. Same teardown
             // order as the X-close path. Must be FIRST so it short-circuits the
             // audio-only + API<31 video branches on TV.
+            // Radio Mode keeps playing in the background on every device
+            // (Android#127): the media service carries the notification.
+            com.aeriotv.android.feature.player.RadioMode.isActive ->
+                AerioMediaPlaybackService.startBackground(this)
             isTelevisionDevice() -> stopTvPlaybackOnLeave("onUserLeaveHint")
             // Audio-only: never enter PiP. Keep a foreground media notification
             // alive so audio continues with status-bar + lock-screen controls.
@@ -687,6 +701,7 @@ class MainActivity : ComponentActivity() {
         // config-change recreation doesn't kill playback; HOME / leave keeps
         // playing via onUserLeaveHint, which does NOT finish the activity.
         if (isFinishing) {
+            runCatching { com.aeriotv.android.feature.player.RadioMode.stop(this, "app exit") }
             runCatching { miniPlayerSession.dismiss() }
             runCatching { exoWindowState.hide() }
             runCatching { exoHolder.destroy() }

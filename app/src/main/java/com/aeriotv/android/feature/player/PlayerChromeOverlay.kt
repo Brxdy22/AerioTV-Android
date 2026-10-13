@@ -47,6 +47,7 @@ import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.Radio
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material.icons.filled.PictureInPicture
 import androidx.compose.material.icons.filled.PlayArrow
@@ -180,6 +181,8 @@ fun PlayerChromeOverlay(
     onCycleVideoScale: () -> Unit,
     onToggleAudioOnly: () -> Unit,
     audioOnly: Boolean,
+    /** Radio Mode from the options menu; null hides it (casting, VOD). */
+    onRadioMode: (() -> Unit)? = null,
     onSetSleepMinutes: (Int) -> Unit,
     sleepRemainingMillis: Long?,
     onInteractingChange: (Boolean) -> Unit = {},
@@ -548,6 +551,7 @@ fun PlayerChromeOverlay(
                             moreOpen = false
                             onToggleAudioOnly()
                         },
+                        onRadioMode = onRadioMode?.let { r -> { moreOpen = false; r() } },
                         keptLive = keptLive,
                         onKeptTune = { id ->
                             moreOpen = false
@@ -716,6 +720,7 @@ fun PlayerChromeOverlay(
                             moreOpen = false
                             onToggleAudioOnly()
                         },
+                        onRadioMode = onRadioMode?.let { r -> { moreOpen = false; r() } },
                         keptLive = keptLive,
                         onKeptTune = { id ->
                             moreOpen = false
@@ -1186,6 +1191,8 @@ private fun PlayerMoreMenu(
     canSwitchStream: Boolean,
     onSwitchStream: () -> Unit,
     onAudioOnly: () -> Unit,
+    /** Radio Mode (null = hidden, e.g. while casting). */
+    onRadioMode: (() -> Unit)? = null,
     keptLive: List<com.aeriotv.android.core.timeshift.TimeshiftController.RetainedChannel> = emptyList(),
     onKeptTune: (String) -> Unit = {},
     onKeptStop: (String) -> Unit = {},
@@ -1355,6 +1362,19 @@ private fun PlayerMoreMenu(
             },
             onClick = onAudioOnly,
         )
+        if (onRadioMode != null) {
+            DropdownMenuItem(
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Filled.Radio,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurface,
+                    )
+                },
+                text = { Text("Radio Mode") },
+                onClick = onRadioMode,
+            )
+        }
         // Keep Recent Channels Live: the same rows as the nav-bar card, which
         // is not shown over the fullscreen player. Name tunes (adopting the
         // kept stream), Stop releases it.

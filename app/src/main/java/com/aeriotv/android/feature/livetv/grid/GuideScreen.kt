@@ -1345,7 +1345,8 @@ fun GuideScreen(
                 onLeaveTop = {
                     // The background Multiview banner shares the Play slot.
                     val bannerUp = (stagingOn && stagedMultiview.isNotEmpty()) ||
-                        com.aeriotv.android.feature.multiview.MultiviewBackground.state.value != null
+                        com.aeriotv.android.feature.multiview.MultiviewBackground.state.value != null ||
+                        com.aeriotv.android.feature.player.RadioMode.isActive
                     val stagingUp = isTv && bannerUp &&
                         runCatching { stagingPlayFocus.requestFocus() }.getOrDefault(false)
                     com.aeriotv.android.ui.tv.TvFocusTrace.guide("leave-top staging-banner=$stagingUp")
@@ -1616,6 +1617,7 @@ fun GuideScreen(
                 if (isRecent) add(TvMenuAction("Remove from Recently Watched", Icons.Outlined.History, destructive = true) { settingsVm.removeRecentChannel(channel.id) })
                 add(TvMenuAction(if (inMultiview) "Remove from Multiview" else "Add to Multiview", Icons.Outlined.GridView, enabled = canAddToMultiview) { multiviewStore.stageToggle(channel) })
                 add(TvMenuAction("Add Channel to Collection", Icons.Outlined.CreateNewFolder) { collectionPickerFor = channel.id to channel.name })
+                com.aeriotv.android.feature.player.radioMenuAction(context, channel, if (isLive) cell.title else "") { miniPlayerVm.dismiss() }?.let { add(it) }
                 if (!cell.isPlaceholder) {
                     add(TvMenuAction("Program Info", Icons.Outlined.Info) { programInfoTarget = cell.toInfoTarget(channel.name, channel.dispatcharrChannelId) })
                     if (canRecord) add(TvMenuAction(if (isLive) "Record from Now" else "Record", Icons.Outlined.FiberManualRecord) { recordTarget = cell.toInfoTarget(channel.name, channel.dispatcharrChannelId) })
@@ -1634,6 +1636,7 @@ fun GuideScreen(
             if (isRecent) add(TvMenuAction("Remove from Recently Watched", destructive = true) { settingsVm.removeRecentChannel(channel.id) })
             add(TvMenuAction(if (inMultiview) "Remove from Multiview" else "Add to Multiview", enabled = canAddToMultiview) { multiviewStore.stageToggle(channel) })
             add(TvMenuAction("Add Channel to Collection") { collectionPickerFor = channel.id to channel.name })
+            com.aeriotv.android.feature.player.radioMenuAction(context, channel, if (isLive) cell.title else "") { miniPlayerVm.dismiss() }?.let { add(it) }
             // Jump To and Back to Now live on the clock cell now (tvOS parity).
             if (!cell.isPlaceholder) {
                 add(TvMenuAction("Program Info") { programInfoTarget = cell.toInfoTarget(channel.name, channel.dispatcharrChannelId) })

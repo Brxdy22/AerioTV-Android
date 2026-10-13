@@ -21,6 +21,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.DragHandle
 import androidx.compose.material.icons.filled.GridView
+import androidx.compose.material.icons.filled.Radio
 import androidx.compose.material3.Button
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
@@ -138,7 +139,7 @@ fun MultiviewDockCard(
 
 /** Accent text control, the dock cards' trailing action. */
 @Composable
-private fun AccentTextControl(label: String, onClick: () -> Unit) {
+internal fun AccentTextControl(label: String, onClick: () -> Unit) {
     Text(
         text = label,
         style = MaterialTheme.typography.labelLarge,
@@ -421,3 +422,78 @@ private fun StagedRows(
         }
     }
 }
+
+/**
+ * Radio Mode dock card (Android#127), phones and tablets: the cast card's
+ * shape and place. Channel logo, channel name, "Playing channel audio", and
+ * an accent Stop. Tap returns to the channel with video.
+ */
+@Composable
+fun RadioDockCard(
+    channelName: String,
+    logoUrl: String?,
+    tablet: Boolean,
+    onOpen: () -> Unit,
+    onStop: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val capsule = RoundedCornerShape(percent = 50)
+    Row(
+        modifier = modifier
+            .floatingNavChrome(capsule)
+            .clip(capsule)
+            .clickable(onClick = onOpen)
+            .padding(horizontal = if (tablet) 18.dp else 12.dp, vertical = RetainedCardVerticalPadding),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            modifier = Modifier
+                .size(40.dp)
+                .clip(RoundedCornerShape(6.dp))
+                .background(MaterialTheme.colorScheme.background),
+            contentAlignment = Alignment.Center,
+        ) {
+            if (!logoUrl.isNullOrBlank()) {
+                coil3.compose.AsyncImage(
+                    model = logoUrl,
+                    contentDescription = null,
+                    modifier = Modifier.size(34.dp),
+                )
+            } else {
+                Icon(
+                    imageVector = Icons.Filled.Radio,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(22.dp),
+                )
+            }
+        }
+        Spacer(Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = channelName,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onBackground,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = RADIO_SUBTITLE,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.textAccent,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Box(
+            modifier = Modifier.heightIn(min = RetainedCardControlHeight),
+            contentAlignment = Alignment.Center,
+        ) {
+            AccentTextControl(label = "Stop", onClick = onStop)
+        }
+    }
+}
+
+/** Radio Mode card subtitle (Apple wording). */
+const val RADIO_SUBTITLE = "Playing channel audio"

@@ -107,6 +107,21 @@ class AerioMediaPlaybackService : MediaLibraryService() {
         // useless placeholder, in Auto AND on the phone). Once Auto plays, Media3
         // promotes the bound service via onStartCommand, so the placeholder did
         // show there too -- this aligns the ids so it's swapped out immediately.
+        // Radio Mode (Android#127): a Stop button on the media notification
+        // while it is active (Play/Pause comes from the session itself).
+        scope.launch {
+            com.aeriotv.android.feature.player.RadioMode.state.collect { radio ->
+                mediaSession?.setCustomLayout(
+                    if (radio == null) emptyList() else listOf(
+                        androidx.media3.session.CommandButton.Builder()
+                            .setDisplayName("Stop")
+                            .setIconResId(android.R.drawable.ic_menu_close_clear_cancel)
+                            .setSessionCommand(RADIO_STOP)
+                            .build(),
+                    ),
+                )
+            }
+        }
         setMediaNotificationProvider(
             androidx.media3.session.DefaultMediaNotificationProvider.Builder(this)
                 .setChannelId(CHANNEL_ID)
@@ -200,12 +215,28 @@ class AerioMediaPlaybackService : MediaLibraryService() {
                 packageManager.hasSystemFeature(android.content.pm.PackageManager.FEATURE_AUTOMOTIVE)
             return if (pkg == packageName || controller.isTrusted || isCar) {
                 MediaSession.ConnectionResult.accept(
-                    MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS,
+                    MediaSession.ConnectionResult.DEFAULT_SESSION_AND_LIBRARY_COMMANDS
+                        .buildUpon().add(RADIO_STOP).build(),
                     MediaSession.ConnectionResult.DEFAULT_PLAYER_COMMANDS,
                 )
             } else {
                 MediaSession.ConnectionResult.reject()
             }
+        }
+
+        override fun onCustomCommand(
+            session: MediaSession,
+            controller: MediaSession.ControllerInfo,
+            customCommand: androidx.media3.session.SessionCommand,
+            args: android.os.Bundle,
+        ): ListenableFuture<androidx.media3.session.SessionResult> {
+            if (customCommand.customAction == RADIO_STOP.customAction) {
+                com.aeriotv.android.feature.player.RadioMode.stop(this@AerioMediaPlaybackService, "notification")
+                return com.google.common.util.concurrent.Futures.immediateFuture(
+                    androidx.media3.session.SessionResult(androidx.media3.session.SessionResult.RESULT_SUCCESS),
+                )
+            }
+            return super.onCustomCommand(session, controller, customCommand, args)
         }
 
         override fun onGetLibraryRoot(
@@ -382,6 +413,7 @@ class AerioMediaPlaybackService : MediaLibraryService() {
     companion object {
         private const val TAG = "AerioPlaybackService"
         private const val CHANNEL_ID = "aeriotv_background_playback"
+        private val RADIO_STOP = androidx.media3.session.SessionCommand("com.aeriotv.android.RADIO_STOP", android.os.Bundle.EMPTY)
         private const val NOTIF_ID = 0xAF
 
         fun startBackground(context: android.content.Context) {

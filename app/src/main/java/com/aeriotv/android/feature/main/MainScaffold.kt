@@ -1733,10 +1733,32 @@ fun MainScaffold(
                         Spacer(Modifier.height(if (tabletNav) 12.dp else 8.dp))
                     }
                 }
+                // Radio Mode (Android#127): the cast card's place and style.
+                val radio by com.aeriotv.android.feature.player.RadioMode.state
+                    .collectAsStateWithLifecycle()
+                @Composable
+                fun DockRadio() {
+                    val r = radio
+                    if (r != null && !isTv && !casting) {
+                        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                            Row(mvRowFrame, verticalAlignment = Alignment.CenterVertically) {
+                                com.aeriotv.android.feature.multiview.RadioDockCard(
+                                    channelName = r.channel.name,
+                                    logoUrl = r.channel.tvgLogo.takeIf { it.isNotBlank() },
+                                    tablet = tabletNav,
+                                    onOpen = { com.aeriotv.android.feature.player.RadioMode.requestReturn(context) },
+                                    onStop = { com.aeriotv.android.feature.player.RadioMode.stop(context, "card") },
+                                    modifier = Modifier.weight(1f),
+                                )
+                            }
+                        }
+                        Spacer(Modifier.height(if (tabletNav) 12.dp else 8.dp))
+                    }
+                }
                 if (tabletNav) {
-                    DockMvStaging(); DockMvBg(); DockKept(); DockFabOnly(); DockCast()
+                    DockMvStaging(); DockMvBg(); DockKept(); DockFabOnly(); DockRadio(); DockCast()
                 } else {
-                    DockCast(); DockMvBg(); DockMvStaging(); DockKept(); DockFabOnly()
+                    DockRadio(); DockCast(); DockMvBg(); DockMvStaging(); DockKept(); DockFabOnly()
                 }
                 val miniState = miniPlayerState
                 // Phase 139 / audit #22: on TV the mini-player is a top-right
