@@ -1736,26 +1736,34 @@ fun MainScaffold(
                 // Radio Mode (Android#127): the cast card's place and style.
                 val radio by com.aeriotv.android.feature.player.RadioMode.state
                     .collectAsStateWithLifecycle()
-                var showRadioSheet by remember { mutableStateOf(false) }
-                if (showRadioSheet && radio != null) {
-                    com.aeriotv.android.feature.player.RadioSheet(onDismiss = { showRadioSheet = false })
-                }
                 @Composable
                 fun DockRadio() {
-                    val r = radio
-                    if (r != null && !isTv && !casting) {
-                        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                            Row(mvRowFrame, verticalAlignment = Alignment.CenterVertically) {
-                                com.aeriotv.android.feature.multiview.RadioDockCard(
-                                    channelName = r.channel.name,
-                                    logoUrl = r.channel.tvgLogo.takeIf { it.isNotBlank() },
-                                    tablet = tabletNav,
-                                    onOpen = { showRadioSheet = true },
-                                    onStop = { com.aeriotv.android.feature.player.RadioMode.stop(context, "card") },
-                                    modifier = Modifier.weight(1f),
-                                )
-                            }
-                        }
+                    if (radio != null && !isTv && !casting) {
+                        com.aeriotv.android.feature.player.RadioTransportCard(
+                            tabletWidth = tabletCardWidth,
+                            nowProgramme = { ch -> state.epgByChannel[ch.guideMatchKey]?.nowPlaying() },
+                            loadChannelStreams = { channelIntPk ->
+                                val m3uNames = viewModel.loadM3uAccountNames()
+                                viewModel.loadChannelStreams(channelIntPk).map { st ->
+                                    com.aeriotv.android.feature.player.StreamOption(
+                                        id = st.id,
+                                        name = st.name.orEmpty(),
+                                        resolution = st.resolution,
+                                        fps = st.sourceFps,
+                                        bitrateKbps = st.outputBitrateKbps,
+                                        videoCodec = st.videoCodec,
+                                        audioCodec = st.audioCodec,
+                                        sourceName = st.m3uAccount?.let { m3uNames[it] },
+                                    )
+                                }
+                            },
+                            loadCurrentStreamId = { uuid -> viewModel.loadCurrentStreamId(uuid) },
+                            switchChannelStream = { uuid, streamId ->
+                                viewModel.switchChannelStream(uuid, streamId).getOrThrow()
+                            },
+                            recheckSwitchStreamAllowed = { trigger -> viewModel.recheckSwitchStreamAllowed(trigger) },
+                            isDispatcharrAdmin = capsPlaylist?.canSwitchStream() ?: false,
+                        )
                         Spacer(Modifier.height(if (tabletNav) 12.dp else 8.dp))
                     }
                 }

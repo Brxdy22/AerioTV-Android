@@ -35,6 +35,7 @@ import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.Timer
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.filled.Videocam
 import androidx.compose.material.icons.filled.VideocamOff
 import androidx.compose.material.icons.outlined.AspectRatio
 import androidx.compose.material.icons.outlined.MusicNote
@@ -188,6 +189,12 @@ fun CastRemoteSheet(
      *  reports a seekable window (the composited Multiview is live only,
      *  so iOS shows no scrubber and no LIVE caption there). */
     allowWebScrub: Boolean = true,
+    /** Replaces the "<verb> <device>" status line (Radio Mode: "Playing
+     *  channel audio"). */
+    statusLineOverride: String? = null,
+    /** Radio Mode: "Switch to Video Mode" above Stop (back to the full
+     *  player, no re-tune). Null hides it. */
+    onSwitchToVideo: (() -> Unit)? = null,
 ) {
     var optionsOpen by remember { mutableStateOf(false) }
     var audioOpen by remember { mutableStateOf(false) }
@@ -242,7 +249,9 @@ fun CastRemoteSheet(
                     overflow = TextOverflow.Ellipsis,
                 )
                 Text(
-                    text = if (buffering && switchingTo == null) {
+                    text = if (statusLineOverride != null) {
+                        statusLineOverride
+                    } else if (buffering && switchingTo == null) {
                         "Buffering… on ${deviceName ?: "your TV"}"
                     } else {
                         "$statusVerb ${deviceName ?: "your TV"}"
@@ -516,6 +525,15 @@ fun CastRemoteSheet(
                     contentColor = Color.White,
                     background = Color.White.copy(alpha = 0.12f),
                     onClick = onChangeDevice,
+                )
+            }
+            if (onSwitchToVideo != null) {
+                WideButton(
+                    icon = Icons.Filled.Videocam,
+                    label = "Switch to Video Mode",
+                    contentColor = Color.White,
+                    background = Color.White.copy(alpha = 0.12f),
+                    onClick = onSwitchToVideo,
                 )
             }
             // Red text and stop glyph on translucent red, as iOS.
