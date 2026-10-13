@@ -167,6 +167,28 @@ class MainActivity : ComponentActivity() {
         // NowPlayingManager). Intercept it BEFORE the MediaSession would pause
         // playback, but only while the mini is Active on TV. Single BACK also
         // resumes (handled by the mini overlay's BackHandler).
+        // Radio Mode on the TV guide (Apple TV parity, the banner's buttons):
+        // Play/Pause switches to video, hold Right stops.
+        val radioOnGuide = isTelevisionDevice() &&
+            com.aeriotv.android.feature.player.RadioMode.isActive &&
+            miniPlayerSession.state.value !is MiniPlayerSession.State.Active &&
+            exoWindowState.mode.value != ExoWindowState.Mode.Fullscreen
+        if (radioOnGuide && event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0 &&
+            (event.keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE || event.keyCode == KeyEvent.KEYCODE_MEDIA_PLAY)
+        ) {
+            android.util.Log.i("AerioTV", "[RADIO] Play/Pause on guide -> Switch to Video Mode")
+            com.aeriotv.android.feature.player.RadioMode.requestReturn(this)
+            return true
+        }
+        if (radioOnGuide && event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT && event.action == KeyEvent.ACTION_DOWN) {
+            if (android.os.SystemClock.uptimeMillis() < rightHoldPinUntil) return true
+            if (event.isLongPress || event.repeatCount >= MINI_CLOSE_HOLD_REPEAT) {
+                com.aeriotv.android.feature.player.RadioMode.stop(this, "hold-right")
+                rightHoldPinUntil = android.os.SystemClock.uptimeMillis() + RIGHT_HOLD_PIN_MS
+                return true
+            }
+            if (event.repeatCount >= 1) return true // held below threshold: hold position
+        }
         if (event.action == KeyEvent.ACTION_DOWN && isTelevisionDevice() &&
             (event.keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE ||
                 event.keyCode == KeyEvent.KEYCODE_MEDIA_PLAY) &&

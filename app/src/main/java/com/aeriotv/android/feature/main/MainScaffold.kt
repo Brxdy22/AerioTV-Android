@@ -1307,6 +1307,8 @@ fun MainScaffold(
                                     map = hintMap,
                                     sidebarGroups = hintGroupSelector == "sidebar",
                                     miniActive = miniActive,
+                                    radioActive = com.aeriotv.android.feature.player.RadioMode.state
+                                        .collectAsStateWithLifecycle().value != null,
                                 ),
                             modifier = Modifier.widthIn(max = stripMaxWidth),
                         )

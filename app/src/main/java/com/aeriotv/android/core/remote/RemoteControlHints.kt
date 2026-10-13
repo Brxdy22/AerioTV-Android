@@ -203,6 +203,9 @@ object RemoteControlHints {
         map: RemoteControlMap,
         sidebarGroups: Boolean,
         miniActive: Boolean,
+        /** Radio Mode on the guide (Apple TV parity): Play/Pause switches to
+         *  video and hold Right stops, as the banner's two buttons. */
+        radioActive: Boolean = false,
     ): List<RemoteHint> = buildList {
         // Select plays by default, so only a remapped Select is worth a pair;
         // the arrows and their holds are advertised whenever they do something
@@ -214,11 +217,16 @@ object RemoteControlHints {
             val action = map.guideAction(slot, sidebarGroups)
             // The mini-player pairs below cover these, and only while a mini is up.
             if (action == GuideRemoteAction.CLOSE_MINI_PLAYER || action == GuideRemoteAction.RESUME_PLAYER) continue
+            if (radioActive && slot == RemoteSlot.RIGHT_LONG) continue
             guideStripAction(action, sidebarGroups)?.let {
                 add(RemoteHint(slotLabel(slot), it))
             }
         }
         add(RemoteHint(if (miniActive) "Double Back" else "Back", "Top channel"))
+        if (radioActive && !miniActive) {
+            add(RemoteHint(slotLabel(RemoteSlot.PLAY_PAUSE), "Switch to Video Mode"))
+            add(RemoteHint(slotLabel(RemoteSlot.RIGHT_LONG), "Stop"))
+        }
         if (miniActive) {
             map.guideSlotFor(GuideRemoteAction.RESUME_PLAYER)?.let {
                 add(RemoteHint(slotLabel(it), "Resume"))
