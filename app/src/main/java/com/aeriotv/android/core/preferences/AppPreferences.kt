@@ -745,6 +745,22 @@ class AppPreferences @Inject constructor(
         store.edit { it[KEY_GUIDE_PROGRAM_INFO_BUTTON] = value }
     }
 
+    /** Program Info Button > Guide View (Apple parity 2026-10-13). Unset
+     *  follows the old single setting: on unless that was Off. */
+    val programInfoButtonGuide: Flow<Boolean> = store.data.map {
+        it[KEY_PROGRAM_INFO_BUTTON_GUIDE]
+            ?: ((it[KEY_GUIDE_PROGRAM_INFO_BUTTON] ?: GuideProgramInfoButton.OFF) != GuideProgramInfoButton.OFF)
+    }
+    suspend fun setProgramInfoButtonGuide(value: Boolean) {
+        store.edit { it[KEY_PROGRAM_INFO_BUTTON_GUIDE] = value }
+    }
+
+    /** Program Info Button > List View: the same button on channel list rows. Default off. */
+    val programInfoButtonList: Flow<Boolean> = store.data.map { it[KEY_PROGRAM_INFO_BUTTON_LIST] ?: false }
+    suspend fun setProgramInfoButtonList(value: Boolean) {
+        store.edit { it[KEY_PROGRAM_INFO_BUTTON_LIST] = value }
+    }
+
     val playerCardShowChannelLogo: Flow<Boolean> =
         store.data.map { it[KEY_PLAYER_CARD_CHANNEL_LOGO] ?: true }
     suspend fun setPlayerCardShowChannelLogo(value: Boolean) {
@@ -1672,6 +1688,8 @@ class AppPreferences @Inject constructor(
         data[KEY_GUIDE_TUNE_IN_MINI]?.let { out["guideTuneInMini"] = it.toString() }
         data[KEY_GUIDE_PROGRAM_INFO_BUTTON]?.let { out["guideProgramInfoButton"] = it }
         data[KEY_PLAYER_SHOW_CHANNEL_INFO_CARD]?.let { out["playerShowChannelInfoCard"] = it.toString() }
+        data[KEY_PROGRAM_INFO_BUTTON_GUIDE]?.let { out["programInfoButtonGuide"] = it.toString() }
+        data[KEY_PROGRAM_INFO_BUTTON_LIST]?.let { out["programInfoButtonList"] = it.toString() }
         data[KEY_SHOW_REMOTE_HINTS]?.let { out["showRemoteHints"] = it.toString() }
         // Per-device-type: both sync so a TV's choice mirrors to other TVs and a
         // phone's to other phones, independently. Each device reads its own.
@@ -1736,6 +1754,8 @@ class AppPreferences @Inject constructor(
                     put("guideTuneInMini", KEY_GUIDE_TUNE_IN_MINI)
                     put("guideProgramInfoButton", KEY_GUIDE_PROGRAM_INFO_BUTTON)
                     put("playerShowChannelInfoCard", KEY_PLAYER_SHOW_CHANNEL_INFO_CARD)
+                    put("programInfoButtonGuide", KEY_PROGRAM_INFO_BUTTON_GUIDE)
+                    put("programInfoButtonList", KEY_PROGRAM_INFO_BUTTON_LIST)
                     put("showRemoteHints", KEY_SHOW_REMOTE_HINTS)
                     put("showEpgBadgesTv", KEY_SHOW_EPG_BADGES_TV)
                     put("showEpgBadgesMobile", KEY_SHOW_EPG_BADGES_MOBILE)
@@ -1782,6 +1802,8 @@ class AppPreferences @Inject constructor(
                 ?.let { prefs[KEY_GUIDE_PROGRAM_INFO_BUTTON] = it }
             keys["playerShowChannelInfoCard"]?.toBooleanStrictOrNull()
                 ?.let { prefs[KEY_PLAYER_SHOW_CHANNEL_INFO_CARD] = it }
+            keys["programInfoButtonGuide"]?.toBooleanStrictOrNull()?.let { prefs[KEY_PROGRAM_INFO_BUTTON_GUIDE] = it }
+            keys["programInfoButtonList"]?.toBooleanStrictOrNull()?.let { prefs[KEY_PROGRAM_INFO_BUTTON_LIST] = it }
             keys["showRemoteHints"]?.toBooleanStrictOrNull()?.let { prefs[KEY_SHOW_REMOTE_HINTS] = it }
             keys["showEpgBadgesTv"]?.toBooleanStrictOrNull()?.let { prefs[KEY_SHOW_EPG_BADGES_TV] = it }
             keys["showEpgBadgesMobile"]?.toBooleanStrictOrNull()?.let { prefs[KEY_SHOW_EPG_BADGES_MOBILE] = it }
@@ -2318,6 +2340,8 @@ class AppPreferences @Inject constructor(
         val KEY_PHONE_GROUP_SELECTOR = stringPreferencesKey("phone_group_selector")
         val KEY_GUIDE_TUNE_IN_MINI = booleanPreferencesKey("guide_tune_in_mini")
         val KEY_GUIDE_PROGRAM_INFO_BUTTON = stringPreferencesKey("guideProgramInfoButton")
+        val KEY_PROGRAM_INFO_BUTTON_GUIDE = booleanPreferencesKey("programInfoButtonGuide")
+        val KEY_PROGRAM_INFO_BUTTON_LIST = booleanPreferencesKey("programInfoButtonList")
         val KEY_PLAYER_SHOW_CHANNEL_INFO_CARD = booleanPreferencesKey("playerShowChannelInfoCard")
         val KEY_SHOW_REMOTE_HINTS = booleanPreferencesKey("show_remote_hints")
         val KEY_STARTUP_REFRESH_RATE = stringPreferencesKey("startup_refresh_rate")

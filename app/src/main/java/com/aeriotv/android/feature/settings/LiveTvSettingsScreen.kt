@@ -113,6 +113,8 @@ fun LiveTvSettingsScreen(
     val scaleLiveTV by viewModel.displayScaleLiveTV.collectAsStateWithLifecycle(initialValue = 1.0f)
     val programInfoButton by viewModel.guideProgramInfoButton
         .collectAsStateWithLifecycle(initialValue = GuideProgramInfoButton.OFF)
+    val pibGuide by viewModel.programInfoButtonGuide.collectAsStateWithLifecycle(initialValue = false)
+    val pibList by viewModel.programInfoButtonList.collectAsStateWithLifecycle(initialValue = false)
     var confirmClearRecents by remember { mutableStateOf(false) }
     val palette by viewModel.categoryPalette.collectAsStateWithLifecycle(initialValue = CategoryPaletteState.Default)
 
@@ -222,6 +224,19 @@ fun LiveTvSettingsScreen(
                         )
                         // GH #127 (Apple d051505): phone and tablet only; TV
                         // reaches Program Info from the long-press menu.
+                        // Apple parity (2026-10-13): where the button shows,
+                        // Guide View and List View independently; the
+                        // picker below applies to both.
+                        if (!isTv) SettingsToggleRow(
+                            title = "Guide View",
+                            checked = pibGuide,
+                            onCheckedChange = viewModel::setProgramInfoButtonGuide,
+                        )
+                        if (!isTv) SettingsToggleRow(
+                            title = "List View",
+                            checked = pibList,
+                            onCheckedChange = viewModel::setProgramInfoButtonList,
+                        )
                         if (!isTv) SettingsPickerRow(
                             title = "Program Info Button",
                             inlineTitle = true,

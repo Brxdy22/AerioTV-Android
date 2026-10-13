@@ -1487,9 +1487,9 @@ private const val MIN_CELL_PX = 6f
 /** Airing cell clipped at the strip edge never draws narrower than this, so its title shows. */
 private val AIRING_MIN_VISIBLE = 72.dp
 /** GH #127 guide cell info button: glyph size, corner inset, tap target, min visible cell width. */
-private val GUIDE_INFO_BUTTON_SIZE = 18.dp
+internal val GUIDE_INFO_BUTTON_SIZE = 18.dp
 private val GUIDE_INFO_BUTTON_INSET = 5.dp
-private val GUIDE_INFO_BUTTON_HIT = 40.dp
+internal val GUIDE_INFO_BUTTON_HIT = 40.dp
 private val GUIDE_INFO_BUTTON_MIN_CELL = 120.dp
 private const val CELL_TEXT_CACHE_SOFT_CAP = 48
 private const val CELL_TEXT_EVICT_MARGIN_MS = 12 * 3_600_000L

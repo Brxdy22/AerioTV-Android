@@ -198,8 +198,12 @@ fun GuideScreen(
     // the pref folds into the hidden set the sheets and the filters see.
     val recentGroupVisible by settingsVm.recentGroupVisible.collectAsStateWithLifecycle()
     val recentChannelIds by settingsVm.recentChannelIds.collectAsStateWithLifecycle(initialValue = emptyList())
-    val programInfoButtonMode by settingsVm.guideProgramInfoButton
+    val programInfoButtonModeRaw by settingsVm.guideProgramInfoButton
         .collectAsStateWithLifecycle(initialValue = com.aeriotv.android.core.preferences.GuideProgramInfoButton.OFF)
+    val programInfoButtonGuideOn by settingsVm.programInfoButtonGuide.collectAsStateWithLifecycle(initialValue = false)
+    // Program Info Button > Guide View off hides the button in the guide.
+    val programInfoButtonMode = if (programInfoButtonGuideOn) programInfoButtonModeRaw
+        else com.aeriotv.android.core.preferences.GuideProgramInfoButton.OFF
     val effectiveHidden = remember(hiddenGroups, recentGroupVisible) {
         if (recentGroupVisible) hiddenGroups
         else hiddenGroups + com.aeriotv.android.feature.playlist.PlaylistViewModel.RECENT_GROUP

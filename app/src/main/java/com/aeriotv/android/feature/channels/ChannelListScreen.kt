@@ -188,6 +188,13 @@ fun ChannelListScreen(
     val settingsVm: SettingsViewModel = hiltViewModel()
     val palette by settingsVm.categoryPalette.collectAsStateWithLifecycle(initialValue = CategoryPaletteState.Default)
     val hiddenGroups by settingsVm.hiddenGroups.collectAsStateWithLifecycle(initialValue = emptySet())
+    // Program Info Button > List View (Apple parity 2026-10-13): the guide
+    // cell's info button on list rows, same mode picker.
+    val pibListOn by settingsVm.programInfoButtonList.collectAsStateWithLifecycle(initialValue = false)
+    val pibMode by settingsVm.guideProgramInfoButton
+        .collectAsStateWithLifecycle(initialValue = com.aeriotv.android.core.preferences.GuideProgramInfoButton.OFF)
+    val listInfoButtonMode = if (pibListOn && !rememberIsTvDevice()) pibMode
+        else com.aeriotv.android.core.preferences.GuideProgramInfoButton.OFF
     val showChannelLogos by settingsVm.showChannelLogos.collectAsStateWithLifecycle(initialValue = true)
     val showChannelNumbers by settingsVm.showChannelNumbers.collectAsStateWithLifecycle(initialValue = true)
     val groupSortModeRaw by settingsVm.groupSortMode.collectAsStateWithLifecycle(initialValue = "Default")
@@ -744,6 +751,7 @@ fun ChannelListScreen(
                         } else null,
                         onShowProgramInfo = { programInfoTarget = it },
                         onShowRecord = { recordTarget = it },
+                        infoButtonMode = listInfoButtonMode,
                         palette = palette,
                         showLogo = showChannelLogos,
                         showNumber = showChannelNumbers,
@@ -1008,6 +1016,9 @@ internal fun ChannelRow(
     /** GH #130: non-null while the channel is in Recently Watched; the
      *  long-press menu then offers "Remove from Recently Watched". */
     onRemoveFromRecents: (() -> Unit)? = null,
+    /** Program Info Button > List View: the guide cell's mode (off /
+     *  current / all) for this row's current program. */
+    infoButtonMode: String = com.aeriotv.android.core.preferences.GuideProgramInfoButton.OFF,
 ) {
     // iPhone-shaped row on phone and tablet (time on the title line, italic
     // sub-title line); TV keeps the fixed-slot layout.
@@ -1416,6 +1427,26 @@ internal fun ChannelRow(
                     // same menu (the DropdownMenu anchors to the row Box, so
                     // no anchor was lost).
                     Row(verticalAlignment = Alignment.CenterVertically) {
+                        // Program Info Button > List View: the guide cell's
+                        // button (same glyph, size, accent tint, hit target)
+                        // for the program airing now. The list only shows
+                        // current programs, so Current and All both show it.
+                        val nowForInfo = nowProgramme
+                        if (nowForInfo != null && !nowForInfo.isPlaceholder &&
+                            com.aeriotv.android.core.preferences.GuideProgramInfoButton.shows(infoButtonMode, isLive = true)
+                        ) {
+                            IconButton(
+                                onClick = { onShowProgramInfo(nowForInfo.toInfoTarget(channel.name, channel.dispatcharrChannelId)) },
+                                modifier = Modifier.size(com.aeriotv.android.feature.livetv.grid.GUIDE_INFO_BUTTON_HIT),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Outlined.Info,
+                                    contentDescription = "Program Info",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(com.aeriotv.android.feature.livetv.grid.GUIDE_INFO_BUTTON_SIZE),
+                                )
+                            }
+                        }
                         IconButton(
                             onClick = { isExpanded = !isExpanded },
                             modifier = Modifier.size(28.dp),

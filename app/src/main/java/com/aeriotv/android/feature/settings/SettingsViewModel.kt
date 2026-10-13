@@ -466,6 +466,14 @@ class SettingsViewModel @Inject constructor(
     fun setGuideProgramInfoButton(value: String) {
         viewModelScope.launch { prefs.setGuideProgramInfoButton(value) }
     }
+    val programInfoButtonGuide: Flow<Boolean> = prefs.programInfoButtonGuide
+    fun setProgramInfoButtonGuide(value: Boolean) {
+        viewModelScope.launch { prefs.setProgramInfoButtonGuide(value) }
+    }
+    val programInfoButtonList: Flow<Boolean> = prefs.programInfoButtonList
+    fun setProgramInfoButtonList(value: Boolean) {
+        viewModelScope.launch { prefs.setProgramInfoButtonList(value) }
+    }
 
     val playerCardShowChannelLogo: Flow<Boolean> = prefs.playerCardShowChannelLogo
     fun setPlayerCardShowChannelLogo(value: Boolean) {
