@@ -229,6 +229,11 @@ object RadioMode {
     /** Current playhead on the wall clock (the buffer head when live). */
     fun positionWallMs(context: Context): Long {
         val e = entry(context)
+        // The window in the controller's state only moves when someone asks
+        // (the full-screen player polls it); Radio has no player, so refresh
+        // here. Without it a -10 s skip read a head minutes old and landed
+        // at the buffer tail (Nothing Phone 2026-10-13).
+        e.timeshiftController().refreshWindow()
         val st = e.timeshiftController().state.value
         val holder = e.exoPlayerHolder()
         return if (st.timeshifting) st.baseWallMs + (holder.player?.currentPosition ?: 0L) else st.headWallMs
