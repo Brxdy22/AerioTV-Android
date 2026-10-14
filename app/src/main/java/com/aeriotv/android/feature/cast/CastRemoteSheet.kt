@@ -588,7 +588,9 @@ fun CastRemoteSheet(
                         onSwitchStream()
                     }
                     Text(
-                        text = "Swaps this channel's upstream. The TV keeps playing; the picture follows in a few seconds.",
+                        // Radio has no TV and no picture (Onn 2026-10-13).
+                        text = if (radioOptions) "Swaps this channel's upstream. Audio keeps playing while the stream switches."
+                            else "Swaps this channel's upstream. The TV keeps playing; the picture follows in a few seconds.",
                         style = MaterialTheme.typography.bodySmall.subtext(),
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(start = 52.dp, end = 12.dp, bottom = 6.dp),
