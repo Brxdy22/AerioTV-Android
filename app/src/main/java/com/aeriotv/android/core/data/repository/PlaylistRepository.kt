@@ -516,7 +516,20 @@ class PlaylistRepository @Inject constructor(
         // launch: the client keeps a per-host override cache and PlaybackHeaders
         // reads the row, so reseeding the cache is the whole of it.
         if (plan.userAgentChanged) dispatcharrClient.seedUserAgent(updated)
-        if (plan.lanUrlChanged) {
+        if (plan.lanUrlChanged &&
+            hostChanged(previous.urlString, normalisedBase, previous.lanUrlString, request.lanUrl)
+        ) {
+            // A Local URL edit alone takes this instant path; it still moves
+            // the playlist to another host, so it invalidates the same state
+            // the full save does and re-reads permissions like Refresh
+            // Permissions.
+            invalidateForHostChange(previous, normalisedBase, request.lanUrl)
+            updated.lanUrlString?.takeIf { it.isNotBlank() }?.let { lanReachability.refresh(it) }
+            if (updated.isDispatcharrDirectConnect()) {
+                runCatching { probeCapabilities(updated.id, force = true, trigger = "playlist host change") }
+                    .onFailure { Log.w(TAG_CAPS, "host-change capability probe failed", it) }
+            }
+        } else if (plan.lanUrlChanged) {
             updated.lanUrlString?.takeIf { it.isNotBlank() }?.let { lanReachability.refresh(it) }
         }
         if (updated.isActive) publishActiveCredentials(updated)
@@ -730,6 +743,16 @@ class PlaylistRepository @Inject constructor(
             }
             Log.i(TAG_CAPS, "credentials verified for ${playlistId.take(8)}; dropping the old account's cached identity")
             dropCachedIdentity(priorRow!!)
+        }
+        // A new host, scheme, or port on either route: drop what was learned
+        // against the old host BEFORE the new JWT pair lands (the drop clears
+        // that store), so this save's fetches start clean.
+        if (priorRow != null && hostChanged(
+                priorRow.urlString, normalisedBase,
+                priorRow.lanUrlString, request.lanUrl,
+            )
+        ) {
+            invalidateForHostChange(priorRow, normalisedBase, request.lanUrl)
         }
         pendingJwt?.let { dispatcharrTokenStore.store(playlistId, it.access, it.refresh) }
 
@@ -1010,6 +1033,67 @@ class PlaylistRepository @Inject constructor(
      * the self-heal in [probeCapabilitiesUncoalesced] for a row whose
      * stored key turned out to belong to somebody else.
      */
+    /** "scheme://host:port", lowercased, default port filled in; "" when blank or unparseable. */
+    private fun hostKey(raw: String?): String {
+        var v = raw?.trim().orEmpty()
+        if (v.isEmpty()) return ""
+        if (!v.startsWith("http://", true) && !v.startsWith("https://", true)) v = "http://$v"
+        val uri = runCatching { java.net.URI(v) }.getOrNull() ?: return ""
+        val host = uri.host?.lowercase()?.takeIf { it.isNotBlank() } ?: return ""
+        val scheme = (uri.scheme ?: "http").lowercase()
+        val port = if (uri.port > 0) uri.port else if (scheme == "https") 443 else 80
+        return "$scheme://$host:$port"
+    }
+
+    /** True when either route of the playlist now points at another host, scheme, or port. */
+    private fun hostChanged(oldBase: String?, newBase: String?, oldLan: String?, newLan: String?): Boolean =
+        hostKey(oldBase) != hostKey(newBase) || hostKey(oldLan) != hostKey(newLan)
+
+    /**
+     * Forget everything learned against a playlist's OLD host after an edit
+     * moved it to another one (Discord report 2026-10-14: a playlist moved
+     * from its LAN address to a public one behind an SSO proxy only worked
+     * after Refresh Permissions). The playlist id is untouched, so favorites,
+     * recents, and DVR stay attached.
+     *
+     * Cleared: the process-local JWT pair, the 403-derived capability
+     * corrections (a proxy's refusals on the old route are not the
+     * account's), retained live-rewind fillers (open connections to the old
+     * host), the memoized catch-up credentials, the persisted auth header
+     * shape (learned against whatever sat in front of the old host; the 401
+     * path re-detects it against the new one), and the probe throttle so the
+     * next capability probe reads through the new host at once. The callers
+     * then probe permissions unthrottled, exactly as Refresh Permissions does.
+     */
+    private suspend fun invalidateForHostChange(prior: PlaylistEntity, newBase: String, newLan: String?) {
+        val cleared = mutableListOf<String>()
+        dispatcharrTokenStore.clear(prior.id)
+        cleared += "JWT pair"
+        CapabilityCorrections.clear(prior.id)
+        cleared += "capability corrections"
+        timeshiftController.stopAllRetained("playlist host changed")
+        cleared += "retained rewind connections"
+        catchupResolver.invalidateCredentialMemos()
+        cleared += "catch-up credentials"
+        lastCapabilityProbeAt.remove(prior.id)
+        cleared += "probe throttle"
+        val current = dao.byId(prior.id)
+        if (current != null && current.dispatcharrAuthMode.isNotBlank()) {
+            cleared += "auth header mode '${current.dispatcharrAuthMode}'"
+            runCatching { dao.update(current.copy(dispatcharrAuthMode = "")) }
+                .onFailure { Log.w(TAG_SAVE, "host-change auth mode reset failed", it) }
+        } else {
+            cleared += "auth header mode (default)"
+        }
+        val oldLan = hostKey(prior.lanUrlString).takeIf { it.isNotEmpty() }?.let { " (local $it)" } ?: ""
+        val newLanKey = hostKey(newLan).takeIf { it.isNotEmpty() }?.let { " (local $it)" } ?: ""
+        Log.i(
+            TAG_SAVE,
+            "[PLAYLIST] host changed ${hostKey(prior.urlString)}$oldLan -> ${hostKey(newBase)}$newLanKey: " +
+                "cleared ${cleared.joinToString(", ")} playlist=${prior.id.take(8)}",
+        )
+    }
+
     private suspend fun dropCachedIdentity(priorRow: PlaylistEntity) {
         // The JWT pair was minted for the OLD account. In User/Pass mode a
         // re-login replaces it, but only on success; in API Key mode nothing
