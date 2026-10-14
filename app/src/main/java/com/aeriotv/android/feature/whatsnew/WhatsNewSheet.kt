@@ -295,28 +295,28 @@ object WhatsNewContent {
      *  versionName in build.gradle.kts to surface a new sheet on next launch. */
     val CURRENT = listOf(
         WhatsNewItem(
-            title = "Multiview channel logos",
-            body = "Settings > Player > Multiview can show each tile's channel logo inside the picture, with a corner position and a size from 5 to 25 percent.",
+            title = "Radio Mode",
+            body = "Audio Only is now Radio Mode: listen to a channel with no video from a card above the navigation bar, with a full sheet for channels, skips on the Live Rewind buffer, Options, and Stop. Phones and tablets keep playing in the background.",
         ),
         WhatsNewItem(
-            title = "Reorder a channel's streams",
-            body = "Dispatcharr Direct Connect admins can reorder a channel's streams from Switch Stream: drag the handle on phones and tablets, or use the reorder button on TV.",
+            title = "Program Info Button",
+            body = "Guide View and List View toggles, with an info button on list rows and expanded schedule rows.",
         ),
         WhatsNewItem(
-            title = "Skip Without Controls",
-            body = "A new Player setting: with the controls hidden, Left and Right skip back and forward instead of opening the timeline. Works for live TV, recordings and movies.",
+            title = "Multiview picker",
+            body = "Show Subtitles and Show Descriptions (Settings > Player > Multiview), deselect a channel in the picker, and Back to Guide when leaving a Multiview.",
         ),
         WhatsNewItem(
-            title = "Kept Live and tablets",
-            body = "Closing the player can keep recent channels live for an instant return, shown on a Kept Live card. Tablets use the phone's bottom tab bar.",
+            title = "Remote and display",
+            body = "Learn extra remote buttons and map them to actions, and Match Frame Rate is now its own toggle, separate from resolution.",
         ),
         WhatsNewItem(
-            title = "Smoother Android TV",
-            body = "Back on DVR, Movies, TV Shows and Settings returns to the tab bar first, focus fixes across the guide and player, and hidden tabs no longer rebuild every 2 seconds.",
+            title = "Recordings",
+            body = "In-progress recordings offer Resume and reload instead of ending, and recordings honor a custom Left/Right remote map.",
         ),
         WhatsNewItem(
             title = "Fixes",
-            body = "Fixed a crash when a stream switch followed a 503 retry. Guide colors and drag precision match the Apple app. The guide paints faster at launch.",
+            body = "Program art for Teamarr and dummy EPG channels, HDR after an SDR channel, the guide no longer blanks in the foreground, and TV focus rings follow each control's shape.",
         ),
     )
 }
