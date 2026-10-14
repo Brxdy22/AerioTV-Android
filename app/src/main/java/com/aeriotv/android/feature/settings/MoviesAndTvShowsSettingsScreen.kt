@@ -127,7 +127,7 @@ fun MoviesAndTvShowsSettingsScreen(
                                     title = "Use TMDB for Movies and TV Shows",
                                     // Apple TV: photo.on.rectangle.angled.
                                     leadingIcon = if (isTv) Icons.Filled.PhotoLibrary else null,
-                                    subtitle = "Posters, backdrops, descriptions, cast and crew, episode details and recommendations from The Movie Database, plus program artwork your provider does not supply.",
+                                    subtitle = "Posters, backdrops, descriptions, cast and crew, episode details, and recommendations from The Movie Database, plus program artwork your provider does not supply.",
                                     checked = programPostersTmdb,
                                     onCheckedChange = viewModel::setProgramPostersTmdbEnabled,
                                 )
