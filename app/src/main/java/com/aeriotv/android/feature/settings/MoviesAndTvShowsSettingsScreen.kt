@@ -117,17 +117,17 @@ fun MoviesAndTvShowsSettingsScreen(
                     item("posters") {
                         Column {
                             SettingsSection(
-                                header = "Posters",
+                                header = "The Movie Database",
                                 // Apple iOS: the footer is always shown. Apple tvOS:
                                 // the same text sits under the buttons, only while
                                 // the toggle is on (rendered below the card here).
                                 footer = if (isTv) null else TMDB_FOOTER_PHONE,
                             ) {
                                 SettingsToggleRow(
-                                    title = "Fetch Posters from TMDB",
+                                    title = "Use TMDB for Movies and TV Shows",
                                     // Apple TV: photo.on.rectangle.angled.
                                     leadingIcon = if (isTv) Icons.Filled.PhotoLibrary else null,
-                                    subtitle = "Fill in program artwork your provider doesn't supply, using The Movie Database.",
+                                    subtitle = "Posters, backdrops, descriptions, cast and crew, episode details and recommendations from The Movie Database, plus program artwork your provider does not supply.",
                                     checked = programPostersTmdb,
                                     onCheckedChange = viewModel::setProgramPostersTmdbEnabled,
                                 )
