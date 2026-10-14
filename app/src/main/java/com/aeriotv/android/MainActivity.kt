@@ -695,12 +695,14 @@ class MainActivity : ComponentActivity() {
             // destroy()) so a quick relaunch reuses the holder. Same teardown
             // order as the X-close path. Must be FIRST so it short-circuits the
             // audio-only + API<31 video branches on TV.
-            // Radio Mode keeps playing in the background on every device
-            // (Android#127): the media service carries the notification.
-            com.aeriotv.android.feature.player.RadioMode.isActive -> {
-                com.aeriotv.android.feature.player.RadioMode.leftAppAtMs = android.os.SystemClock.uptimeMillis()
+            // Radio Mode on TV stops when the app leaves the foreground, the
+            // same as Apple TV (owner decision 2026-10-14). Phones and tablets
+            // keep playing in the background with the media notification
+            // (Android#127).
+            com.aeriotv.android.feature.player.RadioMode.isActive && isTelevisionDevice() ->
+                com.aeriotv.android.feature.player.RadioMode.stop(this, "app backgrounded, TV")
+            com.aeriotv.android.feature.player.RadioMode.isActive ->
                 AerioMediaPlaybackService.startBackground(this)
-            }
             isTelevisionDevice() -> stopTvPlaybackOnLeave("onUserLeaveHint")
             // Audio-only: never enter PiP. Keep a foreground media notification
             // alive so audio continues with status-bar + lock-screen controls.

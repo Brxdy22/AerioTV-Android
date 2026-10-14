@@ -38,9 +38,6 @@ object RadioMode {
 
     /** The active playlist's stream headers, kept current by the nav layer
      *  (menus that start Radio Mode have no playlist of their own). */
-    /** uptime ms of the last app leave while in Radio Mode (Home). */
-    @Volatile var leftAppAtMs: Long = 0L
-
     /** uptime ms of the last [start] (the TV banner's OK guard). */
     @Volatile var startedAtMs: Long = 0L
 
