@@ -2176,9 +2176,13 @@ private fun ExoTile(
     val playerRef = remember { mutableStateOf<ExoPlayer?>(null) }
     // Developer Force HLS: the tile gets the main player's HLS treatment
     // (load profile, per-channel target, warm join, trough ramp).
+    // Read so a tile recomposes once its host is learned as server HLS.
+    @Suppress("UNUSED_VARIABLE")
+    val serverHlsVersion = com.aeriotv.android.core.playback.ForceHls.serverHlsVersion.intValue
     val forcedHlsTile = tile.kind == TileKind.Live && (
         com.aeriotv.android.core.playback.ForceHls.isForcedHlsUrl(url) ||
-            (com.aeriotv.android.core.playback.ForceHls.enabled &&
+            ((com.aeriotv.android.core.playback.ForceHls.enabled ||
+                com.aeriotv.android.core.playback.ForceHls.isServerHlsHost(url)) &&
                 com.aeriotv.android.core.playback.ForceHls.isDispatcharrLive(url))
         )
     val forceHlsTargetMs = remember(tile.id, url) {
@@ -2323,7 +2327,11 @@ private fun ExoTile(
                 }
             val dataSourceFactory: () -> androidx.media3.datasource.DataSource.Factory = {
                 vodDataSourceFactory
-                    ?: tracer.wrapDataSourceFactory(forceHlsTile.wrap(liveCalls.newFactory(headers, tileUserAgent, 30_000)))
+                    ?: tracer.wrapDataSourceFactory(
+                        com.aeriotv.android.core.playback.ServerHlsGuard.Factory(
+                            forceHlsTile.wrap(liveCalls.newFactory(headers, tileUserAgent, 30_000)),
+                        ),
+                    )
             }
             // Tiles decode audio to PCM (no passthrough): PCM AudioTracks are
             // mixed by the platform in any number, so every tile can keep its
@@ -2525,6 +2533,25 @@ private fun ExoTile(
                 override fun onPlayerError(error: PlaybackException) {
                     val retryUrl = currentUrlRef.value
                     if (retryUrl.isBlank()) return
+                    // Dispatcharr proxy output set to HLS: the host is now learned,
+                    // so rebuilding the source routes the tile through its HLS session.
+                    com.aeriotv.android.core.playback.ForceHls.findServerHlsRedirect(error)?.let { redirect ->
+                        Log.i(TAG, "[FORCE-HLS] tile $channelName live URL answered with an HLS playlist; re-tuning through the HLS session path")
+                        // Adopt the session the redirected open minted (no second resolve).
+                        forceHlsTile.adopt(
+                            com.aeriotv.android.core.playback.ForceHls.apply(retryUrl, "multiview tile"),
+                            com.aeriotv.android.core.playback.ForceHls.Session(
+                                redirect.playlistUrl,
+                                com.aeriotv.android.core.playback.ForceHls.tokenFor(redirect.playlistUrl),
+                            ),
+                        )
+                        liveCalls.setSource(player) { buildTileMediaSource(retryUrl, dataSourceFactory()) }
+                        tracer.recover("server HLS adoption")
+                        tracer.markTuneStart(channelName, traceKind)
+                        player.prepare()
+                        player.playWhenReady = !paused
+                        return
+                    }
                     if (!isVod && tile.kind != TileKind.Dvr) {
                         com.aeriotv.android.core.playback.DispatcharrConnectionLimit.parse(error)?.let { notice ->
                             Log.w(TAG, "[LIMIT] tile $channelName ${notice.kind} \"${notice.message}\"; waiting for Retry")
@@ -2706,11 +2733,13 @@ private fun ExoTile(
                                 DefaultDataSource.Factory(view.context, swapHttp)
                             } else {
                                 // DefaultHttpDataSource defaults: 8 s connect + read.
-                                forceHlsTile.wrap(
-                                    liveCalls.newFactory(
-                                        headers,
-                                        "AerioTV/${com.aeriotv.android.BuildConfig.VERSION_NAME} (Android; ${android.os.Build.MODEL})",
-                                        8_000,
+                                com.aeriotv.android.core.playback.ServerHlsGuard.Factory(
+                                    forceHlsTile.wrap(
+                                        liveCalls.newFactory(
+                                            headers,
+                                            "AerioTV/${com.aeriotv.android.BuildConfig.VERSION_NAME} (Android; ${android.os.Build.MODEL})",
+                                            8_000,
+                                        ),
                                     ),
                                 )
                             },

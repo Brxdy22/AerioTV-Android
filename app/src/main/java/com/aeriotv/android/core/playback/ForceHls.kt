@@ -20,6 +20,74 @@ object ForceHls {
 
     @Volatile var enabled: Boolean = false
 
+    /** Hosts (lowercase host:port) whose plain live URL answers with an HLS
+     *  playlist (Dispatcharr proxy output set to HLS). Seeded from and
+     *  persisted to AppPreferences.serverHlsHosts by AerioExoPlayerHolder. */
+    private val serverHlsHosts = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /** Bumped on every learn/forget so Compose readers (Multiview tiles) re-derive. */
+    val serverHlsVersion = androidx.compose.runtime.mutableIntStateOf(0)
+
+    /** Called with the full learned set after it changes (persistence hook). */
+    @Volatile var onServerHlsChanged: (Set<String>) -> Unit = {}
+
+    fun hostKey(url: String): String? =
+        url.toHttpUrlOrNull()?.let { "${it.host.lowercase()}:${it.port}" }
+
+    fun seedServerHlsHosts(hosts: Set<String>) {
+        serverHlsHosts.clear()
+        serverHlsHosts.addAll(hosts.map { it.lowercase() })
+        if (hosts.isNotEmpty()) Log.i(TAG, "[FORCE-HLS] server HLS hosts seeded: ${hosts.size}")
+    }
+
+    fun isServerHlsHost(url: String): Boolean = hostKey(url)?.let { it in serverHlsHosts } == true
+
+    /** The plain live URL [entryUrl] redirected to the HLS session [playlistUrl]. */
+    fun noteServerHls(entryUrl: String, playlistUrl: String) {
+        val key = hostKey(entryUrl) ?: return
+        Log.i(TAG, "[FORCE-HLS] server answers HLS for $key; live tunes use the HLS session path")
+        if (serverHlsHosts.add(key)) {
+            serverHlsVersion.intValue++
+            onServerHlsChanged(serverHlsHosts.toSet())
+        }
+    }
+
+    private fun forgetServerHls(url: String) {
+        val key = hostKey(url) ?: return
+        if (serverHlsHosts.remove(key)) {
+            Log.i(TAG, "[FORCE-HLS] $key answers TS again; forgetting server HLS")
+            serverHlsVersion.intValue++
+            onServerHlsChanged(serverHlsHosts.toSet())
+        }
+    }
+
+    /** Session tokens seen on 3xx answers, keyed by the resolved Location.
+     *  Lets the holder end the ghost session the first (redirected) TS open
+     *  minted before re-tuning through the HLS path. */
+    private val redirectTokens = java.util.concurrent.ConcurrentHashMap<String, String>()
+
+    /** OkHttp NETWORK interceptor: records X-Dispatcharr-Session-Token from redirects. */
+    val redirectTokenInterceptor = okhttp3.Interceptor { chain ->
+        val resp = chain.proceed(chain.request())
+        if (resp.code in 300..399) {
+            val token = resp.header(TOKEN_HEADER)
+            val loc = resp.header("Location")?.let { resp.request.url.resolve(it)?.toString() }
+            if (token != null && loc != null && isSessionUrl(loc)) {
+                if (redirectTokens.size > 32) redirectTokens.clear()
+                redirectTokens[loc] = token
+            }
+        }
+        resp
+    }
+
+    /** Token captured for [playlistUrl] by [redirectTokenInterceptor] (consumed). */
+    fun tokenFor(playlistUrl: String): String? = redirectTokens.remove(playlistUrl)
+
+    /** Walks the cause chain for a [ServerHlsRedirectException]. */
+    fun findServerHlsRedirect(t: Throwable?): ServerHlsRedirectException? =
+        generateSequence(t) { it.cause }.take(12).firstOrNull { it is ServerHlsRedirectException }
+            as ServerHlsRedirectException?
+
     /** Default live offset target for a forced HLS tune. */
     const val DEFAULT_TARGET_OFFSET_MS = 12_000
 
@@ -95,6 +163,7 @@ object ForceHls {
                     }
                 } else {
                     Log.w(TAG, "[FORCE-HLS] entry answered ${resp.code} with no redirect")
+                    if (resp.code in 200..299 && !enabled) forgetServerHls(entryUrl)
                     null
                 }
             }
@@ -131,7 +200,8 @@ object ForceHls {
      * URL (or switch off) comes back unchanged.
      */
     fun apply(url: String, where: String): String {
-        if (!enabled || !isDispatcharrLive(url)) return url
+        if (!isDispatcharrLive(url)) return url
+        if (!enabled && !isServerHlsHost(url)) return url
         if (url.contains("output_format=", ignoreCase = true)) {
             Log.i(TAG, "[FORCE-HLS] $where url already carries output_format, unchanged: $url")
             return url
@@ -142,6 +212,42 @@ object ForceHls {
         val out = base + sep + PARAM + if (fragment.isNotEmpty()) "#$fragment" else ""
         Log.i(TAG, "[FORCE-HLS] $where final url: $out")
         return out
+    }
+}
+
+/** The plain Dispatcharr live URL answered with an HLS session playlist. */
+class ServerHlsRedirectException(val entryUrl: String, val playlistUrl: String) :
+    java.io.IOException("Dispatcharr live URL redirected to an HLS playlist")
+
+/**
+ * Detects a plain (TS) Dispatcharr live open that the server redirected to its
+ * HLS session playlist (proxy output set to HLS). Learns the host and fails
+ * the open with [ServerHlsRedirectException] so the player re-tunes through
+ * the HLS session path instead of feeding a playlist to the TS extractor.
+ */
+@androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
+class ServerHlsGuard(
+    private val upstream: androidx.media3.datasource.DataSource,
+) : androidx.media3.datasource.DataSource by upstream {
+    override fun open(dataSpec: androidx.media3.datasource.DataSpec): Long {
+        val len = upstream.open(dataSpec)
+        val req = dataSpec.uri.toString()
+        if (ForceHls.isDispatcharrLive(req) && !ForceHls.isForcedHlsUrl(req)) {
+            val landed = upstream.uri?.toString()
+            if (landed != null && ForceHls.isSessionUrl(landed)) {
+                ForceHls.noteServerHls(req, landed)
+                try { upstream.close() } catch (_: Exception) {}
+                throw ServerHlsRedirectException(req, landed)
+            }
+        }
+        return len
+    }
+
+    class Factory(
+        private val upstream: androidx.media3.datasource.DataSource.Factory,
+    ) : androidx.media3.datasource.DataSource.Factory {
+        override fun createDataSource(): androidx.media3.datasource.DataSource =
+            ServerHlsGuard(upstream.createDataSource())
     }
 }
 
@@ -193,6 +299,19 @@ class ForceHlsTileSession(
             ForceHls.endSession(old, headers)
         }
         return resolved
+    }
+
+    /** Adopts the session a redirected plain open already minted for [entryUrl]
+     *  (the HLS-rewritten entry), ending any previous session off the main thread. */
+    fun adopt(entryUrl: String, s: ForceHls.Session) {
+        val stale = synchronized(lock) {
+            val old = session
+            entry = entryUrl
+            session = s
+            old?.takeIf { it.playlistUrl != s.playlistUrl }
+        }
+        Log.i(ForceHls.TAG, "[FORCE-HLS] tile $label adopted the redirect's session token=${s.token?.take(8) ?: "none"}")
+        stale?.let { old -> Thread({ ForceHls.endSession(old, headers) }, "ForceHlsTileEnd").start() }
     }
 
     /** Drops the cached session (DELETE off the main thread); the next load re-resolves. */

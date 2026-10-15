@@ -136,7 +136,7 @@ object MultiviewBackground {
                             .build()
                         volume = if (focused) 1f else 0f
                         val player = this
-                        val dsf = DefaultDataSource.Factory(app, http)
+                        val dsf = com.aeriotv.android.core.playback.ServerHlsGuard.Factory(DefaultDataSource.Factory(app, http))
                         var cleanEnds = 0
                         var lastReconnectAt = 0L
                         addListener(object : androidx.media3.common.Player.Listener {
@@ -165,6 +165,13 @@ object MultiviewBackground {
                             }
                             override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
                                 Log.w(TAG, "MultiviewBg: tile ${tile.displayName} error ${error.errorCodeName}", error)
+                                // Server HLS output: the host is now learned, re-prepare via HLS.
+                                if (com.aeriotv.android.core.playback.ForceHls.findServerHlsRedirect(error) != null) {
+                                    Log.i(TAG, "[FORCE-HLS] MultiviewBg: tile ${tile.displayName} re-tuning through HLS")
+                                    player.setMediaSource(buildTileMediaSource(tile.resolvedUrl, dsf))
+                                    player.prepare()
+                                    player.playWhenReady = true
+                                }
                             }
                         })
                         setMediaSource(buildTileMediaSource(tile.resolvedUrl, dsf))

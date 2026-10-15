@@ -29,6 +29,7 @@ class Live503LoadErrorPolicy : DefaultLoadErrorHandlingPolicy() {
         loadErrorInfo: LoadErrorHandlingPolicy.LoadErrorInfo,
     ): Long {
         if (Dispatcharr503.parse(loadErrorInfo.exception) != null) return C.TIME_UNSET
+        if (ForceHls.findServerHlsRedirect(loadErrorInfo.exception) != null) return C.TIME_UNSET
         // A Dispatcharr connection-limit 429 is not transient either; the
         // holder shows the limit notice with Retry instead.
         if (DispatcharrConnectionLimit.parse(loadErrorInfo.exception) != null) return C.TIME_UNSET

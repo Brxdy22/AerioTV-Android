@@ -864,6 +864,14 @@ class AppPreferences @Inject constructor(
         store.edit { it[KEY_DEVELOPER_FORCE_HLS] = value }
     }
 
+    /** Dispatcharr hosts (lowercase host:port) whose plain live URL answered
+     *  with an HLS playlist (proxy output set to HLS). Learned by ForceHls so
+     *  the next tune goes straight to the HLS session path. Per device, never synced. */
+    val serverHlsHosts: Flow<Set<String>> = store.data.map { it[KEY_SERVER_HLS_HOSTS] ?: emptySet() }
+    suspend fun setServerHlsHosts(value: Set<String>) {
+        store.edit { it[KEY_SERVER_HLS_HOSTS] = value }
+    }
+
     val castForceHevcTranscode: Flow<Boolean> = store.data.map { it[KEY_CAST_FORCE_HEVC_TRANSCODE] ?: false }
     suspend fun setCastForceHevcTranscode(value: Boolean) {
         store.edit { it[KEY_CAST_FORCE_HEVC_TRANSCODE] = value }
@@ -2327,6 +2335,7 @@ class AppPreferences @Inject constructor(
         val KEY_DEBUG_LOGGING_ENABLED = booleanPreferencesKey("debug_logging_enabled")
         val KEY_CAST_FORCE_HEVC_TRANSCODE = booleanPreferencesKey("cast_force_hevc_transcode")
         val KEY_DEVELOPER_FORCE_HLS = booleanPreferencesKey("developer_force_hls")
+        val KEY_SERVER_HLS_HOSTS = androidx.datastore.preferences.core.stringSetPreferencesKey("server_hls_hosts")
         val KEY_CAST_TRANSCODE_DOWN_PROFILE = stringPreferencesKey("cast_transcode_down_profile")
         val KEY_APPLE_TV_CHANNEL_FLIP = booleanPreferencesKey("app_behaviors_apple_tv_channel_flip")
         val KEY_PLAYER_BRIGHTNESS_GESTURE = booleanPreferencesKey("in_player_gesture_brightness")

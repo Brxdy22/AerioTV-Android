@@ -59,16 +59,51 @@ class TeeDataSource(
         totalRead = 0L
         firstByteLogged = false
         openHost = dataSpec.uri.host
-        Log.i(TAG, "live source open host=$openHost")
-        return upstream.open(dataSpec)
+        headLen = 0
+        val hdrNames = dataSpec.httpRequestHeaders.keys.sorted().joinToString(",")
+        val authMode = when {
+            dataSpec.httpRequestHeaders.keys.any { it.equals("X-API-Key", true) } -> "X-API-Key"
+            dataSpec.httpRequestHeaders.entries.any {
+                it.key.equals("Authorization", true) && it.value.startsWith("Bearer", true)
+            } -> "Bearer"
+            else -> "none-in-dataspec"
+        }
+        Log.i(TAG, "live source open host=$openHost url=${redact(dataSpec.uri.toString())} " +
+            "dsHeaders=[$hdrNames] auth=$authMode")
+        val len = try {
+            upstream.open(dataSpec)
+        } catch (e: IOException) {
+            Log.w(TAG, "live source open failed: ${e.javaClass.simpleName}: ${e.message}")
+            throw e
+        }
+        val rh: Map<String, List<String>> = try { upstream.responseHeaders } catch (_: Throwable) { emptyMap() }
+        fun h(name: String) = rh.entries.firstOrNull { it.key?.equals(name, true) == true }
+            ?.value?.joinToString(";")
+        openContentType = h("Content-Type")
+        Log.i(TAG, "live source response finalUrl=${redact(upstream.uri?.toString() ?: "")} type=$openContentType len=$len")
+        return len
     }
+
+    private val head = ByteArray(300)
+    private var headLen = 0
+    private var openContentType: String? = null
+
+    private fun redact(u: String): String =
+        u.replace(Regex("(?i)((?:api_?key|token|password|key)=)[^&]*"), "$1REDACTED")
 
     override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
         val n = upstream.read(buffer, offset, length)
         if (n > 0) {
             if (!firstByteLogged) {
                 firstByteLogged = true
-                Log.i(TAG, "live source first bytes +${SystemClock.elapsedRealtime() - openAtMs}ms")
+                val hex = (0 until minOf(n, 32)).joinToString("") { "%02x".format(buffer[offset + it]) }
+                Log.i(TAG, "live source first bytes +${SystemClock.elapsedRealtime() - openAtMs}ms " +
+                    "n=$n sync0x47=${buffer[offset] == 0x47.toByte()} hex=$hex")
+            }
+            if (headLen < head.size) {
+                val c = minOf(n, head.size - headLen)
+                System.arraycopy(buffer, offset, head, headLen, c)
+                headLen += c
             }
             totalRead += n
             // Resolve the writer PER READ, not per open: on a channel
@@ -96,6 +131,12 @@ class TeeDataSource(
     override fun getUri(): Uri? = upstream.uri
     override fun getResponseHeaders(): Map<String, List<String>> = upstream.responseHeaders
     override fun close() {
+        if (openAtMs != 0L && totalRead in 1 until 1_048_576L) {
+            val textual = (0 until headLen).all { val b = head[it].toInt() and 0xff; b == 9 || b == 10 || b == 13 || b in 32..126 }
+            Log.w(TAG, "live source short body total=$totalRead bytes after " +
+                "${SystemClock.elapsedRealtime() - openAtMs}ms type=$openContentType" +
+                if (textual) " text=\"${String(head, 0, headLen, Charsets.UTF_8).replace("\n", "\\n")}\"" else "")
+        }
         if (openAtMs != 0L && totalRead == 0L) {
             Log.w(
                 TAG,

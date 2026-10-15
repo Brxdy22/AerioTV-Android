@@ -292,6 +292,23 @@ class AerioExoPlayerHolder @Inject constructor(
                 Log.i(ForceHls.TAG, "[FORCE-HLS] developer switch ${if (it) "ON" else "OFF"}")
             }
         }
+        // Server-side HLS output: hosts whose plain live URL answered with an
+        // HLS playlist are remembered per device so later tunes skip the TS try.
+        ForceHls.onServerHlsChanged = { hosts -> prefScope.launch { appPreferences.setServerHlsHosts(hosts) } }
+        prefScope.launch {
+            // Dev hook: `adb shell setprop debug.aerio.server_hls_reset 1` forgets
+            // the learned hosts at launch so the first-tune detection can be re-tested.
+            val reset = runCatching {
+                java.io.BufferedReader(java.io.InputStreamReader(
+                    Runtime.getRuntime().exec(arrayOf("getprop", "debug.aerio.server_hls_reset")).inputStream,
+                )).use { it.readLine()?.trim() }
+            }.getOrNull() == "1"
+            if (reset) {
+                Log.i(ForceHls.TAG, "[FORCE-HLS] server HLS hosts reset (debug.aerio.server_hls_reset)")
+                appPreferences.setServerHlsHosts(emptySet())
+            }
+            ForceHls.seedServerHlsHosts(if (reset) emptySet() else appPreferences.serverHlsHosts.first())
+        }
         // Learned live start buffer: the tracer reports the feed shape at every
         // stall, this decides whether the feed was bursty-but-real-time.
         tracer.onStall = { snapshot -> learnStartBuffer(snapshot) }
@@ -1634,6 +1651,29 @@ class AerioExoPlayerHolder @Inject constructor(
             }
             // Dispatcharr connection limit (exact server signal, Direct Connect
             // only): show the notice and stop. No reload ladder, no walk.
+            // Dispatcharr proxy output set to HLS: the plain live URL redirected
+            // to a session playlist. The host is now learned, so a fresh tune
+            // of the entry URL goes through apply() + the HLS session resolve.
+            ForceHls.findServerHlsRedirect(error)?.let { redirect ->
+                Log.i(ForceHls.TAG, "[FORCE-HLS] live URL answered with an HLS playlist; re-tuning through the HLS session path")
+                tracer.recover("server HLS adoption")
+                consecutiveReloads = 0
+                lastForcedReloadAtMs = 0L
+                errorPending = false
+                // Adopt the session the redirected open already minted (token
+                // captured by the network interceptor) instead of ending it and
+                // resolving again: a resolve right after the DELETE answered
+                // 500/503 while the server tore the channel down (2026-10-14).
+                val token = ForceHls.tokenFor(redirect.playlistUrl)
+                setForceHlsSession(ForceHls.Session(redirect.playlistUrl, token))
+                forceHlsTuneAtMs = SystemClock.elapsedRealtime()
+                Log.i(ForceHls.TAG, "[FORCE-HLS] adopted the redirect's session token=${token?.take(8) ?: "none"}; playing token playlist")
+                playUrl(
+                    redirect.playlistUrl, lastPlayTitle, lastPlaySubtitle, lastPlayArtworkUri,
+                    lastPlayDrmType, lastPlayDrmKey, null,
+                )
+                return
+            }
             if (handleConnectionLimit(error)) return
             // Android companion to the frame-stall path: a terminal source/HTTP
             // error. Re-prime under the same cooldown + reload cap. If a LAN/WAN
@@ -1864,6 +1904,16 @@ class AerioExoPlayerHolder @Inject constructor(
     @Volatile private var forceHlsTuneAtMs = 0L
     /** The resolved server session behind the playing token playlist. */
     @Volatile private var forceHlsSession: ForceHls.Session? = null
+
+    /** Replaces the active server session, ending the previous one (channel change). */
+    private fun setForceHlsSession(next: ForceHls.Session) {
+        val prev = forceHlsSession
+        forceHlsSession = next
+        if (prev != null && prev.playlistUrl != next.playlistUrl) {
+            val hdrs = httpHeaders
+            prefScope.launch { ForceHls.endSession(prev, forceHlsRequestHeaders(hdrs)) }
+        }
+    }
     /** Entry URL whose redirect could not be resolved; played directly once. */
     private var forceHlsResolveSkipUrl: String? = null
     private var forceHlsResolveGeneration = 0
@@ -2168,7 +2218,7 @@ class AerioExoPlayerHolder @Inject constructor(
             httpDataSourceFactory(rawTs)
         if (rawTs) {
             dataSourceFactory = com.aeriotv.android.core.timeshift.TeeDataSource.Factory(
-                dataSourceFactory,
+                ServerHlsGuard.Factory(dataSourceFactory),
             ) { timeshift.get().activeWriter }
         }
         // Byte-flow accounting for [TUNE] firstByte and the [FEED] lines. The
@@ -2762,7 +2812,7 @@ class AerioExoPlayerHolder @Inject constructor(
                     if (gen != forceHlsResolveGeneration) return@withContext
                     val ms = SystemClock.elapsedRealtime() - t0
                     if (session != null) {
-                        forceHlsSession = session
+                        setForceHlsSession(session)
                         Log.i(ForceHls.TAG, "[FORCE-HLS] resolved in ${ms}ms; playing token playlist")
                         playUrl(session.playlistUrl, title, subtitle, artworkUri, drmLicenseType, drmLicenseKey, channelId)
                     } else {
@@ -2948,6 +2998,13 @@ class AerioExoPlayerHolder @Inject constructor(
             httpHeaders.filterKeys { !it.equals("User-Agent", ignoreCase = true) },
         )
         if (nonUaHeaders.isNotEmpty()) factory.setDefaultRequestProperties(nonUaHeaders)
+        val authMode = when {
+            nonUaHeaders.keys.any { it.equals("X-API-Key", true) } -> "X-API-Key"
+            nonUaHeaders.entries.any { it.key.equals("Authorization", true) && it.value.startsWith("Bearer", true) } -> "Bearer"
+            else -> "none"
+        }
+        android.util.Log.i("AerioLiveSource", "live factory headers=[${nonUaHeaders.keys.sorted().joinToString(",")}] " +
+            "auth=$authMode uaCustom=${headerUa != null}")
         return factory
     }
 
@@ -3137,6 +3194,7 @@ class AerioExoPlayerHolder @Inject constructor(
             .readTimeout(liveReadTimeoutMs.toLong(), TimeUnit.MILLISECONDS)
             .followRedirects(true)
             .followSslRedirects(true)
+            .addNetworkInterceptor(ForceHls.redirectTokenInterceptor)
             .build()
     }
 

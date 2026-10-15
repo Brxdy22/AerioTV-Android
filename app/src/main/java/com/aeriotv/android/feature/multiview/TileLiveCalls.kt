@@ -138,6 +138,9 @@ internal class TileLiveCalls {
                 // Mirrors setAllowCrossProtocolRedirects(true).
                 .followRedirects(true)
                 .followSslRedirects(true)
+                // Records the session token of a server HLS redirect so the
+                // ghost session can be ended when the tile adopts HLS.
+                .addNetworkInterceptor(com.aeriotv.android.core.playback.ForceHls.redirectTokenInterceptor)
                 // One TCP connection PER TILE (Logan 2026-10-10, Streamer
                 // freeze after Move Tile). The Dispatcharr host negotiates
                 // HTTP/2, so this shared client multiplexed every live tile

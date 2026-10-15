@@ -105,6 +105,7 @@ object DispatcharrConnectionLimit {
             loadErrorInfo: LoadErrorHandlingPolicy.LoadErrorInfo,
         ): Long {
             if (parse(loadErrorInfo.exception) != null) return C.TIME_UNSET
+            if (ForceHls.findServerHlsRedirect(loadErrorInfo.exception) != null) return C.TIME_UNSET
             return base.getRetryDelayMsFor(loadErrorInfo)
         }
     }
