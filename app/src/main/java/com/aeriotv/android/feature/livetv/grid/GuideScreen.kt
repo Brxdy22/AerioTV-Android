@@ -1395,6 +1395,12 @@ fun GuideScreen(
             playFocusRequester = stagingPlayFocus,
             upTarget = if (!sidebarGroupMode && !favoritesOnly && pillItems.isNotEmpty()) pillsFocus else null,
             downTarget = gridFocus,
+            // Radio start keeps focus on the chosen cell (Logan 2026-10-15).
+            radioKeepFocus = {
+                val held = gridHasFocus ||
+                    runCatching { gridFocus.requestFocus() }.getOrDefault(false)
+                android.util.Log.d(com.aeriotv.android.ui.tv.TvFocusTrace.TAG, "[FOCUS] radio start keep -> ${guideTraceCell(grid)} result=${if (held) "success" else "failure"}")
+            },
         )
         // Channel Preview OFF + corner mini Active: the mini has no banner art
         // card to share a baseline with, so it gets its OWN slot here -- a

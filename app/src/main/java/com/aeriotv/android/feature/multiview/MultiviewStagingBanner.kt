@@ -65,6 +65,10 @@ fun MultiviewStagingBanner(
     playFocusRequester: FocusRequester? = null,
     upTarget: FocusRequester? = null,
     downTarget: FocusRequester? = null,
+    // Radio start from the guide (Logan 2026-10-15): when set, the radio
+    // banner does NOT pull focus on start; this runs instead so focus stays
+    // on the chosen cell. Up still reaches the banner.
+    radioKeepFocus: (() -> Unit)? = null,
 ) {
     val staging by store.isStaging.collectAsStateWithLifecycle()
     val tiles by store.selected.collectAsStateWithLifecycle()
@@ -85,6 +89,7 @@ fun MultiviewStagingBanner(
             playFocusRequester = playFocusRequester,
             upTarget = upTarget,
             downTarget = downTarget,
+            keepFocus = radioKeepFocus,
             modifier = modifier,
         )
         return
@@ -423,6 +428,7 @@ private fun RadioTvBanner(
     playFocusRequester: FocusRequester?,
     upTarget: FocusRequester?,
     downTarget: FocusRequester?,
+    keepFocus: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val guard = rememberTvMenuGuard()
@@ -439,6 +445,10 @@ private fun RadioTvBanner(
         // after Home (Streamer 2026-10-12) swallowed the first Return press.
         if (android.os.SystemClock.uptimeMillis() - com.aeriotv.android.feature.player.RadioMode.startedAtMs < 1_500L) guard.arm()
         kotlinx.coroutines.delay(350L)
+        if (keepFocus != null) {
+            keepFocus()
+            return@LaunchedEffect
+        }
         repeat(20) {
             if (runCatching { returnFocusRequester.requestFocus() }.isSuccess) return@LaunchedEffect
             kotlinx.coroutines.delay(50L)
