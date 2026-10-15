@@ -1534,11 +1534,15 @@ fun MainScaffold(
                 // phone can be a remote / start a cast without opening a channel
                 // first (task #255). Hidden while already controlling / casting
                 // (their cards take over).
+                // Radio Mode takes the cast card's slot, so the button hides
+                // like it does for the cast card (Apple parity, 2026-10-15).
+                val radioForFab by com.aeriotv.android.feature.player.RadioMode.state
+                    .collectAsStateWithLifecycle()
                 val showControlFab = (companionDevices.isNotEmpty() ||
                         castState !is com.aeriotv.android.core.cast.AerioCastSender.State.Unavailable) &&
                     companionConn !is com.aeriotv.android.core.cast.companion
                         .CompanionRemoteController.Conn.Connected &&
-                    !casting && !isTv
+                    !casting && !isTv && radioForFab == null
                 // Tablets (sw >= 600 dp): the button sits static at the
                 // trailing edge on the pill row (below) and never moves with
                 // the collapse (Logan 2026-10-04). Phones keep the above-the-bar
