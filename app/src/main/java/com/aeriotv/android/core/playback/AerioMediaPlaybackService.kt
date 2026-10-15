@@ -130,7 +130,8 @@ class AerioMediaPlaybackService : MediaLibraryService() {
             kotlinx.coroutines.flow.combine(
                 com.aeriotv.android.feature.player.RadioMode.state,
                 exoHolder.streamUnavailable,
-            ) { radio, unavailable -> radio != null && unavailable }
+                exoHolder.failedChannel,
+            ) { radio, unavailable, failedId -> radio != null && (unavailable || failedId != null) }
                 .distinctUntilChanged()
                 .collect { failed ->
                     if (com.aeriotv.android.feature.player.RadioMode.state.value == null) return@collect

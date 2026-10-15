@@ -89,13 +89,15 @@ fun RadioTransportCard(
     var retrySerial by remember { mutableIntStateOf(0) }
     // True from a retry until the stream is READY again: the retry clears
     // the holder flag at once, and "Playing" must not return before audio.
-    var retrying by remember(channel.id) { mutableStateOf(false) }
+    // Holder-owned so every surface (card, sheet, notification) clears at
+    // once when the player reaches READY and plays after a retry.
+    val failedId by holder.failedChannel.collectAsStateWithLifecycle()
+    val retrying = failedId != null && failedId == channel.id
     var retryCountdown by remember { mutableIntStateOf(0) }
     val retryNow: () -> Unit = {
         Log.i(TAG, "[RADIO] retry ${channel.name}")
         retryCountdown = 0
         retrySerial += 1
-        retrying = true
         holder.retryUnavailable()
     }
     if (unavailable) {
@@ -111,6 +113,11 @@ fun RadioTransportCard(
         }
     }
     val failed = unavailable || retrying
+    var wasFailed by remember(channel.id) { mutableStateOf(false) }
+    LaunchedEffect(failed) {
+        if (failed) wasFailed = true
+        else if (wasFailed) { wasFailed = false; Log.i(TAG, "[RADIO] recovered ${channel.name}") }
+    }
     val statusText = if (failed) RADIO_UNAVAILABLE else RADIO_SUBTITLE
     // 1 Hz playhead for the scrubber while the sheet is open.
     var wallNow by remember { mutableStateOf(0L) }
@@ -120,12 +127,6 @@ fun RadioTransportCard(
         val l = object : androidx.media3.common.Player.Listener {
             override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) { playing = playWhenReady }
             override fun onTracksChanged(tracks: androidx.media3.common.Tracks) { tracksTick++ }
-            override fun onPlaybackStateChanged(state: Int) {
-                if (state == androidx.media3.common.Player.STATE_READY && retrying) {
-                    retrying = false
-                    Log.i(TAG, "[RADIO] recovered ${channel.name}")
-                }
-            }
         }
         player?.addListener(l)
         onDispose { player?.removeListener(l) }

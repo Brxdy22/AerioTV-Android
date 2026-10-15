@@ -1239,7 +1239,21 @@ class AerioExoPlayerHolder @Inject constructor(
     /** Channel whose stream went Channel Unavailable, kept through the
      *  retries (which clear [streamUnavailable] while they reconnect) until
      *  it reaches READY. Keep Recent Channels Live never keeps it. */
-    @Volatile var failedChannelId: String? = null
+    var failedChannelId: String?
+        get() = _failedChannelId.value
+        set(v) { _failedChannelId.value = v }
+    private val _failedChannelId = MutableStateFlow<String?>(null)
+    /** Observable [failedChannelId]: Radio Mode's card, sheet, and
+     *  notification stay on Channel Unavailable until this clears. */
+    val failedChannel: StateFlow<String?> = _failedChannelId.asStateFlow()
+
+    /** Clears the failure once the stream is READY and playing again. */
+    private fun clearFailureOnRecovery(why: String) {
+        val id = _failedChannelId.value ?: return
+        if (_streamUnavailable.value) return
+        _failedChannelId.value = null
+        android.util.Log.i("AerioTV", "[RADIO] recovered $id ($why)")
+    }
 
     private val _streamUnavailable = MutableStateFlow(false)
     /** True when a freshly-tuned live stream produced no data even after a
@@ -1545,7 +1559,7 @@ class AerioExoPlayerHolder @Inject constructor(
             // playWhenReady=false is a real user pause again.
             if (playbackState == Player.STATE_READY) {
                 errorPending = false
-                failedChannelId = null
+                if (player?.playWhenReady == true) clearFailureOnRecovery("READY")
             }
             if (playbackState == Player.STATE_READY && player?.isPlaying == true) armWatchdog()
             // Buffer-underrun rebuffer on a live stream that was already
@@ -1557,6 +1571,7 @@ class AerioExoPlayerHolder @Inject constructor(
 
         override fun onIsPlayingChanged(isPlaying: Boolean) {
             if (isPlaying && player?.playbackState == Player.STATE_READY) armWatchdog()
+            if (isPlaying) clearFailureOnRecovery("playing")
             if (isPlaying) {
                 maybeAudioOnlyFirstFrame()
                 maybeLogPressToAudio()

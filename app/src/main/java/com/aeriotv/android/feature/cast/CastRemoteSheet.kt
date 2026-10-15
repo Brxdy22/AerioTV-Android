@@ -54,6 +54,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.disabled
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -911,7 +913,13 @@ private fun PlayPauseButton(
             .alpha(groupAlpha)
             .clip(RoundedCornerShape(12.dp))
             .clickable(enabled = enabled, onClick = onClick)
-            .semantics(mergeDescendants = true) { contentDescription = label },
+            .semantics(mergeDescendants = true) {
+                contentDescription = label
+                role = androidx.compose.ui.semantics.Role.Button
+                // A greyed Play reports enabled=false to accessibility, not
+                // only clickable=false.
+                if (!enabled) disabled()
+            },
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {

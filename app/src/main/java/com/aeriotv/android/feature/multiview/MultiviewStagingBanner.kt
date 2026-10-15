@@ -453,8 +453,10 @@ private fun RadioTvBanner(
         ).exoPlayerHolder()
     }
     // Failed stream: the player overlay's wording, never "Playing".
-    val radioUnavailable by radioHolder.streamUnavailable
+    val radioStreamDown by radioHolder.streamUnavailable
         .collectAsStateWithLifecycle()
+    val radioFailedId by radioHolder.failedChannel.collectAsStateWithLifecycle()
+    val radioUnavailable = radioStreamDown || radioFailedId != null
     val accent = MaterialTheme.colorScheme.primary
     Row(
         modifier = modifier

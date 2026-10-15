@@ -475,6 +475,20 @@ fun ChannelListScreen(
                 listState.animateScrollToItem(0)
             }
         }
+        // Back with the list scrolled away from the top (the guide's ladder
+        // step, Logan 2026-10-15): the first Back returns to the top channel
+        // and is consumed; the next Back, at the top, falls through to the
+        // Exit AerioTV? confirm. Overlays composed later (search, sheets,
+        // menus) register their own handlers after this one and still win.
+        val listTabActive = com.aeriotv.android.feature.main.LocalTabIsActive.current
+        val listScrolled by remember {
+            derivedStateOf { listState.firstVisibleItemIndex != 0 || listState.firstVisibleItemScrollOffset != 0 }
+        }
+        val listBackScope = rememberCoroutineScope()
+        androidx.activity.compose.BackHandler(enabled = listTabActive && listScrolled) {
+            android.util.Log.i("AerioTV", "[LIST] Back -> top channel")
+            listBackScope.launch { runCatching { listState.animateScrollToItem(0) } }
+        }
         // GROUP CHANGE SCROLL (parity with Apple 072303d/59461fe): the list
         // keeps its first visible item by key, so a group picked while
         // scrolled deep in All could open the new, shorter group at its end.

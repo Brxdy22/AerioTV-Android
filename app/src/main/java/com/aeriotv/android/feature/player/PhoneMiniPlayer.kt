@@ -10,6 +10,11 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.WindowInsets
@@ -511,41 +516,75 @@ fun BoxScope.PhoneMiniControls(
     )
     // The X stays off while stashed so a tap on the sliver can only peek.
     if (stashed) return
+    val tabletMini = isTabletMini()
+    val closeMini: () -> Unit = {
+        android.util.Log.i("AerioTV", "[MINI] close X (${if (tabletMini) "tablet" else "phone"})")
+            // On-demand: save the resume position and release first,
+            // exactly what the player's own close does.
+            PhoneVodMini.close()
+            // Same teardown as the fullscreen chrome's X.
+            session.dismiss()
+            state.hide()
+            holder.stop()
+            com.aeriotv.android.core.playback.AerioMediaPlaybackService.stop(context)
+            // Keep Recent Channels Live: the full-screen X keeps the
+            // channel live; the mini's X does the same (no-op for
+            // on-demand, or with the setting off).
+            runCatching {
+                dagger.hilt.android.EntryPointAccessors.fromApplication(
+                    context.applicationContext,
+                    com.aeriotv.android.feature.main.MainScaffoldEntryPoint::class.java,
+                ).timeshiftController().onMiniClosed()
+            }
+    }
+    // The X takes a 48 dp touch target anchored at the frame's top-end
+    // corner (the 28 dp circle is drawn inside it), on its own layer above
+    // the tap-to-expand surface. It consumes the down on the Initial pass so
+    // nothing else in the mini, and nothing under the mini, can take the
+    // tap: on the onn tablet the X's taps never reached the close handler
+    // and one fell through to the guide cell under the docked mini.
     Box(
         Modifier
             .align(Alignment.TopEnd)
-            .padding(4.dp)
-            .size(28.dp)
-            .clip(CircleShape)
-            .background(Color.Black.copy(alpha = 0.55f))
+            .zIndex(1f)
+            .size(48.dp)
+            .semantics(mergeDescendants = true) {
+                contentDescription = "Close"
+                role = androidx.compose.ui.semantics.Role.Button
+                onClick(label = "Close") { closeMini(); true }
+            }
             .pointerInput(Unit) {
-                detectTapGestures(onTap = {
-                    // On-demand: save the resume position and release first,
-                    // exactly what the player's own close does.
-                    PhoneVodMini.close()
-                    // Same teardown as the fullscreen chrome's X.
-                    session.dismiss()
-                    state.hide()
-                    holder.stop()
-                    com.aeriotv.android.core.playback.AerioMediaPlaybackService.stop(context)
-                    // Keep Recent Channels Live: the full-screen X keeps the
-                    // channel live; the mini's X does the same (no-op for
-                    // on-demand, or with the setting off).
-                    runCatching {
-                        dagger.hilt.android.EntryPointAccessors.fromApplication(
-                            context.applicationContext,
-                            com.aeriotv.android.feature.main.MainScaffoldEntryPoint::class.java,
-                        ).timeshiftController().onMiniClosed()
+                awaitEachGesture {
+                    val down = awaitFirstDown(
+                        requireUnconsumed = false,
+                        pass = androidx.compose.ui.input.pointer.PointerEventPass.Initial,
+                    )
+                    down.consume()
+                    val up = waitForUpOrCancellation(
+                        pass = androidx.compose.ui.input.pointer.PointerEventPass.Initial,
+                    )
+                    if (up != null) {
+                        up.consume()
+                        closeMini()
                     }
-                })
+                }
             },
-        contentAlignment = Alignment.Center,
+        contentAlignment = Alignment.TopEnd,
     ) {
-        Icon(
-            imageVector = Icons.Filled.Close,
-            contentDescription = "Close",
-            tint = Color.White,
-            modifier = Modifier.size(18.dp),
-        )
+        Box(
+            Modifier
+                .padding(4.dp)
+                .size(28.dp)
+                .clip(CircleShape)
+                .background(Color.Black.copy(alpha = 0.55f)),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = Icons.Filled.Close,
+                contentDescription = null,
+                tint = Color.White,
+                modifier = Modifier.size(18.dp),
+            )
+        }
     }
 }
