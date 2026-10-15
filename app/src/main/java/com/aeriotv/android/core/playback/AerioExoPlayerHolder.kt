@@ -1265,6 +1265,11 @@ class AerioExoPlayerHolder @Inject constructor(
         val hasVideo = tracks.groups.any { it.type == C.TRACK_TYPE_VIDEO }
         val hasAudio = tracks.groups.any { it.type == C.TRACK_TYPE_AUDIO }
         val now = hasAudio && !hasVideo
+        val key = currentChannelIdForRebuild ?: currentChannelId
+        if (hasVideo) AudioOnlyChannelMemory.forget(key, "video track on this tune")
+        // A Radio Mode cut is no evidence about the channel; only a normal
+        // tune that ended audio-only teaches the memory.
+        if (now && !radioVideoOff) AudioOnlyChannelMemory.remember(key)
         if (now == _audioOnly.value) return
         _audioOnly.value = now
         if (now) {
@@ -1286,6 +1291,7 @@ class AerioExoPlayerHolder @Inject constructor(
                 "(+${SystemClock.elapsedRealtime() - streamPrimedAtMs}ms)",
         )
         tracer.onFirstFrame()
+        maybeLogPressToAudio()
     }
     private val _lastErrorText = MutableStateFlow<String?>(null)
     /** Task #150: the most recent playback failure in user-showable form
@@ -1541,7 +1547,10 @@ class AerioExoPlayerHolder @Inject constructor(
 
         override fun onIsPlayingChanged(isPlaying: Boolean) {
             if (isPlaying && player?.playbackState == Player.STATE_READY) armWatchdog()
-            if (isPlaying) maybeAudioOnlyFirstFrame()
+            if (isPlaying) {
+                maybeAudioOnlyFirstFrame()
+                maybeLogPressToAudio()
+            }
         }
 
         override fun onTracksChanged(tracks: Tracks) = onTracksForAudioOnly(tracks)
@@ -1982,6 +1991,7 @@ class AerioExoPlayerHolder @Inject constructor(
         context: Context,
     ): ExoPlayer {
         appContext = context.applicationContext
+        AudioOnlyChannelMemory.init(context)
         val audioPassthrough = cachedAudioPassthrough || audioSinkFallback
         // Buffer floor comes from the pref-cache updated by the collector in init{}.
         val bufferFloorMs = cachedBufferFloorMs
@@ -2400,7 +2410,120 @@ class AerioExoPlayerHolder @Inject constructor(
      *  roll, so the backup provider's unrelated PTS used to leave audio and
      *  queued video on different timelines (video held as "too early", or a
      *  31 min jump, plus the AudioSink discontinuity error). */
-    private fun tsOnlyExtractorsFactory(): ExtractorsFactory = ExtractorsFactory {
+    private fun tsOnlyExtractorsFactory(): ExtractorsFactory {
+        // Read ONCE per media source, on the main thread, before the prime:
+        // Radio Mode and the per-channel audio-only memory decide how fast a
+        // video-declaring PMT may be called audio-only (AudioOnlyGraceRule).
+        val key = currentChannelIdForRebuild ?: currentChannelId
+        val policy = audioOnlyPolicyFor(key)
+        val gen = primeGeneration
+        radioCutVideo = false
+        if (policy != AudioOnlyStartPolicy.UNKNOWN) {
+            Log.i(TAG, "[AUDIO-ONLY] start policy ${policy.logName} ch=$key")
+        }
+        return tsOnlyExtractorsFactory(policy, key, gen)
+    }
+
+    /**
+     * Fast audio-only start, exact conditions (GH AerioTV#90, SiriusXM
+     * channels up to 15 s to start; Logan 2026-10-14):
+     * - REQUESTED: Radio Mode is on for this tune ([radioVideoOff]: a Radio
+     *   Mode start from a menu, a pick while in Radio Mode, or Channel Up /
+     *   Down in Radio Mode). The guard drops the declared video track on the
+     *   first audio sample. Switch to Video Mode re-prepares
+     *   ([restoreVideoAfterRadio]).
+     * - REMEMBERED: an earlier tune of this channel id ended audio-only on a
+     *   normal (non-Radio) tune and no video was seen on it since
+     *   ([AudioOnlyChannelMemory], 7 day TTL). Zero bytes on the declared
+     *   video PID while 2 s of audio media time AND 1 s of wall time pass.
+     *   Any video byte clears the memory; video after the call restarts the
+     *   tune as a video program.
+     * - UNKNOWN: everything else, including every regular video channel:
+     *   unchanged (4 s wall with a silent video PID, 12 s if it sent bytes).
+     */
+    private fun audioOnlyPolicyFor(key: String?): AudioOnlyStartPolicy = when {
+        radioVideoOff -> AudioOnlyStartPolicy.REQUESTED
+        AudioOnlyChannelMemory.isRemembered(key) -> AudioOnlyStartPolicy.REMEMBERED
+        else -> AudioOnlyStartPolicy.UNKNOWN
+    }
+
+    /** A Radio Mode tune dropped the declared video track on this prime:
+     *  Switch to Video Mode must re-prepare, a track toggle is not enough. */
+    @Volatile private var radioCutVideo = false
+
+    private fun onGuardDropped(policy: AudioOnlyStartPolicy, key: String?, gen: Long) {
+        mainHandler.post {
+            if (gen != primeGeneration) return@post
+            if (policy == AudioOnlyStartPolicy.REQUESTED) radioCutVideo = true
+            Log.i(TAG, "[TUNE] audio-only call +${tracer.msSincePress()}ms after press ch=$key policy=${policy.name}")
+        }
+    }
+
+    private fun onGuardVideoAfterDrop(policy: AudioOnlyStartPolicy, key: String?, gen: Long) {
+        AudioOnlyChannelMemory.forget(key, "video appeared after the audio-only call")
+        mainHandler.post {
+            if (gen != primeGeneration) return@post
+            when (policy) {
+                AudioOnlyStartPolicy.REQUESTED -> Log.i(
+                    TAG,
+                    "[AUDIO-ONLY] video bytes during a Radio Mode audio-only tune ch=$key; " +
+                        "Switch to Video Mode restarts as video",
+                )
+                AudioOnlyStartPolicy.REMEMBERED -> {
+                    Log.i(TAG, "[AUDIO-ONLY] video appeared after optimistic audio-only start; restarting as video ch=$key")
+                    reprimeSameUrl("video after optimistic audio-only start")
+                }
+                AudioOnlyStartPolicy.UNKNOWN -> Unit
+            }
+        }
+    }
+
+    /**
+     * Switch to Video Mode (Radio Mode end with the player reopening). A
+     * Radio Mode tune that cut the declared video track re-prepares the same
+     * stream as a video program; otherwise the video track is re-enabled in
+     * place. [timeshiftWallMs] is the playhead when playing from the Live
+     * Rewind buffer (re-opened there instead of jumping to live).
+     */
+    fun restoreVideoAfterRadio(timeshiftWallMs: Long?) {
+        radioVideoOff = false
+        setVideoTrackEnabled(true)
+        if (!radioCutVideo) {
+            Log.i(TAG, "[RADIO] Switch to Video Mode: video track re-enabled in place ch=$currentChannelId")
+            return
+        }
+        radioCutVideo = false
+        if (isTimeshifting && timeshiftWallMs != null) {
+            Log.i(TAG, "[RADIO] Switch to Video Mode: video was cut for Radio Mode; re-preparing the buffer as video ch=$currentChannelId")
+            playTimeshift(timeshiftWallMs)
+        } else {
+            Log.i(TAG, "[RADIO] Switch to Video Mode: video was cut for Radio Mode; re-preparing as video ch=$currentChannelId")
+            reprimeSameUrl("Switch to Video Mode")
+        }
+    }
+
+    /** "[TUNE] press->audio" once per prime (an audio-only start, or any
+     *  Radio Mode start), so a user log shows where the time went. */
+    @Volatile private var pressToAudioLoggedGen = -1L
+
+    private fun maybeLogPressToAudio() {
+        val p = player ?: return
+        if (pressToAudioLoggedGen == primeGeneration) return
+        if (!_audioOnly.value && !radioVideoOff) return
+        if (!p.isPlaying || p.playbackState != Player.STATE_READY) return
+        pressToAudioLoggedGen = primeGeneration
+        Log.i(
+            TAG,
+            "[TUNE] press->audio ${tracer.msSincePress()} ms ch=$currentChannelId " +
+                "(audioOnly=${_audioOnly.value} radio=$radioVideoOff +${SystemClock.elapsedRealtime() - streamPrimedAtMs}ms after prime)",
+        )
+    }
+
+    private fun tsOnlyExtractorsFactory(
+        policy: AudioOnlyStartPolicy,
+        key: String?,
+        gen: Long,
+    ): ExtractorsFactory = ExtractorsFactory {
         val all: Array<Extractor> = DefaultExtractorsFactory()
             .setTsExtractorMode(TsExtractor.MODE_SINGLE_PMT)
             .createExtractors()
@@ -2413,7 +2536,18 @@ class AerioExoPlayerHolder @Inject constructor(
         // which never carries a picture must not hold preparation forever.
         // safeTsExtractor: same TsExtractor, but a corrupt AC-3 header resyncs
         // instead of failing the load (see SafeTsExtractor.kt).
-        val continuous: Extractor = ContinuousTsExtractor(AudioOnlyTrackGuard(safeTsExtractor()))
+        val guard = AudioOnlyTrackGuard(
+            safeTsExtractor(),
+            policy = policy,
+            onDropped = { pol, _ -> onGuardDropped(pol, key, gen) },
+            onVideoAfterDrop = { pol -> onGuardVideoAfterDrop(pol, key, gen) },
+            onVideoBytes = {
+                if (policy == AudioOnlyStartPolicy.REMEMBERED) {
+                    AudioOnlyChannelMemory.forget(key, "video bytes before the audio-only call")
+                }
+            },
+        )
+        val continuous: Extractor = ContinuousTsExtractor(guard)
         buildList {
             fmp4?.let { add(it) }
             add(object : Extractor by continuous {

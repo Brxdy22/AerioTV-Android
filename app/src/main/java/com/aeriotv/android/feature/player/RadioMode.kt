@@ -160,8 +160,10 @@ object RadioMode {
     fun requestReturn(context: Context) {
         val s = _state.value ?: return
         val holder = entry(context).exoPlayerHolder()
-        holder.radioVideoOff = false
-        holder.setVideoTrackEnabled(true)
+        // A Radio Mode tune drops a declared video track on the first audio
+        // sample (no video wait); restoring it then needs a re-prepare.
+        val wall = if (holder.isTimeshifting) runCatching { positionWallMs(context) }.getOrNull() else null
+        holder.restoreVideoAfterRadio(wall)
         _state.value = null
         Log.i(TAG, "[RADIO] return to ${s.channel.name}")
         _returnRequests.tryEmit(s.channel)

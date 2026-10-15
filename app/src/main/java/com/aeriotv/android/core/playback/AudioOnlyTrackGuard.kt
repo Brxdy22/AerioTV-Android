@@ -35,12 +35,25 @@ import androidx.media3.extractor.TrackOutput
  * dropped (radio case); one that has sent bytes is live with a late format
  * and waits up to [AudioOnlyGraceRule.LIVE_CAP_MS]. Once every pending track
  * is resolved, endTracks() goes through.
+ *
+ * [policy] (read once per tune by the holder) shortens the wait ONLY for a
+ * Radio Mode tune or a channel remembered audio-only; see
+ * [AudioOnlyGraceRule.shouldDrop] for the exact conditions. Every other
+ * channel keeps the rule above unchanged.
  */
 @UnstableApi
 class AudioOnlyTrackGuard(
     private val inner: Extractor,
     private val log: (String) -> Unit = { Log.i(TAG, it) },
     private val nowMs: () -> Long = { SystemClock.elapsedRealtime() },
+    private val policy: AudioOnlyStartPolicy = AudioOnlyStartPolicy.UNKNOWN,
+    /** A declared video track was dropped (loader thread). Args: the policy
+     *  and whether the PID had sent any bytes. */
+    private val onDropped: (AudioOnlyStartPolicy, Boolean) -> Unit = { _, _ -> },
+    /** The first video bytes after a drop on this connection (loader thread). */
+    private val onVideoAfterDrop: (AudioOnlyStartPolicy) -> Unit = {},
+    /** First video bytes before any drop (loader thread). */
+    private val onVideoBytes: () -> Unit = {},
 ) : Extractor by inner {
 
     companion object {
@@ -54,7 +67,7 @@ class AudioOnlyTrackGuard(
     private var guardOutput: GuardOutput? = null
 
     override fun init(output: ExtractorOutput) {
-        val g = GuardOutput(output, log, nowMs)
+        val g = GuardOutput(output, log, nowMs, policy, onDropped, onVideoAfterDrop, onVideoBytes)
         guardOutput = g
         inner.init(g)
     }
@@ -68,12 +81,19 @@ class AudioOnlyTrackGuard(
         private val real: ExtractorOutput,
         private val log: (String) -> Unit,
         private val nowMs: () -> Long,
+        private val policy: AudioOnlyStartPolicy,
+        private val onDropped: (AudioOnlyStartPolicy, Boolean) -> Unit,
+        private val onVideoAfterDrop: (AudioOnlyStartPolicy) -> Unit,
+        private val onVideoBytes: () -> Unit,
     ) : ExtractorOutput {
         private val tracks = HashMap<Int, TrackOutput>()
         private val pending = LinkedHashMap<Int, PendingVideoTrack>()
         private var endTracksRequested = false
         private var endTracksForwarded = false
         private var firstAudioWallMs = -1L
+        private var firstAudioTimeUs = C.TIME_UNSET
+        private var videoAfterDropReported = false
+        private var videoBytesReported = false
 
         override fun track(id: Int, type: Int): TrackOutput {
             tracks[id]?.let { return it }
@@ -102,6 +122,7 @@ class AudioOnlyTrackGuard(
         fun onSeek() {
             pending.values.forEach { it.clearTail() }
             firstAudioWallMs = -1L
+            firstAudioTimeUs = C.TIME_UNSET
         }
 
         private fun maybeForwardEndTracks() {
@@ -114,23 +135,31 @@ class AudioOnlyTrackGuard(
             if (endTracksForwarded || pending.isEmpty() || timeUs == C.TIME_UNSET) return
             val now = nowMs()
             if (firstAudioWallMs < 0) {
+                // First audio sample: the window starts (unchanged for the
+                // unknown rule; a PTS jump only makes the remembered media
+                // condition fail, which falls back to the unknown rule).
                 firstAudioWallMs = now
-                return
+                firstAudioTimeUs = timeUs
+                // Radio Mode: the first audio sample is enough.
+                if (policy != AudioOnlyStartPolicy.REQUESTED) return
             }
             if (!endTracksRequested) return
             val elapsed = now - firstAudioWallMs
+            val mediaMs = (timeUs - firstAudioTimeUs) / 1_000L
             val toDrop = pending.values.filter {
-                AudioOnlyGraceRule.shouldDrop(elapsed, it.receivedBytes)
+                AudioOnlyGraceRule.shouldDrop(policy, elapsed, mediaMs, it.receivedBytes)
             }
             if (toDrop.isEmpty()) return
             for (t in toDrop) {
                 log(
                     "[AUDIO-ONLY] detected: no video track (declared video PID " +
                         (if (t.receivedBytes) "sent bytes but no format" else "sent no bytes") +
-                        " in ${elapsed}ms wall time of audio; dropping it for this connection)",
+                        " in ${elapsed}ms wall time / ${mediaMs}ms media of audio; dropping it for this " +
+                        "connection, policy ${policy.logName})",
                 )
                 t.drop()
                 pending.remove(t.id)
+                onDropped(policy, t.receivedBytes)
             }
             maybeForwardEndTracks()
         }
@@ -172,6 +201,19 @@ class AudioOnlyTrackGuard(
             fun clearTail() {
                 tail = ByteArray(0)
                 tailLen = 0
+            }
+
+            private fun noteBytes(len: Int) {
+                if (len <= 0) return
+                if (dropped) {
+                    if (!videoAfterDropReported) {
+                        videoAfterDropReported = true
+                        onVideoAfterDrop(policy)
+                    }
+                } else if (!videoBytesReported) {
+                    videoBytesReported = true
+                    onVideoBytes()
+                }
             }
 
             private fun append(src: ByteArray, off: Int, len: Int) {
@@ -228,12 +270,14 @@ class AudioOnlyTrackGuard(
                     if (allowEndOfInput) return C.RESULT_END_OF_INPUT
                     throw java.io.EOFException()
                 }
+                noteBytes(n)
                 if (!dropped) append(scratch, 0, n)
                 return n
             }
 
             override fun sampleData(data: ParsableByteArray, length: Int, sampleDataPart: Int) {
                 target?.let { it.sampleData(data, length, sampleDataPart); return }
+                noteBytes(length)
                 if (dropped) {
                     data.skipBytes(length)
                     return
