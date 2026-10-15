@@ -3,6 +3,7 @@ package com.aeriotv.android.feature.livetv.grid
 import com.aeriotv.android.core.pip.findActivity
 import com.aeriotv.android.core.data.guideMatchKey
 import androidx.activity.compose.BackHandler
+import kotlinx.coroutines.launch
 import androidx.compose.foundation.background
 import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
@@ -1091,12 +1092,30 @@ fun GuideScreen(
     val uiModeTv = (androidx.compose.ui.platform.LocalConfiguration.current.uiMode and
         android.content.res.Configuration.UI_MODE_TYPE_MASK) ==
         android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
+    // Radio Mode double Back (Logan 2026-10-14, Apple TV parity): on TV a
+    // second Back inside PlayerDoubleBack.WINDOW_MS stops Radio Mode, as
+    // Back twice closes the full-screen player. The first Back still runs the
+    // ladder at once; only its Exit AerioTV? prompt (top of the ladder) waits
+    // out the window, so a Back twice never opens the dialog.
+    val radioBackScope = androidx.compose.runtime.rememberCoroutineScope()
+    val radioLastBackAt = remember { longArrayOf(0L) }
+    val radioPendingExit = remember { arrayOfNulls<kotlinx.coroutines.Job>(1) }
     BackHandler(enabled = tabActive && !(miniActive && uiModeTv) && !groupSidebarOpen && menuFor == null && programInfoTarget == null && recordTarget == null) {
         if (miniActive) android.util.Log.i("AerioTV", "[GUIDE] Back with mini up (touch): guide ladder, app stays open")
         if (miniPlayerVm.session.expandInFlight()) {
             android.util.Log.i("AerioTV", "[GUIDE] Back ignored: mini expand in flight")
             return@BackHandler
         }
+        val radioTv = uiModeTv && com.aeriotv.android.feature.player.RadioMode.isActive
+        val pressAt = android.os.SystemClock.uptimeMillis()
+        if (radioTv && pressAt - radioLastBackAt[0] <= com.aeriotv.android.feature.player.PlayerDoubleBack.WINDOW_MS) {
+            radioLastBackAt[0] = 0L
+            radioPendingExit[0]?.cancel()
+            radioPendingExit[0] = null
+            com.aeriotv.android.feature.player.RadioMode.stop(context, "double Back")
+            return@BackHandler
+        }
+        radioLastBackAt[0] = if (radioTv) pressAt else 0L
         when (grid.back(nowMs)) {
             GuideGridState.BackStep.RESTORED_NOW_AND_TOP, GuideGridState.BackStep.TOP -> Unit
             GuideGridState.BackStep.NONE -> {
@@ -1104,8 +1123,19 @@ fun GuideScreen(
                 // the app silently; the group stays as picked. Since 2026-10-14
                 // the end of the ladder raises the Exit AerioTV? confirm (the
                 // same one the Activity's root Back fallback shows).
-                (context.findActivity() as? com.aeriotv.android.MainActivity)
-                    ?.requestExitPrompt("guide-top")
+                val prompt = {
+                    (context.findActivity() as? com.aeriotv.android.MainActivity)
+                        ?.requestExitPrompt("guide-top")
+                    Unit
+                }
+                if (radioTv) {
+                    radioPendingExit[0]?.cancel()
+                    radioPendingExit[0] = radioBackScope.launch {
+                        kotlinx.coroutines.delay(com.aeriotv.android.feature.player.PlayerDoubleBack.WINDOW_MS)
+                        radioPendingExit[0] = null
+                        prompt()
+                    }
+                } else prompt()
             }
         }
     }

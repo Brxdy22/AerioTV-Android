@@ -204,7 +204,7 @@ object RemoteControlHints {
         sidebarGroups: Boolean,
         miniActive: Boolean,
         /** Radio Mode on the guide (Apple TV parity): Play/Pause switches to
-         *  video and hold Right stops, as the banner's two buttons. */
+         *  video and hold Right or Back twice stops, as the banner's two buttons. */
         radioActive: Boolean = false,
     ): List<RemoteHint> = buildList {
         // Select plays by default, so only a remapped Select is worth a pair;
@@ -224,6 +224,8 @@ object RemoteControlHints {
         }
         add(RemoteHint(if (miniActive) "Double Back" else "Back", "Top channel"))
         if (radioActive && !miniActive) {
+            // Back twice stops Radio Mode (Apple TV parity), the player's pair style.
+            add(RemoteHint("Back twice", "Stop"))
             add(RemoteHint(slotLabel(RemoteSlot.PLAY_PAUSE), "Switch to Video Mode"))
             add(RemoteHint(slotLabel(RemoteSlot.RIGHT_LONG), "Stop"))
         }
