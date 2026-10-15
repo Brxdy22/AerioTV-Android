@@ -63,6 +63,8 @@ fun RadioTransportCard(
     isDispatcharrAdmin: Boolean,
     modifier: Modifier = Modifier,
     tabletWidth: Dp? = null,
+    /** The caller's row gives the frame (phone, Control a TV button beside it). */
+    inRow: Boolean = false,
 ) {
     val context = LocalContext.current
     val radio by RadioMode.state.collectAsStateWithLifecycle()
@@ -143,6 +145,8 @@ fun RadioTransportCard(
     Box(
         modifier = if (tabletWidth != null) {
             modifier.width(tabletWidth).floatingNavChrome(RoundedCornerShape(percent = 50))
+        } else if (inRow) {
+            modifier.floatingNavChrome(RoundedCornerShape(percent = 50))
         } else {
             modifier.widthIn(max = 600.dp).fillMaxWidth().padding(horizontal = 20.dp)
                 .floatingNavChrome(RoundedCornerShape(percent = 50))

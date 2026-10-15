@@ -1534,15 +1534,11 @@ fun MainScaffold(
                 // phone can be a remote / start a cast without opening a channel
                 // first (task #255). Hidden while already controlling / casting
                 // (their cards take over).
-                // Radio Mode takes the cast card's slot, so the button hides
-                // like it does for the cast card (Apple parity, 2026-10-15).
-                val radioForFab by com.aeriotv.android.feature.player.RadioMode.state
-                    .collectAsStateWithLifecycle()
                 val showControlFab = (companionDevices.isNotEmpty() ||
                         castState !is com.aeriotv.android.core.cast.AerioCastSender.State.Unavailable) &&
                     companionConn !is com.aeriotv.android.core.cast.companion
                         .CompanionRemoteController.Conn.Connected &&
-                    !casting && !isTv && radioForFab == null
+                    !casting && !isTv
                 // Tablets (sw >= 600 dp): the button sits static at the
                 // trailing edge on the pill row (below) and never moves with
                 // the collapse (Logan 2026-10-04). Phones keep the above-the-bar
@@ -1596,11 +1592,18 @@ fun MainScaffold(
                 // Multiview, Kept Live, cast card at the bottom; no circle
                 // beside them (the tablet button lives on the pill row).
                 val showMvBg = mvBgState != null && !isTv
+                val radioOnDock = com.aeriotv.android.feature.player.RadioMode.state
+                    .collectAsStateWithLifecycle().value != null && !isTv && !casting
                 val fabRow = when {
                     !phoneFab -> 0
                     showKept -> 1
                     showMv -> 2
                     showMvBg -> 3
+                    // Radio Mode card row (Apple parity, Logan 2026-10-15):
+                    // the card narrows and the button sits at its trailing
+                    // edge, like Kept Live. The button hides while casting,
+                    // so the cast card never shares the row.
+                    radioOnDock -> 5
                     else -> 4
                 }
                 @Composable
@@ -1745,7 +1748,14 @@ fun MainScaffold(
                 @Composable
                 fun DockRadio() {
                     if (radio != null && !isTv && !casting) {
+                        val radioRow = fabRow == 5 && tabletCardWidth == null
+                        var radioCardPx by remember { mutableStateOf(0) }
+                        val density = LocalDensity.current
+                        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                        Row(if (radioRow) mvRowFrame else Modifier, verticalAlignment = Alignment.CenterVertically) {
                         com.aeriotv.android.feature.player.RadioTransportCard(
+                            modifier = if (radioRow) Modifier.weight(1f).onSizeChanged { radioCardPx = it.height } else Modifier,
+                            inRow = radioRow,
                             tabletWidth = tabletCardWidth,
                             nowProgramme = { ch -> state.epgByChannel[ch.guideMatchKey]?.nowPlaying() },
                             loadChannelStreams = { channelIntPk ->
@@ -1770,7 +1780,17 @@ fun MainScaffold(
                             recheckSwitchStreamAllowed = { trigger -> viewModel.recheckSwitchStreamAllowed(trigger) },
                             isDispatcharrAdmin = capsPlaylist?.canSwitchStream() ?: false,
                         )
-                        Spacer(Modifier.height(if (tabletNav) 12.dp else 8.dp))
+                        if (radioRow) {
+                            Spacer(Modifier.width(12.dp))
+                            CompanionControlFab(
+                                onClick = { showCompanionPicker = true },
+                                diameter = if (radioCardPx > 0) with(density) { radioCardPx.toDp() }
+                                    else com.aeriotv.android.feature.livetv.RetainedCardHeight,
+                            )
+                        }
+                        }
+                        }
+                        Spacer(Modifier.height(if (tabletNav) 12.dp else if (radioRow) 10.dp else 8.dp))
                     }
                 }
                 if (tabletNav) {
