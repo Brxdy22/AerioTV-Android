@@ -470,6 +470,9 @@ class MainActivity : ComponentActivity() {
         return super.onKeyDown(keyCode, event)
     }
 
+    /** downTime of the Back hold that last raised the exit prompt. */
+    private var lastHoldBackDownTime = Long.MIN_VALUE
+
     override fun onKeyLongPress(keyCode: Int, event: KeyEvent): Boolean {
         // Issue #16: holding BACK on Android TV surfaces the "close AerioTV?"
         // confirm. The 0.3.0 short-Back rework (double-Back -> top channel, then
@@ -492,6 +495,11 @@ class MainActivity : ComponentActivity() {
             ) {
                 return true
             }
+            // One prompt and one log line per physical hold: the same held
+            // press reached this handler twice in the guide (Streamer
+            // 2026-10-14, two "source=hold" lines, same timestamp).
+            if (event.downTime == lastHoldBackDownTime) return true
+            lastHoldBackDownTime = event.downTime
             showExitPrompt("hold")
             return true
         }
