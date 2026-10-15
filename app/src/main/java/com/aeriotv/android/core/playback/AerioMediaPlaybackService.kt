@@ -1,5 +1,6 @@
 package com.aeriotv.android.core.playback
 
+import kotlinx.coroutines.flow.distinctUntilChanged
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -121,6 +122,26 @@ class AerioMediaPlaybackService : MediaLibraryService() {
                     ),
                 )
             }
+        }
+        // Radio Mode on a failed stream (Channel Unavailable): the
+        // notification says so instead of the channel's "Live" line; a
+        // recovered stream puts the normal line back.
+        scope.launch {
+            kotlinx.coroutines.flow.combine(
+                com.aeriotv.android.feature.player.RadioMode.state,
+                exoHolder.streamUnavailable,
+            ) { radio, unavailable -> radio != null && unavailable }
+                .distinctUntilChanged()
+                .collect { failed ->
+                    if (com.aeriotv.android.feature.player.RadioMode.state.value == null) return@collect
+                    com.aeriotv.android.core.pip.PipState.nowPlayingSubtitle =
+                        if (failed) com.aeriotv.android.feature.multiview.RADIO_UNAVAILABLE else ""
+                    runCatching {
+                        (getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager)
+                            .notify(NOTIF_ID, buildNowPlayingNotification())
+                    }
+                    android.util.Log.i(TAG, "[RADIO] notification ${if (failed) "Channel Unavailable" else "Live"}")
+                }
         }
         setMediaNotificationProvider(
             androidx.media3.session.DefaultMediaNotificationProvider.Builder(this)

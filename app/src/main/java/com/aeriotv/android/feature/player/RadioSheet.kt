@@ -34,6 +34,7 @@ import com.aeriotv.android.feature.main.MainScaffoldEntryPoint
 import com.aeriotv.android.feature.main.floatingNavChrome
 import com.aeriotv.android.feature.miniplayer.CastMiniController
 import com.aeriotv.android.feature.multiview.RADIO_SUBTITLE
+import com.aeriotv.android.feature.multiview.RADIO_UNAVAILABLE
 import dagger.hilt.android.EntryPointAccessors
 import kotlinx.coroutines.launch
 
@@ -79,6 +80,38 @@ fun RadioTransportCard(
             .timeshiftController()
     }
     val tsState by tsController.state.collectAsStateWithLifecycle()
+    // The holder's dead-stream flag (the player overlay's "Channel
+    // Unavailable" card): the card, the sheet and the notification follow it
+    // instead of claiming playback, and Radio retries on the player's 5 s
+    // cadence with a Retry Now button in the sheet.
+    val unavailable by holder.streamUnavailable.collectAsStateWithLifecycle()
+    val lastErrorText by holder.lastErrorText.collectAsStateWithLifecycle()
+    var retrySerial by remember { mutableIntStateOf(0) }
+    // True from a retry until the stream is READY again: the retry clears
+    // the holder flag at once, and "Playing" must not return before audio.
+    var retrying by remember(channel.id) { mutableStateOf(false) }
+    var retryCountdown by remember { mutableIntStateOf(0) }
+    val retryNow: () -> Unit = {
+        Log.i(TAG, "[RADIO] retry ${channel.name}")
+        retryCountdown = 0
+        retrySerial += 1
+        retrying = true
+        holder.retryUnavailable()
+    }
+    if (unavailable) {
+        LaunchedEffect(retrySerial, channel.id) {
+            Log.i(TAG, "[RADIO] channel unavailable ${channel.name}")
+            var remaining = 5
+            while (remaining > 0) {
+                retryCountdown = remaining
+                kotlinx.coroutines.delay(1_000)
+                remaining -= 1
+            }
+            retryNow()
+        }
+    }
+    val failed = unavailable || retrying
+    val statusText = if (failed) RADIO_UNAVAILABLE else RADIO_SUBTITLE
     // 1 Hz playhead for the scrubber while the sheet is open.
     var wallNow by remember { mutableStateOf(0L) }
     var playing by remember(player) { mutableStateOf(player?.playWhenReady == true) }
@@ -87,6 +120,12 @@ fun RadioTransportCard(
         val l = object : androidx.media3.common.Player.Listener {
             override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) { playing = playWhenReady }
             override fun onTracksChanged(tracks: androidx.media3.common.Tracks) { tracksTick++ }
+            override fun onPlaybackStateChanged(state: Int) {
+                if (state == androidx.media3.common.Player.STATE_READY && retrying) {
+                    retrying = false
+                    Log.i(TAG, "[RADIO] recovered ${channel.name}")
+                }
+            }
         }
         player?.addListener(l)
         onDispose { player?.removeListener(l) }
@@ -114,12 +153,12 @@ fun RadioTransportCard(
             title = channel.name,
             deviceName = null,
             artUri = logo,
-            isPlaying = playing,
-            subtitle = RADIO_SUBTITLE,
+            isPlaying = playing && !failed,
+            subtitle = statusText,
             transportIcon = Icons.Filled.Radio,
             stopDescription = "Stop",
             onTap = { Log.i(TAG, "[RADIO] card tap"); sheetOpen = true },
-            onTogglePlayPause = togglePlay,
+            onTogglePlayPause = if (failed) retryNow else togglePlay,
             onStop = { RadioMode.stop(context, "card") },
         )
     }
@@ -155,7 +194,7 @@ fun RadioTransportCard(
             programmeStartMs = programme?.startMillis ?: 0L,
             programmeEndMs = programme?.endMillis ?: 0L,
             remoteState = CastControl.RemoteState(audio = audio, audioOnly = true),
-            isPlaying = playing,
+            isPlaying = playing && !failed,
             position = CastControl.PositionSnapshot(
                 canSeek = tsState.buffering && tsState.headWallMs > tsState.tailWallMs,
                 isLive = !tsState.timeshifting,
@@ -167,7 +206,30 @@ fun RadioTransportCard(
             radioOptions = true,
             streamInfoRows = radioStreamInfoRows(holder),
             transportIcon = Icons.Filled.Radio,
-            statusLineOverride = RADIO_SUBTITLE,
+            statusLineOverride = statusText,
+            topContent = if (failed) {
+                {
+                    androidx.compose.foundation.layout.Column(
+                        horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally,
+                        verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(6.dp),
+                    ) {
+                        if (!lastErrorText.isNullOrBlank()) {
+                            androidx.compose.material3.Text(
+                                text = lastErrorText.orEmpty(),
+                                style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                            )
+                        }
+                        androidx.compose.material3.Text(
+                            text = if (retryCountdown > 0) "Retrying in ${retryCountdown}s" else "Reconnecting…",
+                            style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
+                        )
+                        androidx.compose.material3.Button(onClick = retryNow) {
+                            androidx.compose.material3.Text("Retry Now")
+                        }
+                    }
+                }
+            } else null,
             stopLabel = "Stop",
             canChangeChannel = true,
             showInlineSkip = true,

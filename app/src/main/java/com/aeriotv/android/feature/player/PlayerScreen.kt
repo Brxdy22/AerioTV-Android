@@ -579,6 +579,10 @@ fun PlayerScreen(
         // Skipping the prime against a dead player was the silent-black-
         // screen failure: no logs, Stream Info idle, no server client.
         var adoptLive = false
+        // Read before the tune resets it: a failed outgoing channel is
+        // released, never kept live.
+        val previousFailed = exoHolder.streamUnavailable.value ||
+            exoHolder.failedChannelId != null
         if (exoHolder.currentChannelId != channelId || exoHolder.isIdle()) {
             Log.i(TAG, "Channel switch on Exo persistent player -> $url")
             // Trace: this is a real tune entry (channel-list / recents / deep
@@ -645,6 +649,7 @@ fun PlayerScreen(
             timeshiftController.currentPlayUrlProvider = { exoHolder.currentPlayUrl }
             timeshiftController.onFullscreenLiveStarted(
                 channelId, ch.name, url, httpHeaders, logoUrl = ch.tvgLogo, adoptLive = adoptLive,
+                keepPrevious = !previousFailed,
             )
         } else {
             timeshiftController.onFullscreenLiveStopped()

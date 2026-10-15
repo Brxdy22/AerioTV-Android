@@ -1082,10 +1082,16 @@ fun GuideScreen(
         runCatching { gridFocus.requestFocus() }
     }
 
-    // With a mini player up, Back belongs to the player host (expand / close),
-    // exactly as the old guide: the ladder must never finish the Activity
-    // while a stream is playing.
-    BackHandler(enabled = tabActive && !miniActive && !groupSidebarOpen && menuFor == null && programInfoTarget == null && recordTarget == null) {
+    // With a mini player up on TV, Back belongs to the player host
+    // (TvMiniPlayerOverlay: expand / double-Back to top), exactly as the old
+    // guide. Phone and tablet have no mini Back host, so the ladder stays
+    // installed there: a Back after the player minimized fell through to the
+    // Activity and closed AerioTV (onn tablet 2026-10-14, audio-only mini).
+    val uiModeTv = (androidx.compose.ui.platform.LocalConfiguration.current.uiMode and
+        android.content.res.Configuration.UI_MODE_TYPE_MASK) ==
+        android.content.res.Configuration.UI_MODE_TYPE_TELEVISION
+    BackHandler(enabled = tabActive && !(miniActive && uiModeTv) && !groupSidebarOpen && menuFor == null && programInfoTarget == null && recordTarget == null) {
+        if (miniActive) android.util.Log.i("AerioTV", "[GUIDE] Back with mini up (touch): guide ladder, app stays open")
         if (miniPlayerVm.session.expandInFlight()) {
             android.util.Log.i("AerioTV", "[GUIDE] Back ignored: mini expand in flight")
             return@BackHandler

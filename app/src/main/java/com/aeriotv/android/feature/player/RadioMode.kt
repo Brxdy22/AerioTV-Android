@@ -118,6 +118,10 @@ object RadioMode {
         if (!isActive) return
         val holder = entry(context).exoPlayerHolder()
         if (holder.currentChannelId != channel.id || holder.isIdle()) {
+            // Read before playUrl resets it: a failed outgoing channel is
+            // released, never handed to Keep Recent Channels Live.
+            val previousFailed = holder.streamUnavailable.value ||
+            holder.failedChannelId != null
             holder.httpHeaders = headers
             holder.markTunePress(channel.name)
             holder.playUrl(
@@ -142,6 +146,7 @@ object RadioMode {
                 ts.currentPlayUrlProvider = { holder.currentPlayUrl }
                 ts.onFullscreenLiveStarted(
                     channel.id, channel.name, channel.url, headers, logoUrl = channel.tvgLogo,
+                    keepPrevious = !previousFailed,
                 )
             } else {
                 ts.onFullscreenLiveStopped()

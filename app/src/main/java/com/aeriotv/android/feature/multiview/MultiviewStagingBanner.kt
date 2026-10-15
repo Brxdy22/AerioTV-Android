@@ -445,6 +445,16 @@ private fun RadioTvBanner(
         if (upTarget != null) up = upTarget
         if (downTarget != null) down = downTarget
     }
+    val ctx = androidx.compose.ui.platform.LocalContext.current
+    val radioHolder = remember {
+        dagger.hilt.android.EntryPointAccessors.fromApplication(
+            ctx.applicationContext,
+            com.aeriotv.android.feature.main.MainScaffoldEntryPoint::class.java,
+        ).exoPlayerHolder()
+    }
+    // Failed stream: the player overlay's wording, never "Playing".
+    val radioUnavailable by radioHolder.streamUnavailable
+        .collectAsStateWithLifecycle()
     val accent = MaterialTheme.colorScheme.primary
     Row(
         modifier = modifier
@@ -470,7 +480,7 @@ private fun RadioTvBanner(
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
-                text = RADIO_SUBTITLE,
+                text = if (radioUnavailable) RADIO_UNAVAILABLE else RADIO_SUBTITLE,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,

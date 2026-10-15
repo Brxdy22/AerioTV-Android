@@ -239,6 +239,9 @@ class TimeshiftController @Inject constructor(
          *  edge (no new connection): adoption keeps the kept fill running as
          *  this session's live feed instead of stopping it. */
         adoptLive: Boolean = false,
+        /** False when the outgoing channel failed (Channel Unavailable): a
+         *  dead stream is never kept live, it is released instead. */
+        keepPrevious: Boolean = true,
     ) {
         liveUrl = streamUrl
         liveHeaders = headers
@@ -262,7 +265,10 @@ class TimeshiftController @Inject constructor(
                 if (!enabled) return@launch
                 val depthMin = prefs.liveRewindDepthMinutes.first()
                 val keepCount = prefs.liveRewindKeepCount.first()
-                if (keepRecent) demoteCurrentSession(keepCount) else stopSessionInternal()
+                if (keepRecent && !keepPrevious && currentChannelName != null) {
+                    Log.i(APP_TAG, "[RETAIN] not kept $currentChannelName: stream failed")
+                }
+                if (keepRecent && keepPrevious) demoteCurrentSession(keepCount) else stopSessionInternal()
                 // Flip-back: adopt the retained session so the rewind
                 // timeline spans the time away. The tee is a different
                 // connection than the retained filler, so mark the splice.

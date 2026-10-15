@@ -1236,6 +1236,11 @@ class AerioExoPlayerHolder @Inject constructor(
     /** The server's verbatim 503 reason for the current tune, published into the
      *  unavailable overlay instead of a guessed cause. */
     @Volatile private var serverReason: String? = null
+    /** Channel whose stream went Channel Unavailable, kept through the
+     *  retries (which clear [streamUnavailable] while they reconnect) until
+     *  it reaches READY. Keep Recent Channels Live never keeps it. */
+    @Volatile var failedChannelId: String? = null
+
     private val _streamUnavailable = MutableStateFlow(false)
     /** True when a freshly-tuned live stream produced no data even after a
      *  reconnect, so the player UI can show "Channel unavailable" instead of an
@@ -1538,7 +1543,10 @@ class AerioExoPlayerHolder @Inject constructor(
         override fun onPlaybackStateChanged(playbackState: Int) {
             // Reaching READY means the failure (if any) is behind us, so a later
             // playWhenReady=false is a real user pause again.
-            if (playbackState == Player.STATE_READY) errorPending = false
+            if (playbackState == Player.STATE_READY) {
+                errorPending = false
+                failedChannelId = null
+            }
             if (playbackState == Player.STATE_READY && player?.isPlaying == true) armWatchdog()
             // Buffer-underrun rebuffer on a live stream that was already
             // playing: hold the resume until the cushion is deep enough to
@@ -4216,6 +4224,7 @@ class AerioExoPlayerHolder @Inject constructor(
                 ?: "No data received from the stream"
         }
         _streamUnavailable.value = true
+        failedChannelId = reconnectChannelId
         tracer.recover("stream unavailable; stopping")
         stop()
     }
