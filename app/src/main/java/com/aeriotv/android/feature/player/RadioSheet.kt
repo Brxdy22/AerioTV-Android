@@ -236,6 +236,8 @@ fun RadioTransportCard(
             inlineSkipEnabled = tsState.buffering,
             allowWebScrub = false,
             canSwitchStream = canSwitchStream,
+            // Inert until the stream plays again; Retry Now is the action.
+            playPauseEnabled = !failed,
             onTogglePlayPause = togglePlay,
             onChannelUp = { RadioMode.step(context, 1) },
             onChannelDown = { RadioMode.step(context, -1) },

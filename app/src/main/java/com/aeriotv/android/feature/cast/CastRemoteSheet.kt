@@ -148,6 +148,9 @@ fun CastRemoteSheet(
     /** False when the transport reports no seekable range: the inline skip
      *  buttons are still shown, but dimmed and inert. */
     inlineSkipEnabled: Boolean = true,
+    /** False dims Play / Pause to 40% and makes it inert (Radio Mode while
+     *  the stream is Channel Unavailable, until it plays again). */
+    playPauseEnabled: Boolean = true,
     /** Companion transport only (Logan 2026-09-12): drop the AerioTV Remote link
      *  and hide the card while the TV keeps playing. Null for Google Cast, where
      *  there is nothing to leave behind once the session ends. */
@@ -494,7 +497,12 @@ fun CastRemoteSheet(
                         groupAlpha,
                     )
                 }
-                if (showPlayPause) PlayPauseButton(isPlaying, onTogglePlayPause, enabled, groupAlpha)
+                if (showPlayPause) PlayPauseButton(
+                    isPlaying,
+                    onTogglePlayPause,
+                    enabled && playPauseEnabled,
+                    if (playPauseEnabled) groupAlpha else 0.4f,
+                )
                 if (showSkipButtons) {
                     LabeledRemoteButton(
                         SkipIntervals.forwardIcon(forwardSeconds),

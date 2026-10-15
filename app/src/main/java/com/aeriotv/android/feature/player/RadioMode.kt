@@ -180,6 +180,9 @@ object RadioMode {
         val s = _state.value ?: return
         val e = entry(context)
         val holder = e.exoPlayerHolder()
+        // Read before holder.stop(): a channel that failed and has not
+        // played since is released, never kept live.
+        val failed = holder.streamUnavailable.value || holder.failedChannelId != null
         _state.value = null
         holder.radioVideoOff = false
         runCatching { e.exoWindowState().hide() }
@@ -190,7 +193,10 @@ object RadioMode {
         // Channels Live decides), the same call the player's X makes.
         livePauseWallMs = 0L
         runCatching {
-            e.timeshiftController().onFullscreenLiveStopped(keepIfEnabled = !holder.lastTuneWasForcedHls)
+            e.timeshiftController().onFullscreenLiveStopped(
+                keepIfEnabled = !holder.lastTuneWasForcedHls,
+                streamFailed = failed,
+            )
         }
         Log.i(TAG, "[RADIO] stop ($reason) ${s.channel.name}")
     }

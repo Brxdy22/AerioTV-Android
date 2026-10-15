@@ -688,7 +688,11 @@ fun PlayerScreen(
                     "[RETAIN] not kept on close: " + if (toMini) "minimized to the mini player" else "multiview launch",
                 )
             }
-            timeshiftController.onFullscreenLiveStopped(keepIfEnabled = keepOnClose, toMini = toMini && !hlsSession)
+            timeshiftController.onFullscreenLiveStopped(
+                keepIfEnabled = keepOnClose,
+                toMini = toMini && !hlsSession,
+                streamFailed = exoHolder.streamUnavailable.value || exoHolder.failedChannelId != null,
+            )
         }
     }
 

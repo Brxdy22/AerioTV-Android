@@ -579,7 +579,13 @@ class TimeshiftController @Inject constructor(
      * multiview, PiP handoff). Buffered data stays on disk until the
      * retention reaper ages it out.
      */
-    fun onFullscreenLiveStopped(keepIfEnabled: Boolean = false, toMini: Boolean = false) {
+    fun onFullscreenLiveStopped(
+        keepIfEnabled: Boolean = false,
+        toMini: Boolean = false,
+        /** True when the closing channel failed (Channel Unavailable) and has
+         *  not played since: a dead stream is never kept live, as for a flip. */
+        streamFailed: Boolean = false,
+    ) {
         // Snapshot the actual play URL now if the holder still has one
         // (post LAN/WAN failover); after an X-close the holder is already
         // stopped and demotion falls back to the tune-time URL.
@@ -591,7 +597,10 @@ class TimeshiftController @Inject constructor(
             // channel so the mini's X can keep it live (same outcome as the
             // full-screen X). Only a channel that had a buffer qualifies,
             // which already excludes HLS and non-TS sessions.
-            miniKeepCandidate = if (toMini && activeWriter != null) {
+            if (toMini && streamFailed && activeWriter != null) {
+                Log.i(APP_TAG, "[RETAIN] not kept ${currentChannelName ?: "?"}: stream failed")
+            }
+            miniKeepCandidate = if (toMini && !streamFailed && activeWriter != null) {
                 val id = currentChannelId
                 val url = lastPlayUrlSnapshot ?: liveUrl
                 if (id != null && url != null) {
@@ -605,7 +614,10 @@ class TimeshiftController @Inject constructor(
             val keep = keepIfEnabled && activeWriter != null && runCatching {
                 prefs.liveRewindEnabled.first() && prefs.liveRewindKeepRecent.first()
             }.getOrDefault(false)
-            if (keep) {
+            if (keep && streamFailed) {
+                Log.i(APP_TAG, "[RETAIN] not kept ${currentChannelName ?: "?"}: stream failed")
+                stopSessionInternal()
+            } else if (keep) {
                 val name = currentChannelName
                 val keepCount = runCatching { prefs.liveRewindKeepCount.first() }.getOrDefault(1)
                 demoteCurrentSession(keepCount)
