@@ -93,6 +93,7 @@ import androidx.compose.foundation.focusable
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
@@ -1263,8 +1264,20 @@ private fun TileGrid(
         mutableStateOf(focusedIndex.coerceIn(0, (tiles.size - 1).coerceAtLeast(0)))
     }
     val gridFocusRequester = remember { FocusRequester() }
+    var gridHostFocused by remember { mutableStateOf(false) }
+    // GH #138: a single request on entry can lose a race with the screen we
+    // came from (the guide, entered via the staging banner's Play, is still
+    // composed for the exit transition). Keep asking for about a second
+    // until the grid host actually holds focus.
     LaunchedEffect(Unit) {
-        if (isTv) runCatching { gridFocusRequester.requestFocus() }
+        if (!isTv) return@LaunchedEffect
+        repeat(30) { attempt ->
+            if (!gridHostFocused) {
+                val ok = runCatching { gridFocusRequester.requestFocus() }.isSuccess
+                if (attempt > 0) com.aeriotv.android.ui.tv.TvFocusTrace.player("multiview grid refocus attempt=$attempt ok=$ok")
+            }
+            kotlinx.coroutines.delay(50L)
+        }
     }
     val slotKeyState = remember { TileSlotKeys() }
     // Item #16 focus-trap fix: while a per-tile scrubber strip is up it owns
@@ -1324,6 +1337,7 @@ private fun TileGrid(
             // pulls focus into an individual (offset-placed) tile, which
             // is what made the ring vanish on first navigation.
             .focusRequester(gridFocusRequester)
+            .onFocusChanged { gridHostFocused = it.isFocused }
             .focusable()
             .onKeyEvent { ev ->
                 if (!isTv || anyFullscreen) return@onKeyEvent false

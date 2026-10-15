@@ -838,8 +838,16 @@ fun GuideScreen(
     // focus is outside the guide AND outside the nav, i.e. genuinely nowhere,
     // and only while no overlay is up, so this never fights the single-owner
     // model or pulls focus off chrome that legitimately has it.
+    // GH #138: the route must also be RESUMED. Play on the staging banner
+    // navigates to Multiview and the banner leaves with focus on it; while
+    // MAIN is still composed for the exit transition (STARTED, no longer
+    // RESUMED) this watchdog used to fire, pull focus back to a guide cell
+    // and strand it on "none" when MAIN left, stealing it from the
+    // Multiview grid host so no key reached the tiles.
+    val guideResumed by androidx.compose.runtime.produceState(guideLifecycle.currentState, guideLifecycle) { guideLifecycle.currentStateFlow.collect { value = it } }
     if (isTv) {
-        val stranded = tabActive && !rows.isEmpty && !guideHasFocus && !topNavHasFocus.value &&
+        val stranded = guideResumed.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED) &&
+            tabActive && !rows.isEmpty && !guideHasFocus && !topNavHasFocus.value &&
             !groupSidebarOpen && !showManageGroups && !showJumpSheet && !searchActive &&
             menuFor == null && programInfoTarget == null && recordTarget == null && collectionPickerFor == null
         LaunchedEffect(stranded) {
@@ -849,6 +857,10 @@ fun GuideScreen(
             delay(350L)
             while (com.aeriotv.android.ui.tv.TvColdStartFocus.pending) delay(50L)
             if (guideHasFocus || topNavHasFocus.value) return@LaunchedEffect
+            if (!guideLifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)) {
+                com.aeriotv.android.ui.tv.TvFocusTrace.guide("refocus skipped=not-resumed state=${guideLifecycle.currentState}")
+                return@LaunchedEffect
+            }
             val ok = runCatching { gridFocus.requestFocus() }.getOrDefault(false)
             com.aeriotv.android.ui.tv.TvFocusTrace.guide("refocus after=stranded result=$ok ${traceGates()}")
         }
