@@ -64,6 +64,15 @@ object RadioMode {
      *  player for this channel; the holder is still playing it. */
     val returnRequests: SharedFlow<M3UChannel> = _returnRequests.asSharedFlow()
 
+    /** TV guide focus anchor (Apple TV parity, Streamer 2026-10-15): the guide
+     *  registers a capture of its focused cell; stop triggers call it at the
+     *  key press-down, before the press can move the grid. */
+    @Volatile var captureGuideFocus: (() -> Unit)? = null
+
+    /** Reason of each completed [stop]; the TV guide restores its cell. */
+    private val _stops = MutableSharedFlow<String>(extraBufferCapacity = 4)
+    val stops: SharedFlow<String> = _stops.asSharedFlow()
+
     private fun entry(context: Context) = EntryPointAccessors.fromApplication(
         context.applicationContext,
         MainScaffoldEntryPoint::class.java,
@@ -199,6 +208,7 @@ object RadioMode {
             )
         }
         Log.i(TAG, "[RADIO] stop ($reason) ${s.channel.name}")
+        _stops.tryEmit(reason)
     }
 
     /** Wall time a buffered live pause began (0 = not paused on live). */

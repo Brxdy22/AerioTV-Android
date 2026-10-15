@@ -77,7 +77,10 @@ fun MultiviewStagingBanner(
         RadioTvBanner(
             channelName = radioSession.channel.name,
             onReturn = { com.aeriotv.android.feature.player.RadioMode.requestReturn(ctx) },
-            onStop = { com.aeriotv.android.feature.player.RadioMode.stop(ctx, "card") },
+            onStop = {
+                com.aeriotv.android.feature.player.RadioMode.captureGuideFocus?.invoke()
+                com.aeriotv.android.feature.player.RadioMode.stop(ctx, "card")
+            },
             onReturnFocus = onReturnFocus,
             playFocusRequester = playFocusRequester,
             upTarget = upTarget,

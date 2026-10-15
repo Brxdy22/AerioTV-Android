@@ -183,6 +183,9 @@ class MainActivity : ComponentActivity() {
         }
         if (radioOnGuide && event.keyCode == KeyEvent.KEYCODE_DPAD_RIGHT && event.action == KeyEvent.ACTION_DOWN) {
             if (android.os.SystemClock.uptimeMillis() < rightHoldPinUntil) return true
+            // Press-down of a possible hold: anchor the guide cell before the
+            // first Right moves it (restored after the radio stop).
+            if (event.repeatCount == 0) com.aeriotv.android.feature.player.RadioMode.captureGuideFocus?.invoke()
             if (event.isLongPress || event.repeatCount >= MINI_CLOSE_HOLD_REPEAT) {
                 com.aeriotv.android.feature.player.RadioMode.stop(this, "hold-right")
                 rightHoldPinUntil = android.os.SystemClock.uptimeMillis() + RIGHT_HOLD_PIN_MS

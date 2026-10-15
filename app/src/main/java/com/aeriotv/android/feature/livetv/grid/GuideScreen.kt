@@ -87,6 +87,7 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
+import androidx.compose.runtime.DisposableEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.aeriotv.android.core.data.ChannelCollection
 import com.aeriotv.android.core.data.EPGProgramme
@@ -1114,6 +1115,58 @@ fun GuideScreen(
     // ladder runs at once, as before.
     val radioBackScope = androidx.compose.runtime.rememberCoroutineScope()
     val radioPendingBack = remember { arrayOfNulls<kotlinx.coroutines.Job>(1) }
+    // Radio stop focus restore (Apple TV parity, Streamer 2026-10-15): the
+    // cell focused when Radio Mode started or at a stop trigger's press-down
+    // (double Back, hold Right, banner Stop) gets focus back after the stop,
+    // instead of focus falling to Search when the banner leaves.
+    val radioFocusAnchor = remember { arrayOfNulls<Pair<String, Long>>(1) }
+    val radioCaptureFocus: () -> Unit = {
+        val row = grid.focusRow
+        if (row in 0 until grid.rows.size) {
+            radioFocusAnchor[0] = grid.rows.channel(row).id to grid.focusCellStartMs
+        }
+    }
+    val radioSessionNow by com.aeriotv.android.feature.player.RadioMode.state.collectAsStateWithLifecycle()
+    LaunchedEffect(radioSessionNow != null) {
+        if (radioSessionNow != null && isTv) radioCaptureFocus()
+    }
+    DisposableEffect(Unit) {
+        com.aeriotv.android.feature.player.RadioMode.captureGuideFocus = { radioCaptureFocus() }
+        onDispose { com.aeriotv.android.feature.player.RadioMode.captureGuideFocus = null }
+    }
+    LaunchedEffect(Unit) {
+        com.aeriotv.android.feature.player.RadioMode.stops.collect { reason ->
+            if (!isTv || !tabActive) return@collect
+            if (reason != "double Back" && reason != "hold-right" && reason != "card") return@collect
+            val anchor = radioFocusAnchor[0]
+            radioFocusAnchor[0] = null
+            if (grid.rows.size == 0) return@collect
+            val row = anchor?.let { grid.rows.indexOfChannel(it.first) } ?: -1
+            val how: String
+            if (row >= 0) {
+                val cell = grid.rows.cellAt(row, anchor!!.second)
+                if (cell != null && cell.startMillis == anchor.second) {
+                    grid.focusRowAt(row, anchor.second)
+                    how = "cell"
+                } else {
+                    grid.focusRowAt(row, grid.rows.cellAt(row, System.currentTimeMillis())?.startMillis)
+                    how = "airing"
+                }
+            } else {
+                grid.focusRowAt(0, grid.rows.cellAt(0, System.currentTimeMillis())?.startMillis)
+                how = "top"
+            }
+            // Hold grid focus while the banner leaves and its focus falls.
+            var held = 0
+            var attempts = 0
+            while (attempts < 20 && held < 6) {
+                if (gridHasFocus) held++ else { held = 0; runCatching { gridFocus.requestFocus() } }
+                attempts++
+                delay(100L)
+            }
+            android.util.Log.i(com.aeriotv.android.ui.tv.TvFocusTrace.TAG, "[FOCUS] radio stop restore -> ${guideTraceCell(grid)} via=$how reason=$reason result=${if (gridHasFocus) "success" else "failure"} attempts=$attempts")
+        }
+    }
     val runGuideBackLadder: () -> Unit = {
         when (grid.back(nowMs)) {
             GuideGridState.BackStep.RESTORED_NOW_AND_TOP, GuideGridState.BackStep.TOP -> Unit
@@ -1165,6 +1218,8 @@ fun GuideScreen(
         }
         val radioTv = uiModeTv && com.aeriotv.android.feature.player.RadioMode.isActive
         if (radioTv) {
+            // First Back of a possible double: anchor the cell at press-down.
+            radioCaptureFocus()
             radioPendingBack[0] = radioBackScope.launch {
                 kotlinx.coroutines.delay(com.aeriotv.android.feature.player.PlayerDoubleBack.WINDOW_MS)
                 radioPendingBack[0] = null
