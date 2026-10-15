@@ -151,10 +151,18 @@ class DispatcharrWarmupCoordinator @Inject constructor(
         // the login phase behind a "has password in Keychain" check).
         val username = playlist.username?.takeIf { it.isNotBlank() } ?: return
         val password = playlist.password?.takeIf { it.isNotBlank() } ?: return
+        if (DispatcharrLoginGate.isRejected(playlist.id)) {
+            Log.i(TAG, "[AUTH] warmup login skipped for ${playlist.id.take(8)}: parked after a rejected login")
+            return
+        }
         try {
             val pair = client.login(playlist.urlString, username, password)
             tokenStore.store(playlist.id, pair.access, pair.refresh)
             Log.i(TAG, "login OK for ${playlist.id.take(8)}")
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            throw c
+        } catch (e: DispatcharrError.InvalidCredentials) {
+            DispatcharrLoginGate.noteRejected(playlist.id)
         } catch (t: Throwable) {
             Log.w(TAG, "login failed for ${playlist.id.take(8)}: ${t.message}")
         }

@@ -166,6 +166,12 @@ class DispatcharrClient @Inject constructor() {
      * network or HTTP failure.
      */
     suspend fun login(baseUrl: String, username: String, password: String): JwtPair {
+        // A 429 earlier in the throttle window: do not spend another attempt
+        // (each one re-arms nothing but still counts against the user's IP).
+        DispatcharrLoginGate.serverParkedSeconds(baseUrl).takeIf { it > 0 }?.let { left ->
+            android.util.Log.i("DispatcharrAuthBroker", "[AUTH] login throttled by the server; next attempt in ${left}s")
+            throw DispatcharrError.LoginThrottled(left)
+        }
         val response: HttpResponse = try {
             client.post("${baseUrl.trimEnd('/')}/api/accounts/token/") {
                 contentType(ContentType.Application.Json)
@@ -191,11 +197,12 @@ class DispatcharrClient @Inject constructor() {
             // close on the heels of the first (verify + warmup) trips it,
             // and the generic transport copy sent users chasing URL and
             // credential problems that did not exist (Discord 2026-08-16,
-            // iOS twin fixed the same day). Self-clearing: say WAIT.
-            throw DispatcharrError.Transport(
-                "The server is rate-limiting login attempts (HTTP 429). " +
-                    "Wait a minute and try again.",
-            )
+            // iOS twin fixed the same day). Self-clearing: say WAIT, and
+            // park every login to this server until Retry-After.
+            val secs = DispatcharrLoginGate.parseRetryAfter(response.headers["Retry-After"])
+                ?: DispatcharrLoginGate.DEFAULT_RETRY_AFTER_S
+            DispatcharrLoginGate.parkServer(baseUrl, secs)
+            throw DispatcharrError.LoginThrottled(secs)
         }
         if (!response.status.isSuccess()) {
             throw DispatcharrError.Transport("Login transport error: HTTP $code")
@@ -246,6 +253,12 @@ class DispatcharrClient @Inject constructor() {
             throw DispatcharrError.RefreshExpired(
                 "Refresh token expired. AerioTV will re-authenticate from saved credentials.",
             )
+        }
+        if (code == 429) {
+            val secs = DispatcharrLoginGate.parseRetryAfter(response.headers["Retry-After"])
+                ?: DispatcharrLoginGate.DEFAULT_RETRY_AFTER_S
+            DispatcharrLoginGate.parkServer(baseUrl, secs)
+            throw DispatcharrError.LoginThrottled(secs)
         }
         if (!response.status.isSuccess()) {
             throw DispatcharrError.Transport("Refresh transport error: HTTP $code")

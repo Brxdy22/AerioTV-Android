@@ -78,7 +78,7 @@ class DispatcharrAuthBroker @Inject constructor(
             }
             Log.i(TAG, "401 on apiKey call for ${playlistId.take(8)}; attempting silent rebootstrap")
             val freshKey = silentRebootstrapApiKey(playlist)
-            if (freshKey == null) {
+            if (freshKey == null && (playlist.password.isNullOrBlank() || playlist.username.isNullOrBlank())) {
                 // API-Key-mode playlists have no credentials to re-mint from,
                 // so a rejected key is terminal until the user replaces it.
                 // Before this flag the failure was invisible: Live TV and the
@@ -94,6 +94,7 @@ class DispatcharrAuthBroker @Inject constructor(
                 )
                 throw e
             }
+            if (freshKey == null) throw e
             block(freshKey)
         }
     }
@@ -138,11 +139,25 @@ class DispatcharrAuthBroker @Inject constructor(
             Log.i(TAG, "silentRebootstrap SKIP: playlist ${playlist.id.take(8)} has no creds (API Key mode)")
             return null
         }
+        // One attempt per playlist per 60 s, shared by concurrent callers;
+        // 429 and rejected logins park (DispatcharrLoginGate).
+        return DispatcharrLoginGate.silentRelogin(playlist.id) {
+            rebootstrapOnce(playlist, username, password)
+        }
+    }
+
+    private suspend fun rebootstrapOnce(
+        playlist: PlaylistEntity,
+        username: String,
+        password: String,
+    ): String? {
         return try {
-            val pair = client.login(playlist.urlString, username, password)
-            tokenStore.store(playlist.id, pair.access, pair.refresh)
-            val newKey = client.fetchCurrentUserApiKey(playlist.urlString, pair.access)
-            dao.update(playlist.copy(apiKey = newKey))
+            // Re-read the row: a caller that waited may hold a stale copy.
+            val row = dao.byId(playlist.id) ?: playlist
+            val pair = client.login(row.urlString, username, password)
+            tokenStore.store(row.id, pair.access, pair.refresh)
+            val newKey = client.fetchCurrentUserApiKey(row.urlString, pair.access)
+            dao.update(row.copy(apiKey = newKey))
             Log.i(TAG, "silentRebootstrap OK for ${playlist.id.take(8)}")
             newKey
         } catch (c: kotlinx.coroutines.CancellationException) {
@@ -151,6 +166,9 @@ class DispatcharrAuthBroker @Inject constructor(
             // sent GH #109 chasing a credential problem that did not exist,
             // and swallowing it let the cancelled coroutine keep running.
             throw c
+        } catch (e: DispatcharrError.InvalidCredentials) {
+            Log.w(TAG, "silentRebootstrap FAIL for ${playlist.id.take(8)}: ${e.message}")
+            throw e // the gate parks the playlist and surfaces it once
         } catch (t: Throwable) {
             Log.w(TAG, "silentRebootstrap FAIL for ${playlist.id.take(8)}: ${t.message}")
             null

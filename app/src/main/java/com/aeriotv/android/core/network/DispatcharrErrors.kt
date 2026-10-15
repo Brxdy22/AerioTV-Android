@@ -36,6 +36,14 @@ sealed class DispatcharrError(message: String) : Exception(message) {
      *  A [Transport] so every existing catch keeps handling it. */
     class NotFound(message: String) : Transport(message)
 
+    /** HTTP 429 from the login endpoint, or a login skipped because an
+     *  earlier 429 is still parking it. A [Transport] so every existing
+     *  catch keeps handling it; the copy says to wait. */
+    class LoginThrottled(val retryAfterSeconds: Long) : Transport(
+        "The server is rate-limiting login attempts (HTTP 429). " +
+            "Wait ${retryAfterSeconds}s and try again.",
+    )
+
     /**
      * A 403 from an endpoint whose permission class is a CAPABILITY check
      * rather than an authentication check (the DVR writes, which are
