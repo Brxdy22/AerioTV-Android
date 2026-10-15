@@ -1077,12 +1077,13 @@ fun GuideScreen(
     val tuneModeVm: com.aeriotv.android.feature.settings.SettingsViewModel = hiltViewModel()
     val tuneInMiniMode by tuneModeVm.guideTuneInMini.collectAsStateWithLifecycle(initialValue = false)
     val tabActiveNow by androidx.compose.runtime.rememberUpdatedState(tabActive)
+    val miniActiveNow by androidx.compose.runtime.rememberUpdatedState(miniActive)
     LaunchedEffect(miniPlayerVm.session) {
         miniPlayerVm.session.guideTopRequests.collect {
             if (!tabActiveNow) return@collect
             android.util.Log.i(
                 "AerioTV",
-                "[GUIDE] double Back -> top channel (mode=${if (tuneInMiniMode) "mini" else "fullscreen"})",
+                "[GUIDE] double Back -> top channel (window=${if (miniActiveNow) "mini" else "fullscreen"} tuneIn=${if (tuneInMiniMode) "mini" else "fullscreen"})",
             )
             grid.back(System.currentTimeMillis())
             runCatching { gridListState.scrollToItem(0) }
