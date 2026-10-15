@@ -77,7 +77,8 @@ class MainActivity : ComponentActivity() {
 
     /**
      * Flipped true by [onKeyLongPress] when BACK is HELD on Android TV, to
-     * surface the "Would you like to close AerioTV?" confirm (issue #16: the
+     * surface the "Exit AerioTV?" confirm (also raised by the root Back
+     * fallback in onCreate) (issue #16: the
      * 0.3.0 short-Back rework removed the old exit popup). Read by the Compose
      * tree in [onCreate]; Cancel/dismiss sets it back to false, Close calls finish().
      */
@@ -491,10 +492,20 @@ class MainActivity : ComponentActivity() {
             ) {
                 return true
             }
-            showExitConfirm.value = true
+            showExitPrompt("hold")
             return true
         }
         return super.onKeyLongPress(keyCode, event)
+    }
+
+    /** Raised by a screen whose own Back ladder has ended (the guide at now
+     *  and the top row), so it reaches the same Exit AerioTV? confirm. */
+    fun requestExitPrompt(source: String) = showExitPrompt(source)
+
+    private fun showExitPrompt(source: String) {
+        if (showExitConfirm.value) return
+        android.util.Log.i("AerioTV", "[BACK] exit prompt shown source=$source")
+        showExitConfirm.value = true
     }
 
     override fun onKeyUp(keyCode: Int, event: KeyEvent): Boolean {
@@ -1042,6 +1053,18 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // Root Back fallback (Logan 2026-10-14): registered FIRST and without
+        // a lifecycle owner, so it sits at the bottom of the dispatcher stack
+        // for the Activity's life. Every Compose BackHandler (tab ladders,
+        // sheets, the guide's back-to-top, the player minimize) and the
+        // NavHost pop run before it; a Back that none of them consumes lands
+        // here and raises the Exit AerioTV? confirm instead of the default
+        // finish. Phone, tablet, and TV alike.
+        onBackPressedDispatcher.addCallback(object : androidx.activity.OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                showExitPrompt("back")
+            }
+        })
         // Fresh launch only: hold tab content off focus until the top bar's
         // cold-start pull lands on the landing tab's pill.
         com.aeriotv.android.ui.tv.TvColdStartFocus.pending = savedInstanceState == null
@@ -1390,22 +1413,37 @@ class MainActivity : ComponentActivity() {
                                 deepLinkTarget = deepLinkTarget.value,
                                 onDeepLinkConsumed = { deepLinkTarget.value = null },
                             )
-                            // Issue #16: long-press BACK on Android TV opens this
-                            // confirm (onKeyLongPress flips showExitConfirm). Rendered
-                            // as a sibling of the NavHost so it overlays every screen.
+                            // Exit AerioTV? confirm (Logan 2026-10-14): raised by the
+                            // root Back fallback registered in onCreate (any Back no
+                            // screen consumed, every form factor) and by a held Back
+                            // on Android TV (issue #16). Sibling of the NavHost so it
+                            // overlays every screen. Cancel (appended by the dialog,
+                            // initial D-pad focus) dismisses; Exit finishes.
                             if (showExitConfirm.value) {
                                 val exitGuard = rememberTvMenuGuard()
                                 TvActionMenuDialog(
-                                    title = "Would you like to close AerioTV?",
+                                    title = "Exit AerioTV?",
                                     guard = exitGuard,
-                                    onDismiss = { showExitConfirm.value = false },
-                                    // TvActionMenuDialog appends its own Cancel row.
+                                    focusCancel = true,
+                                    onDismiss = {
+                                        // The dialog calls onDismiss before an action's
+                                        // onClick, so decide "cancelled" a frame later.
+                                        if (showExitConfirm.value) {
+                                            window.decorView.post {
+                                                if (!isFinishing) android.util.Log.i("AerioTV", "[BACK] exit cancelled")
+                                            }
+                                        }
+                                        showExitConfirm.value = false
+                                    },
                                     actions = listOf(
                                         TvMenuAction(
-                                            label = "Close AerioTV",
+                                            label = "Exit",
                                             icon = Icons.Outlined.Close,
                                             destructive = true,
-                                            onClick = { finish() },
+                                            onClick = {
+                                                android.util.Log.i("AerioTV", "[BACK] exit confirmed")
+                                                finish()
+                                            },
                                         ),
                                     ),
                                 )

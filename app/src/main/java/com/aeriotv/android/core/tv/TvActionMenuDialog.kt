@@ -25,6 +25,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -76,7 +77,18 @@ fun TvActionMenuDialog(
     guard: TvMenuGuard,
     onDismiss: () -> Unit,
     width: androidx.compose.ui.unit.Dp = 250.dp,
+    // Opens with D-pad focus on the appended Cancel row instead of the first
+    // action (the Exit AerioTV? confirm: a stray OK must not close the app).
+    focusCancel: Boolean = false,
 ) {
+    val cancelFocus = remember { androidx.compose.ui.focus.FocusRequester() }
+    if (focusCancel) {
+        androidx.compose.runtime.LaunchedEffect(Unit) {
+            // The Dialog window attaches a frame after composition.
+            kotlinx.coroutines.delay(50)
+            runCatching { cancelFocus.requestFocus() }
+        }
+    }
     // Apple TV look (Logan 2026-09-02): a centred translucent card, the
     // title on top, one capsule per action with accent text, the focused
     // capsule ringed like the rest of the app, and a Cancel capsule last.
@@ -126,6 +138,11 @@ fun TvActionMenuDialog(
                     destructive = false,
                     accent = accent,
                     onActivate = guard.wrap { onDismiss() },
+                    modifier = if (focusCancel) {
+                        Modifier.focusRequester(cancelFocus)
+                    } else {
+                        Modifier
+                    },
                 )
             }
         }
@@ -140,6 +157,7 @@ private fun TvMenuCapsule(
     destructive: Boolean,
     accent: Color,
     onActivate: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     var focused by remember { mutableStateOf(false) }
     var okLatched by remember { mutableStateOf(false) }
@@ -149,7 +167,7 @@ private fun TvMenuCapsule(
         else -> accent
     }
     Row(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .heightIn(min = 38.dp)
             // Clip BEFORE clickable so the focus/press highlight follows the

@@ -1,5 +1,6 @@
 package com.aeriotv.android.feature.livetv.grid
 
+import com.aeriotv.android.core.pip.findActivity
 import com.aeriotv.android.core.data.guideMatchKey
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
@@ -1099,9 +1100,12 @@ fun GuideScreen(
         when (grid.back(nowMs)) {
             GuideGridState.BackStep.RESTORED_NOW_AND_TOP, GuideGridState.BackStep.TOP -> Unit
             GuideGridState.BackStep.NONE -> {
-                // Logan 2026-09-01: Back at the top of the guide must never close
-                // the app. At now and the top row it is a consumed no-op and the
-                // group stays as picked, matching Apple TV's Menu (now + top only).
+                // Logan 2026-09-01: Back at the top of the guide never closes
+                // the app silently; the group stays as picked. Since 2026-10-14
+                // the end of the ladder raises the Exit AerioTV? confirm (the
+                // same one the Activity's root Back fallback shows).
+                (context.findActivity() as? com.aeriotv.android.MainActivity)
+                    ?.requestExitPrompt("guide-top")
             }
         }
     }
