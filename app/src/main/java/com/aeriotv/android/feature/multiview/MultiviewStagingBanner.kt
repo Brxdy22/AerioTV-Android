@@ -36,6 +36,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.composed
 import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -82,7 +84,8 @@ fun MultiviewStagingBanner(
             channelName = radioSession.channel.name,
             onReturn = { com.aeriotv.android.feature.player.RadioMode.requestReturn(ctx) },
             onStop = {
-                com.aeriotv.android.feature.player.RadioMode.captureGuideFocus?.invoke()
+                // tvOS parity (2026-10-15): Stop restores the origin cell
+                // captured at Radio Mode start, not the row focused now.
                 com.aeriotv.android.feature.player.RadioMode.stop(ctx, "card")
             },
             onReturnFocus = onReturnFocus,
@@ -509,7 +512,7 @@ private fun RadioTvBanner(
             },
             fill = accent,
             border = null,
-            modifier = tvNav.focusRequester(returnFocusRequester),
+            modifier = tvNav.radioTrace("banner:switch").focusRequester(returnFocusRequester),
         ) { _ ->
             val onAccent = MaterialTheme.colorScheme.onPrimary
             Icon(Icons.Filled.PlayArrow, contentDescription = null, tint = onAccent, modifier = Modifier.size(12.dp))
@@ -523,11 +526,21 @@ private fun RadioTvBanner(
             },
             fill = null,
             border = null,
-            modifier = tvNav,
+            modifier = tvNav.radioTrace("banner:stop"),
         ) { ink ->
             Text("Stop", fontSize = com.aeriotv.android.ui.tv.TvChrome.pillFontSize, fontWeight = FontWeight.SemiBold,
                 maxLines = 1, softWrap = false,
                 color = ink ?: MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
+}
+
+/** Names a radio banner button in the [FOCUS] trace. */
+private fun Modifier.radioTrace(name: String): Modifier = composed {
+    var had by remember { androidx.compose.runtime.mutableStateOf(false) }
+    this.then(Modifier.onFocusChanged {
+        if (it.isFocused && !had) com.aeriotv.android.ui.tv.TvFocusTrace.focus(name)
+        else if (!it.isFocused && had) com.aeriotv.android.ui.tv.TvFocusTrace.blurred(name)
+        had = it.isFocused
+    })
 }

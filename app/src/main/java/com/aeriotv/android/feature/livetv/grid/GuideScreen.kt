@@ -1127,8 +1127,14 @@ fun GuideScreen(
         }
     }
     val radioSessionNow by com.aeriotv.android.feature.player.RadioMode.state.collectAsStateWithLifecycle()
+    // Origin cell at Radio Mode start: banner Stop restores here (tvOS
+    // parity 2026-10-15); presses on the way to the banner never move it.
+    val radioOriginAnchor = remember { arrayOfNulls<Pair<String, Long>>(1) }
     LaunchedEffect(radioSessionNow != null) {
-        if (radioSessionNow != null && isTv) radioCaptureFocus()
+        if (radioSessionNow != null && isTv) {
+            radioCaptureFocus()
+            radioOriginAnchor[0] = radioFocusAnchor[0]
+        }
     }
     DisposableEffect(Unit) {
         com.aeriotv.android.feature.player.RadioMode.captureGuideFocus = { radioCaptureFocus() }
@@ -1138,8 +1144,9 @@ fun GuideScreen(
         com.aeriotv.android.feature.player.RadioMode.stops.collect { reason ->
             if (!isTv || !tabActive) return@collect
             if (reason != "double Back" && reason != "hold-right" && reason != "card") return@collect
-            val anchor = radioFocusAnchor[0]
+            val anchor = if (reason == "card") radioOriginAnchor[0] ?: radioFocusAnchor[0] else radioFocusAnchor[0]
             radioFocusAnchor[0] = null
+            radioOriginAnchor[0] = null
             if (grid.rows.size == 0) return@collect
             val row = anchor?.let { grid.rows.indexOfChannel(it.first) } ?: -1
             val how: String
