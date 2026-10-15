@@ -54,4 +54,9 @@ class AudioOnlyGraceRuleTest {
         assertFalse(AudioOnlyGraceRule.shouldDrop(M, 5_000, 5_000, true))
         assertTrue(AudioOnlyGraceRule.shouldDrop(M, 12_000, 5_000, true))
     }
+
+    @Test fun declaredDropsOnFirstAudioSample() {
+        assertTrue(AudioOnlyGraceRule.shouldDrop(AudioOnlyStartPolicy.DECLARED, 0, 0, false))
+        assertTrue(AudioOnlyGraceRule.shouldDrop(AudioOnlyStartPolicy.DECLARED, 0, 0, true))
+    }
 }

@@ -40,6 +40,10 @@ interface ChannelSnapshotDao {
     )
     suspend fun distinctGroupTitles(playlistId: String): List<String>
 
+    /** Mark as Radio Channel: flip one cached channel's radio flag in place. */
+    @Query("UPDATE channel_snapshot SET isRadio = :isRadio WHERE playlistId = :playlistId AND channelId = :channelId")
+    suspend fun setRadio(playlistId: String, channelId: String, isRadio: Boolean)
+
     @Query("DELETE FROM channel_snapshot WHERE playlistId = :playlistId")
     suspend fun deleteForPlaylist(playlistId: String)
 

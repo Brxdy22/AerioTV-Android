@@ -4,6 +4,8 @@ import android.content.Context
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Radio
 import com.aeriotv.android.core.data.M3UChannel
+import com.aeriotv.android.core.data.db.entity.canSwitchStream
+import com.aeriotv.android.core.data.db.entity.isDispatcharrDirectConnect
 import com.aeriotv.android.core.tv.TvMenuAction
 import com.aeriotv.android.feature.main.MainScaffoldEntryPoint
 import dagger.hilt.android.EntryPointAccessors
@@ -36,5 +38,68 @@ fun radioMenuAction(
         val headers = RadioMode.headersProvider?.invoke() ?: entry.exoPlayerHolder().httpHeaders
         if (RadioMode.isActive) RadioMode.switchTo(context, channel, headers, subtitle)
         else RadioMode.startFromMenu(context, channel, headers, subtitle)
+    }
+}
+
+/**
+ * Picks of a server-declared radio channel ([M3UChannel.isRadio]) open Radio
+ * Mode (Logan 2026-10-14). The long-press menu's Watch wraps its play call in
+ * [watchAsVideo] so it opens the full-screen player (artwork card, declared
+ * fast start) instead.
+ */
+object RadioSelect {
+    private const val TAG = "AerioRadio"
+    @Volatile private var bypass = false
+
+    /** Run [play] as a plain Watch: no Radio Mode auto-open for this call. */
+    fun watchAsVideo(play: () -> Unit) {
+        bypass = true
+        try { play() } finally { bypass = false }
+    }
+
+    /**
+     * A plain pick (tap, Select) of [channel]: when it is flagged radio,
+     * start Radio Mode through the same entry as the long-press Radio Mode
+     * item and return true. False (today's behavior) for an unflagged
+     * channel, a Watch, while Radio Mode is already on (the pick switches the
+     * audio), while a Multiview runs, or while casting.
+     */
+    fun maybeOpen(context: Context, channel: M3UChannel, subtitle: String, beforeStart: () -> Unit = {}): Boolean {
+        if (!channel.isRadio || bypass || RadioMode.isActive) return false
+        if (com.aeriotv.android.feature.multiview.MultiviewBackground.state.value != null) return false
+        val action = radioMenuAction(context, channel, subtitle, beforeStart) ?: return false
+        android.util.Log.i(TAG, "[RADIO] declared radio channel picked; opening Radio Mode ch=${channel.name}")
+        action.onClick()
+        return true
+    }
+}
+
+/** Denial line for a 403 on the radio flag PATCH. */
+internal const val RADIO_FLAG_DENIED_MESSAGE =
+    "Your Dispatcharr account can't mark radio channels. Marking needs an administrator account."
+
+/**
+ * The channel long-press menu's "Mark as Radio Channel" / "Unmark Radio
+ * Channel" row, right after Radio Mode. Dispatcharr Direct Connect only, for
+ * an account whose cached permissions say admin (the Switch Stream gate).
+ */
+fun radioFlagMenuAction(
+    context: Context,
+    channel: M3UChannel,
+    playlist: com.aeriotv.android.core.data.db.entity.PlaylistEntity?,
+    viewModel: com.aeriotv.android.feature.playlist.PlaylistViewModel,
+): TvMenuAction? {
+    if (playlist == null || channel.dispatcharrChannelId == null) return null
+    if (!playlist.isDispatcharrDirectConnect() || !playlist.canSwitchStream()) return null
+    val target = !channel.isRadio
+    val label = if (target) "Mark as Radio Channel" else "Unmark Radio Channel"
+    return TvMenuAction(label, Icons.Filled.Radio) {
+        viewModel.toggleChannelRadio(channel, target) { error ->
+            android.widget.Toast.makeText(
+                context.applicationContext,
+                switchStreamFailureMessage("update the radio flag", RADIO_FLAG_DENIED_MESSAGE, error),
+                android.widget.Toast.LENGTH_LONG,
+            ).show()
+        }
     }
 }

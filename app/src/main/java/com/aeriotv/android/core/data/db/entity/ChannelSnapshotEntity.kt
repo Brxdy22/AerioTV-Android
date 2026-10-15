@@ -48,6 +48,8 @@ data class ChannelSnapshotEntity(
     val catchupDays: Int = 0,
     /** Timeshift stream id (Dispatcharr Channel.id / XC stream_id), or null. */
     val catchupStreamId: String? = null,
+    /** Server-declared radio channel ([com.aeriotv.android.core.data.M3UChannel.isRadio]). */
+    val isRadio: Boolean = false,
     /** GH #27: #KODIPROP DRM signalling, persisted so encrypted-DASH
      *  channels stay playable from a cache-restored cold launch. */
     val drmLicenseType: String? = null,

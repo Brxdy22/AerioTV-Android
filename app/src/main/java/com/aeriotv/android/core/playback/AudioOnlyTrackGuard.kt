@@ -141,7 +141,7 @@ class AudioOnlyTrackGuard(
                 firstAudioWallMs = now
                 firstAudioTimeUs = timeUs
                 // Radio Mode: the first audio sample is enough.
-                if (policy != AudioOnlyStartPolicy.REQUESTED) return
+                if (policy != AudioOnlyStartPolicy.REQUESTED && policy != AudioOnlyStartPolicy.DECLARED) return
             }
             if (!endTracksRequested) return
             val elapsed = now - firstAudioWallMs

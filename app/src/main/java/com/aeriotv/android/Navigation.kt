@@ -1127,6 +1127,21 @@ fun AerioTVNavHost(
                         // still prompts (the router names it "TV").
                         val liveCast = castSenderNav.state.value as?
                             com.aeriotv.android.core.cast.AerioCastSender.State.Connected
+                        // A server-declared radio channel opens Radio Mode
+                        // (same entry as the long-press item). Casting, the
+                        // companion link, a Multiview, and the menu's Watch
+                        // keep today's path.
+                        if (liveCast == null && companionTvName == null &&
+                            com.aeriotv.android.feature.player.RadioSelect.maybeOpen(
+                                navHostContext,
+                                channel,
+                                state.epgByChannel[channel.guideMatchKey]?.nowPlaying()?.title.orEmpty(),
+                            ) { miniVmNav.dismiss() }
+                        ) {
+                            tuneSettingsVm.setLastWatchedChannelId(channel.id)
+                            tuneSettingsVm.recordRecentChannel(channel.id)
+                            return@MainScaffold
+                        }
                         android.util.Log.i(
                             "AerioCast",
                             "CastPlayWhere: channel tap ${channel.name} session=${liveCast != null} companion=${companionTvName != null}",

@@ -427,6 +427,15 @@ class PlaylistViewModel @Inject constructor(
         bootstrap()
         observeMemoryPressure()
         observeUpstreamLayering()
+        // Server-declared radio channels of the ACTIVE playlist, for the
+        // player's declared audio-only start (playlist-scoped: replaced whole).
+        viewModelScope.launch {
+            _state.map { s -> s.channels }.distinctUntilChanged { a, b -> a === b }.collect { list ->
+                com.aeriotv.android.core.playback.DeclaredRadioChannels.replace(
+                    list.asSequence().filter { it.isRadio }.map { it.id }.toSet(),
+                )
+            }
+        }
     }
 
     /**
@@ -2501,6 +2510,26 @@ class PlaylistViewModel @Inject constructor(
     ): List<com.aeriotv.android.core.network.DispatcharrChannelStream> =
         runCatching { repository.listDispatcharrChannelStreams(channelIntPk) }
             .getOrDefault(emptyList())
+
+    /**
+     * Mark as Radio Channel / Unmark Radio Channel (admin, Direct Connect).
+     * On 2xx the channel in [state] flips at once (and the player's declared
+     * set), so the menu wording and the next pick follow without a refresh.
+     */
+    suspend fun setChannelRadio(channel: M3UChannel, isRadio: Boolean): Result<Unit> =
+        runCatching { repository.setDispatcharrChannelRadio(channel, isRadio) }.map {
+            com.aeriotv.android.core.playback.DeclaredRadioChannels.set(channel.id, isRadio)
+            _state.update { s ->
+                s.copy(channels = s.channels.map { if (it.id == channel.id) it.copy(isRadio = isRadio) else it })
+            }
+        }
+
+    /** Menu entry for [setChannelRadio]: fire and forget, [onError] on failure. */
+    fun toggleChannelRadio(channel: M3UChannel, isRadio: Boolean, onError: (Throwable) -> Unit) {
+        viewModelScope.launch {
+            setChannelRadio(channel, isRadio).onFailure(onError)
+        }
+    }
 
     /** Switch Stream reorder (admin). Result failure carries the exception. */
     suspend fun saveChannelStreamOrder(channelIntPk: Int, streamIds: List<Int>): Result<Unit> =

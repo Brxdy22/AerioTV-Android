@@ -1269,7 +1269,9 @@ class AerioExoPlayerHolder @Inject constructor(
         if (hasVideo) AudioOnlyChannelMemory.forget(key, "video track on this tune")
         // A Radio Mode cut is no evidence about the channel; only a normal
         // tune that ended audio-only teaches the memory.
-        if (now && !radioVideoOff) AudioOnlyChannelMemory.remember(key)
+        // A declared radio channel is no evidence either: the server's flag
+        // already decides its start, so it never writes the memory.
+        if (now && !radioVideoOff && !DeclaredRadioChannels.isFlagged(key)) AudioOnlyChannelMemory.remember(key)
         if (now == _audioOnly.value) return
         _audioOnly.value = now
         if (now) {
@@ -2438,11 +2440,17 @@ class AerioExoPlayerHolder @Inject constructor(
      *   video PID while 2 s of audio media time AND 1 s of wall time pass.
      *   Any video byte clears the memory; video after the call restarts the
      *   tune as a video program.
+     * - DECLARED: the server flags the channel radio (DeclaredRadioChannels:
+     *   Dispatcharr effective_is_radio, M3U radio="true", XC radio_streams)
+     *   on a normal tune (the Watch artwork player). Same drop as REQUESTED;
+     *   video after the call restarts the tune as video and the channel
+     *   falls back to the normal rule for this channel list.
      * - UNKNOWN: everything else, including every regular video channel:
      *   unchanged (4 s wall with a silent video PID, 12 s if it sent bytes).
      */
     private fun audioOnlyPolicyFor(key: String?): AudioOnlyStartPolicy = when {
         radioVideoOff -> AudioOnlyStartPolicy.REQUESTED
+        DeclaredRadioChannels.isDeclared(key) -> AudioOnlyStartPolicy.DECLARED
         AudioOnlyChannelMemory.isRemembered(key) -> AudioOnlyStartPolicy.REMEMBERED
         else -> AudioOnlyStartPolicy.UNKNOWN
     }
@@ -2472,6 +2480,11 @@ class AerioExoPlayerHolder @Inject constructor(
                 AudioOnlyStartPolicy.REMEMBERED -> {
                     Log.i(TAG, "[AUDIO-ONLY] video appeared after optimistic audio-only start; restarting as video ch=$key")
                     reprimeSameUrl("video after optimistic audio-only start")
+                }
+                AudioOnlyStartPolicy.DECLARED -> {
+                    DeclaredRadioChannels.markVideoSeen(key)
+                    Log.i(TAG, "[AUDIO-ONLY] video appeared on a declared radio channel; restarting as video ch=$key")
+                    reprimeSameUrl("video on a declared radio channel")
                 }
                 AudioOnlyStartPolicy.UNKNOWN -> Unit
             }

@@ -1467,12 +1467,14 @@ internal fun ChannelRow(
             // Rendered as the shared centered TvActionMenuDialog on TV (this
             // row is reachable with a remote via the Favorites tab) and as
             // the anchored DropdownMenu on phone. Same actions either way.
+            val flagVm: PlaylistViewModel? = if (menuOpen) hiltViewModel() else null
             if (isTv) {
-                if (menuOpen) {
+                if (menuOpen && flagVm != null) {
                     TvActionMenuDialog(
                         title = channel.name,
                         actions = buildList {
                             com.aeriotv.android.feature.player.radioMenuAction(context, channel, nowProgramme?.title.orEmpty())?.let { add(it) }
+                            com.aeriotv.android.feature.player.radioFlagMenuAction(context, channel, flagVm.state.value.playlist, flagVm)?.let { add(it) }
                             add(
                                 TvMenuAction(
                                     if (isFavorite) "Remove from Favorites" else "Add to Favorites",
@@ -1545,7 +1547,7 @@ internal fun ChannelRow(
                         onDismiss = { menuOpen = false },
                     )
                 }
-            } else if (menuOpen) {
+            } else if (menuOpen && flagVm != null) {
                 // Phone and tablet: Material 3 modal bottom sheet, the same
                 // surface the guide cell uses (Logan 2026-09-09). Apple
                 // cardMenuItems order (ChannelListView.swift:3217): Watch,
@@ -1554,8 +1556,9 @@ internal fun ChannelRow(
                     title = channel.name,
                     subtitle = nowProgramme?.title ?: " ",
                     actions = buildList {
-                        add(TvMenuAction("Watch", Icons.Filled.PlayArrow) { onPlay() })
+                        add(TvMenuAction("Watch", Icons.Filled.PlayArrow) { com.aeriotv.android.feature.player.RadioSelect.watchAsVideo { onPlay() } })
                         com.aeriotv.android.feature.player.radioMenuAction(context, channel, nowProgramme?.title.orEmpty())?.let { add(it) }
+                        com.aeriotv.android.feature.player.radioFlagMenuAction(context, channel, flagVm.state.value.playlist, flagVm)?.let { add(it) }
                         add(
                             TvMenuAction(
                                 if (isFavorite) "Remove from Favorites" else "Add to Favorites",

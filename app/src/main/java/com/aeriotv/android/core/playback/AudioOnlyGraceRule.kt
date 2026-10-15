@@ -34,6 +34,8 @@ object AudioOnlyGraceRule {
      *   [REMEMBERED_AUDIO_MEDIA_MS] of audio media time AND
      *   [REMEMBERED_WALL_MS] of wall time passed. One video byte drops back
      *   to the unknown rule (and the holder clears the memory).
+     * - [AudioOnlyStartPolicy.DECLARED] (the server flags the channel radio):
+     *   the first audio sample, like REQUESTED.
      * - [AudioOnlyStartPolicy.UNKNOWN] (every other channel, including every
      *   normal video channel): unchanged, [shouldDrop] above.
      */
@@ -43,7 +45,7 @@ object AudioOnlyGraceRule {
         audioMediaMs: Long,
         videoReceivedBytes: Boolean,
     ): Boolean = when (policy) {
-        AudioOnlyStartPolicy.REQUESTED -> true
+        AudioOnlyStartPolicy.REQUESTED, AudioOnlyStartPolicy.DECLARED -> true
         AudioOnlyStartPolicy.REMEMBERED ->
             (!videoReceivedBytes && audioMediaMs >= REMEMBERED_AUDIO_MEDIA_MS && elapsedWallMs >= REMEMBERED_WALL_MS) ||
                 shouldDrop(elapsedWallMs, videoReceivedBytes)
@@ -59,4 +61,8 @@ enum class AudioOnlyStartPolicy(val logName: String) {
     UNKNOWN("unknown (4 s wall grace, 12 s if the video PID sends bytes)"),
     REMEMBERED("remembered audio-only (2 s audio / 1 s wall, zero video bytes)"),
     REQUESTED("Radio Mode requested (no video wait)"),
+    /** The server flags the channel radio (is_radio / radio="true" /
+     *  radio_streams): drop the video track on the first audio sample;
+     *  video appearing later restarts the tune as video. */
+    DECLARED("declared radio"),
 }

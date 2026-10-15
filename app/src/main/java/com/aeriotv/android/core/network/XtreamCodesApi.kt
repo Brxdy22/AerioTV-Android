@@ -325,6 +325,8 @@ class XtreamCodesApi @Inject constructor() {
          * into a one-line diagnosis.
          */
         val directSource: String,
+        /** `stream_type` "radio_streams": the panel declares this a radio channel. */
+        val isRadio: Boolean = false,
     )
 
     /**
@@ -363,6 +365,7 @@ class XtreamCodesApi @Inject constructor() {
                 categoryId = o.str("category_id").orEmpty(),
                 catchupDays = if (hasArchive && days > 0) days else 0,
                 directSource = o.str("direct_source").orEmpty(),
+                isRadio = o.str("stream_type")?.trim().equals("radio_streams", ignoreCase = true),
             )
         }
 

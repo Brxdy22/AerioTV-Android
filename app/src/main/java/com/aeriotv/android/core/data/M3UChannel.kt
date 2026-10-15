@@ -58,6 +58,14 @@ data class M3UChannel(
      * `stream_id`. Null disables catch-up even if [catchupDays] > 0.
      */
     val catchupStreamId: String? = null,
+    /**
+     * The server declares this channel radio (audio only). Dispatcharr Direct
+     * Connect `effective_is_radio` (falls back to `is_radio`), M3U EXTINF
+     * `radio="true"`, Xtream `stream_type` "radio_streams". A flagged channel
+     * starts on the declared audio-only policy and a plain pick opens Radio
+     * Mode (Apple parity, Logan 2026-10-14).
+     */
+    val isRadio: Boolean = false,
 ) {
     /** True when this channel exposes a replayable archive. */
     val hasCatchup: Boolean get() = catchupDays > 0 && catchupStreamId != null

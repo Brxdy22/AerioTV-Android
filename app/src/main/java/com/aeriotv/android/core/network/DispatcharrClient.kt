@@ -2069,6 +2069,37 @@ class DispatcharrClient @Inject constructor() {
     }
 
     /**
+     * PATCH /api/channels/channels/<id>/ with `{"is_radio": flag}` (Mark as
+     * Radio Channel / Unmark Radio Channel, admin only server-side). Returns
+     * the HTTP status on 2xx; throws [StreamOrderSaveException] otherwise
+     * (same status + server reason shape the Switch Stream save uses).
+     */
+    suspend fun updateChannelIsRadio(
+        baseUrl: String,
+        apiKey: String,
+        channelId: Int,
+        isRadio: Boolean,
+    ): Int {
+        val url = "${baseUrl.trimEnd('/')}/api/channels/channels/$channelId/"
+        val response: HttpResponse = client.patch(url) {
+            applyAuth(apiKey)
+            contentType(ContentType.Application.Json)
+            setBody(JsonObject(mapOf("is_radio" to JsonPrimitive(isRadio))))
+        }
+        if (response.status.value == 403) {
+            throw StreamOrderSaveException(403, dispatcharrErrorReason(runCatching { response.bodyAsText() }.getOrNull()))
+        }
+        unauthorizedCheck(response, url)
+        if (!response.status.isSuccess()) {
+            throw StreamOrderSaveException(
+                response.status.value,
+                dispatcharrErrorReason(runCatching { response.bodyAsText() }.getOrNull()),
+            )
+        }
+        return response.status.value
+    }
+
+    /**
      * GET /api/m3u/accounts/ -- the playlist's M3U source accounts. Used to map
      * a stream's m3u_account id to a human source name in the Switch Stream
      * picker ("which M3U is this stream from"). Direct Connect only.
@@ -2492,7 +2523,16 @@ data class DispatcharrChannel(
      *  playable window at 30 regardless). 0 = no archive. */
     @SerialName("catchup_days")
     val catchupDays: Int = 0,
-)
+    /** Radio flag (Dispatcharr dev 2026-10-14): copied from the source stream. */
+    @SerialName("is_radio")
+    val isRadio: Boolean? = null,
+    /** Read-only: [isRadio] after the channel-profile override. Preferred. */
+    @SerialName("effective_is_radio")
+    val effectiveIsRadio: Boolean? = null,
+) {
+    /** effective_is_radio, falling back to is_radio on servers without it. */
+    val radio: Boolean get() = effectiveIsRadio ?: isRadio ?: false
+}
 
 /**
  * One member stream of a Dispatcharr channel, from

@@ -3041,6 +3041,30 @@ class PlaylistRepository @Inject constructor(
     }
 
     /**
+     * Mark as Radio Channel / Unmark Radio Channel (admin, Direct Connect):
+     * PATCH is_radio on the channel, then flip the cached snapshot row so a
+     * cache-restored launch agrees. Returns the HTTP status; throws on
+     * failure (StreamOrderSaveException carries the status).
+     */
+    suspend fun setDispatcharrChannelRadio(channel: M3UChannel, isRadio: Boolean): Int {
+        val playlist = activePlaylist() ?: error("No active playlist")
+        val pk = channel.dispatcharrChannelId ?: error("Not a Dispatcharr channel")
+        val base = effectiveBaseUrl(playlist)
+        val status = try {
+            dispatcharrAuth.withApiKeyRetry(playlist.id) { key ->
+                dispatcharrClient.updateChannelIsRadio(base, key, pk, isRadio)
+            }
+        } catch (e: Exception) {
+            val code = (e as? com.aeriotv.android.core.network.DispatcharrHttpFailure)?.status
+            android.util.Log.w("PlaylistRepository", "[DISPATCHARR] is_radio -> $isRadio channel=${channel.name} status=${code ?: "error"} (${e.message})")
+            throw e
+        }
+        android.util.Log.i("PlaylistRepository", "[DISPATCHARR] is_radio -> $isRadio channel=${channel.name} status=$status")
+        runCatching { channelSnapshotDao.setRadio(playlist.id, channel.id, isRadio) }
+        return status
+    }
+
+    /**
      * Map of Dispatcharr M3U account id -> source name, to label each alternate
      * in the Switch Stream sheet with the M3U it comes from. Empty for
      * non-Dispatcharr sources, no active playlist, or on any failure (the sheet
@@ -3443,6 +3467,7 @@ class PlaylistRepository @Inject constructor(
                 channelNumber = s.num?.toString(),
                 catchupDays = s.catchupDays,
                 catchupStreamId = if (s.catchupDays > 0) s.streamId.toString() else null,
+                isRadio = s.isRadio,
             )
         }
         migrateUrlKeyedChannelIds(channels)
@@ -3862,6 +3887,7 @@ class PlaylistRepository @Inject constructor(
                         // XC layer exposes it as stream_id). Gate on BOTH
                         // flags so a stale/partial payload can't produce a
                         // dead Watch affordance.
+                        isRadio = ch.radio,
                         catchupDays = if (catchupEnabled && ch.isCatchup) ch.catchupDays else 0,
                         catchupStreamId = if (catchupEnabled && ch.isCatchup && ch.catchupDays > 0) {
                             ch.id.toString()
@@ -4214,6 +4240,7 @@ private fun ChannelSnapshotEntity.toChannel(): M3UChannel = M3UChannel(
     dispatcharrChannelId = dispatcharrChannelId,
     catchupDays = catchupDays,
     catchupStreamId = catchupStreamId,
+    isRadio = isRadio,
 )
 
 private fun M3UChannel.toCacheEntity(
@@ -4234,6 +4261,7 @@ private fun M3UChannel.toCacheEntity(
     dispatcharrChannelId = dispatcharrChannelId,
     catchupDays = catchupDays,
     catchupStreamId = catchupStreamId,
+    isRadio = isRadio,
     drmLicenseType = drmLicenseType,
     drmLicenseKey = drmLicenseKey,
     fetchedAt = fetchedAt,

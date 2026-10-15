@@ -201,6 +201,8 @@ object M3UParser {
             tvgLogo = attrs["tvg-logo"].orEmpty(),
             channelNumber = attrs["tvg-chno"]?.trim()?.takeIf { it.isNotBlank() },
             rawAttributes = attrs.filterKeys { it in EPG_ID_ATTR_KEYS }.ifEmpty { emptyMap() },
+            // Dispatcharr M3U output: radio="true" on radio channels.
+            isRadio = attrs["radio"]?.trim().equals("true", ignoreCase = true),
             drmLicenseType = kodiProps?.get("inputstream.adaptive.license_type")
                 ?.takeIf { it.isNotBlank() },
             drmLicenseKey = kodiProps?.get("inputstream.adaptive.license_key")
