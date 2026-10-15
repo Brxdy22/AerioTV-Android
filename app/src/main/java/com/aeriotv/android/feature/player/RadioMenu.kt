@@ -65,7 +65,7 @@ object RadioSelect {
      * audio), while a Multiview runs, or while casting.
      */
     fun maybeOpen(context: Context, channel: M3UChannel, subtitle: String, beforeStart: () -> Unit = {}): Boolean {
-        if (!channel.isRadio || bypass || RadioMode.isActive) return false
+        if (!com.aeriotv.android.core.playback.DeclaredRadioChannels.isFlagged(channel.id) || bypass || RadioMode.isActive) return false
         if (com.aeriotv.android.feature.multiview.MultiviewBackground.state.value != null) return false
         val action = radioMenuAction(context, channel, subtitle, beforeStart) ?: return false
         android.util.Log.i(TAG, "[RADIO] declared radio channel picked; opening Radio Mode ch=${channel.name}")
@@ -91,7 +91,7 @@ fun radioFlagMenuAction(
 ): TvMenuAction? {
     if (playlist == null || channel.dispatcharrChannelId == null) return null
     if (!playlist.isDispatcharrDirectConnect() || !playlist.canSwitchStream()) return null
-    val target = !channel.isRadio
+    val target = !com.aeriotv.android.core.playback.DeclaredRadioChannels.isFlagged(channel.id)
     val label = if (target) "Mark as Radio Channel" else "Unmark Radio Channel"
     return TvMenuAction(label, Icons.Filled.Radio) {
         viewModel.toggleChannelRadio(channel, target) { error ->
