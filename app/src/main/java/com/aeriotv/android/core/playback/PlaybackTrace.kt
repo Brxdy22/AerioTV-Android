@@ -413,6 +413,16 @@ class PlaybackTracer {
     fun worstGapMs(): Long = feedSnapshot(now()).second
 
     /**
+     * Longest COMPLETED stretch without bytes (a gap that a byte has already
+     * ended) whose end landed after [sinceMs] (elapsedRealtime), or 0. The
+     * audio-only hold-back rule reads it: unlike [worstGapMs] it never counts
+     * the gap still in progress, so the value is the full measured gap.
+     */
+    fun completedGapSinceMs(sinceMs: Long): Long = synchronized(feedLock) {
+        feedGaps.filter { it.first > sinceMs }.maxOfOrNull { it.second } ?: 0L
+    }
+
+    /**
      * Buffered media time gained per unit of wall clock over the trailing
      * [MEDIA_WINDOW_MS]. Null until the ring spans [MEDIA_WINDOW_MIN_MS], so an
      * early stall is never judged on a half-filled window.
