@@ -124,6 +124,9 @@ fun GuideGrid(
     remoteAction: (RemoteSlot) -> GuideRemoteAction,
     /** Host-level actions (group pills, mini player, program info, search). Return true if handled. */
     onHostAction: (GuideRemoteAction) -> Boolean,
+    /** Hands the host this grid's action runner, so the guide's mapped Back
+     *  and Hold Back run the same code as every other mapped press. */
+    onActionRunner: ((GuideRemoteAction) -> Boolean) -> Unit = {},
     focusRequester: FocusRequester,
     /** False while the TV sidebar's Shift guide pane owns focus beside the grid. */
     focusEnabled: Boolean = true,
@@ -239,6 +242,7 @@ fun GuideGrid(
             else -> onHostAction(action)
         }
     }
+    androidx.compose.runtime.SideEffect { onActionRunner(runAction) }
     // UP out of the grid must land on the CURRENT tab's pill (Logan
     // 2026-09-02), never on whichever pill is geometrically nearest: the nav
     // switches tabs on focus, so a geometric search opened On Demand.

@@ -104,7 +104,32 @@ private val GUIDE_ARROW_SLOTS = setOf(
     RemoteSlot.RIGHT_SHORT, RemoteSlot.RIGHT_LONG,
 )
 
+/** Guide Back and Hold Back (Logan 2026-10-15). The double-Back rules and the
+ *  Radio Mode shortcuts stay fixed, and with a mini up on TV the mini owns
+ *  Back, so the mini-only close action is not offered. */
+private val GUIDE_BACK_SLOTS = listOf(RemoteSlot.BACK_SHORT, RemoteSlot.BACK_LONG)
+
+private val GUIDE_BACK_CHOICES = listOf(
+    GuideRemoteAction.BACK_LADDER,
+    GuideRemoteAction.FOCUS_GROUP_PILLS,
+    GuideRemoteAction.JUMP_TO_NOW,
+    GuideRemoteAction.JUMP_TO_TOP,
+    GuideRemoteAction.JUMP_TO_DAY,
+    GuideRemoteAction.PAGE_UP,
+    GuideRemoteAction.PAGE_DOWN,
+    GuideRemoteAction.TIMELINE_BACK,
+    GuideRemoteAction.TIMELINE_FORWARD,
+    GuideRemoteAction.PROGRAM_INFO,
+    GuideRemoteAction.OPEN_SEARCH,
+    GuideRemoteAction.RESUME_PLAYER,
+    GuideRemoteAction.NONE,
+)
+
 private fun guideActionChoices(slot: RemoteSlot): List<GuideRemoteAction> = buildList {
+    if (slot in GUIDE_BACK_SLOTS) {
+        addAll(GUIDE_BACK_CHOICES)
+        return@buildList
+    }
     if (slot in GUIDE_ARROW_SLOTS) {
         add(GuideRemoteAction.FOCUS_GROUP_PILLS)
         add(GuideRemoteAction.TIMELINE_BACK)
@@ -156,6 +181,8 @@ private val RemoteSlot.displayName: String
         RemoteSlot.REWIND -> "Rewind"
         RemoteSlot.CHANNEL_UP -> "Channel Up"
         RemoteSlot.CHANNEL_DOWN -> "Channel Down"
+        RemoteSlot.BACK_SHORT -> "Back"
+        RemoteSlot.BACK_LONG -> "Hold Back"
     }
 
 private val PlayerRemoteAction.displayName: String
@@ -210,6 +237,7 @@ private val GuideRemoteAction.displayName: String
         GuideRemoteAction.PLAY -> "Play channel"
         GuideRemoteAction.NAVIGATE -> "Move focus"
         GuideRemoteAction.OPEN_SEARCH -> "Search"
+        GuideRemoteAction.BACK_LADDER -> "Back ladder (top channel, then close)"
         GuideRemoteAction.NONE -> "Do nothing"
     }
 
@@ -340,6 +368,16 @@ fun RemoteControlSettingsScreen(
                         SlotRow(
                             slotName = slot.displayName,
                             valueName = map.guideAction(slot, groupSelector == "sidebar").displayName(groupSelector == "sidebar"),
+                            onClick = { editingGuideSlot = slot },
+                        )
+                    }
+                    GUIDE_BACK_SLOTS.forEach { slot ->
+                        SlotRow(
+                            slotName = slot.displayName,
+                            valueName = map.guideAction(slot, groupSelector == "sidebar").displayName(groupSelector == "sidebar"),
+                            subtitle = if (slot == RemoteSlot.BACK_SHORT) {
+                                "Single press. Pressing twice quickly and the Radio Mode shortcuts are fixed."
+                            } else null,
                             onClick = { editingGuideSlot = slot },
                         )
                     }
@@ -557,16 +595,25 @@ private fun SlotRow(
     slotName: String,
     valueName: String,
     onClick: () -> Unit,
+    subtitle: String? = null,
 ) {
     SettingsRowContainer(onClick = onClick) {
         // Same title size and weight as every other Settings row.
-        Text(
-            text = slotName,
-            style = com.aeriotv.android.ui.settings.settingsRowTitleStyle(),
-            color = MaterialTheme.colorScheme.onBackground,
-            fontWeight = FontWeight.Medium,
-            modifier = Modifier.weight(1f),
-        )
+        androidx.compose.foundation.layout.Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = slotName,
+                style = com.aeriotv.android.ui.settings.settingsRowTitleStyle(),
+                color = MaterialTheme.colorScheme.onBackground,
+                fontWeight = FontWeight.Medium,
+            )
+            if (subtitle != null) {
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
         if (valueName.isNotEmpty()) {
             Spacer(Modifier.width(12.dp))
             Text(

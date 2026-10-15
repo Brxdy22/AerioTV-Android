@@ -1126,7 +1126,27 @@ fun GuideScreen(
             }
         }
     }
-    BackHandler(enabled = tabActive && !(miniActive && uiModeTv) && !groupSidebarOpen && menuFor == null && programInfoTarget == null && recordTarget == null) {
+    // Remote Control map, guide Back (Logan 2026-10-15): on TV a single Back
+    // runs the guide map's backShort slot (default BACK_LADDER, the ladder
+    // above). Phone and tablet keep the ladder; their Back is not a remote.
+    val gridRunner = remember { arrayOfNulls<(com.aeriotv.android.core.remote.GuideRemoteAction) -> Boolean>(1) }
+    val runGuideMapped: (com.aeriotv.android.core.remote.GuideRemoteAction, String) -> Unit = { action, press ->
+        android.util.Log.i("AerioTV", "[GUIDE] $press Back -> ${action.wire}")
+        when (action) {
+            com.aeriotv.android.core.remote.GuideRemoteAction.BACK_LADDER -> runGuideBackLadder()
+            com.aeriotv.android.core.remote.GuideRemoteAction.NONE -> Unit
+            else -> { (gridRunner[0] ?: hostAction)(action) }
+        }
+    }
+    val runMappedBack: () -> Unit = {
+        if (uiModeTv) {
+            runGuideMapped(remoteMap.guideAction(com.aeriotv.android.core.remote.RemoteSlot.BACK_SHORT, sidebarGroupMode), "single")
+        } else {
+            runGuideBackLadder()
+        }
+    }
+    val guideBackEnabled = tabActive && !(miniActive && uiModeTv) && !groupSidebarOpen && menuFor == null && programInfoTarget == null && recordTarget == null
+    BackHandler(enabled = guideBackEnabled) {
         if (miniActive) android.util.Log.i("AerioTV", "[GUIDE] Back with mini up (touch): guide ladder, app stays open")
         if (miniPlayerVm.session.expandInFlight()) {
             android.util.Log.i("AerioTV", "[GUIDE] Back ignored: mini expand in flight")
@@ -1147,11 +1167,25 @@ fun GuideScreen(
             radioPendingBack[0] = radioBackScope.launch {
                 kotlinx.coroutines.delay(com.aeriotv.android.feature.player.PlayerDoubleBack.WINDOW_MS)
                 radioPendingBack[0] = null
-                runGuideBackLadder()
+                runMappedBack()
             }
         } else {
-            runGuideBackLadder()
+            runMappedBack()
         }
+    }
+    // Hold Back (guide map backLong, Logan 2026-10-15). Registered with the
+    // Activity only while this guide owns Back on TV and the slot is mapped;
+    // MainActivity then runs it on a hold released before the exit-prompt
+    // hold (EXIT_PROMPT_HOLD_MS), and a longer hold still raises Exit AerioTV?.
+    val backLongAction = remoteMap.guideAction(com.aeriotv.android.core.remote.RemoteSlot.BACK_LONG, sidebarGroupMode)
+    val holdBackOwned = uiModeTv && guideBackEnabled &&
+        backLongAction != com.aeriotv.android.core.remote.GuideRemoteAction.NONE
+    val latestBackLong = androidx.compose.runtime.rememberUpdatedState(backLongAction)
+    androidx.compose.runtime.DisposableEffect(holdBackOwned) {
+        val activity = context.findActivity() as? com.aeriotv.android.MainActivity
+        val hook: () -> Unit = { runGuideMapped(latestBackLong.value, "hold") }
+        if (holdBackOwned) activity?.guideHoldBackAction = hook
+        onDispose { if (activity?.guideHoldBackAction === hook) activity.guideHoldBackAction = null }
     }
 
     // Phone drawer rows: collections where their pill placement puts them,
@@ -1427,6 +1461,7 @@ fun GuideScreen(
                 },
                 remoteAction = { slot -> remoteMap.guideAction(slot, sidebarGroupMode) },
                 onHostAction = hostAction,
+                onActionRunner = { gridRunner[0] = it },
                 focusRequester = gridFocus,
                 // Shift guide: the docked pane owns focus; the grid rejoins on
                 // close. Disabled only once focus has left the grid, so turning

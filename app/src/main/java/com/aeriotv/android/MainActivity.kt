@@ -465,6 +465,7 @@ class MainActivity : ComponentActivity() {
             // Arm long-press tracking; the action is decided in onKeyLongPress
             // (resume) or onKeyUp (normal short back).
             event.startTracking()
+            if (event.repeatCount > 0) promoteArmedHoldToExit(event)
             return true
         }
         return super.onKeyDown(keyCode, event)
@@ -472,6 +473,23 @@ class MainActivity : ComponentActivity() {
 
     /** downTime of the Back hold that last raised the exit prompt. */
     private var lastHoldBackDownTime = Long.MIN_VALUE
+
+    /** The guide's mapped Hold Back action; set by GuideScreen only while the
+     *  guide owns Back on TV and the backLong slot is not "Do nothing". */
+    var guideHoldBackAction: (() -> Unit)? = null
+
+    /** downTime of a Back hold armed for [guideHoldBackAction]. */
+    private var armedHoldBackDownTime = Long.MIN_VALUE
+
+    /** Raises the exit prompt for an armed hold that reached [EXIT_PROMPT_HOLD_MS]. */
+    private fun promoteArmedHoldToExit(event: KeyEvent): Boolean {
+        if (event.downTime != armedHoldBackDownTime) return false
+        if (event.eventTime - event.downTime < EXIT_PROMPT_HOLD_MS) return false
+        armedHoldBackDownTime = Long.MIN_VALUE
+        lastHoldBackDownTime = event.downTime
+        showExitPrompt("hold")
+        return true
+    }
 
     override fun onKeyLongPress(keyCode: Int, event: KeyEvent): Boolean {
         // Issue #16: holding BACK on Android TV surfaces the "close AerioTV?"
@@ -499,6 +517,16 @@ class MainActivity : ComponentActivity() {
             // press reached this handler twice in the guide (Streamer
             // 2026-10-14, two "source=hold" lines, same timestamp).
             if (event.downTime == lastHoldBackDownTime) return true
+            // Guide Hold Back mapped (Logan 2026-10-15): the long-press only
+            // ARMS here. Released before EXIT_PROMPT_HOLD_MS it runs the mapped
+            // action (onKeyUp); held that long it raises the fixed Exit
+            // AerioTV? prompt instead (onKeyDown repeats). One press, one action.
+            if (guideHoldBackAction != null &&
+                exoWindowState.mode.value != com.aeriotv.android.feature.player.ExoWindowState.Mode.Fullscreen
+            ) {
+                armedHoldBackDownTime = event.downTime
+                return true
+            }
             lastHoldBackDownTime = event.downTime
             showExitPrompt("hold")
             return true
@@ -521,7 +549,14 @@ class MainActivity : ComponentActivity() {
             // A handled long-press cancels this up -> ignore it. Otherwise it's
             // a short press: run the normal back through the dispatcher so the
             // existing BackHandlers / nav still work.
-            if (event.isCanceled) return true
+            if (event.isCanceled) {
+                if (event.downTime == armedHoldBackDownTime && !promoteArmedHoldToExit(event)) {
+                    armedHoldBackDownTime = Long.MIN_VALUE
+                    android.util.Log.i("AerioTV", "[BACK] guide Hold Back mapped action")
+                    guideHoldBackAction?.invoke()
+                }
+                return true
+            }
             onBackPressedDispatcher.onBackPressed()
             return true
         }
@@ -1484,6 +1519,10 @@ class MainActivity : ComponentActivity() {
          *  HOLD_LEFT_ALL_PILL_REPEAT (Android starts auto-repeating ~400ms after
          *  the press, so 4 repeats is ~0.5s -- a hold, not a tap). */
         const val MINI_CLOSE_HOLD_REPEAT = 4
+
+        /** With the guide's Hold Back mapped, the Exit AerioTV? prompt moves
+         *  to this longer hold; the mapped action runs on a shorter one. */
+        const val EXIT_PROMPT_HOLD_MS = 1_500L
 
         /** How long (ms) a held D-pad Right stays pinned after it closed the mini
          *  player, so the still-held Right holds guide focus in place until the

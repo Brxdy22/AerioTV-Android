@@ -20,8 +20,12 @@ import kotlinx.serialization.json.put
  * ```
  *
  * Design invariants (do not relax without a plan change):
- * - Back is NEVER a slot: the Back/mini-player/guide-ladder model is
- *   device-verified canon and stays hardcoded.
+ * - Back is a slot in the GUIDE map only (backShort / backLong, Logan
+ *   2026-10-15). The player's Back, the guide's double-Back rules (top
+ *   channel with a mini, stop Radio Mode), the Radio Mode single-Back
+ *   deferral, and the hold-Back Exit AerioTV? prompt stay hardcoded.
+ * - One press (key plus short or hold) holds exactly one action per
+ *   context; a stored blob that repeats a press keeps the first.
  * - Guide SHORT Left/Right default to focus navigation ([GuideRemoteAction.NAVIGATE]);
  *   a remapped short arrow still navigates until focus reaches the edge
  *   of the timeline (see GuideGrid), so the grid can never trap focus.
@@ -40,7 +44,9 @@ enum class RemoteSlot(val wire: String) {
     LEFT_SHORT("leftShort"), LEFT_LONG("leftLong"),
     RIGHT_SHORT("rightShort"), RIGHT_LONG("rightLong"),
     PLAY_PAUSE("playPause"), FFWD("ffwd"), REWIND("rewind"),
-    CHANNEL_UP("channelUp"), CHANNEL_DOWN("channelDown");
+    CHANNEL_UP("channelUp"), CHANNEL_DOWN("channelDown"),
+    /** Guide map only: a single Back press and a Back hold. */
+    BACK_SHORT("backShort"), BACK_LONG("backLong");
 
     companion object {
         fun fromWire(s: String): RemoteSlot? = entries.firstOrNull { it.wire == s }
@@ -91,6 +97,9 @@ enum class GuideRemoteAction(val wire: String) {
     RECORD("record"),
     /** Ordinary D-pad focus movement (short Left/Right default). */
     NAVIGATE("navigate"),
+    /** The guide's built-in Back ladder: back to now and the top channel,
+     *  then the Exit AerioTV? prompt. Default for [RemoteSlot.BACK_SHORT]. */
+    BACK_LADDER("backLadder"),
     NONE("none");
 
     companion object {
@@ -235,6 +244,8 @@ data class RemoteControlMap(
                 RemoteSlot.RIGHT_SHORT to GuideRemoteAction.NAVIGATE,
                 RemoteSlot.RIGHT_LONG to GuideRemoteAction.CLOSE_MINI_PLAYER,
                 RemoteSlot.PLAY_PAUSE to GuideRemoteAction.RESUME_PLAYER,
+                RemoteSlot.BACK_SHORT to GuideRemoteAction.BACK_LADDER,
+                RemoteSlot.BACK_LONG to GuideRemoteAction.NONE,
             ),
         )
 
@@ -256,11 +267,14 @@ data class RemoteControlMap(
                 // lastChannel after the scheme moved it to recentChannels).
                 // Stored slots are only authoritative for CUSTOM.
                 if (preset == RemotePreset.DEFAULT) return DEFAULT
-                var guide = decodeContext(obj["guide"] as? JsonObject) { GuideRemoteAction.fromWire(it) }
+                val firsts = firstPressValues(raw)
+                var guide = decodeContext(obj["guide"] as? JsonObject, firsts["guide"]) { GuideRemoteAction.fromWire(it) }
                 if (obj[GUIDE_KEYS_FIELD] == null) guide = migrateLegacyGuide(guide)
                 RemoteControlMap(
                     preset = preset,
-                    player = decodeContext(obj["player"] as? JsonObject) { PlayerRemoteAction.fromWire(it) },
+                    player = decodeContext(obj["player"] as? JsonObject, firsts["player"]) { PlayerRemoteAction.fromWire(it) }
+                        // Back is never a player slot.
+                        .filterKeys { it != RemoteSlot.BACK_SHORT && it != RemoteSlot.BACK_LONG },
                     guide = guide,
                 )
             }.getOrDefault(DEFAULT)
@@ -286,15 +300,48 @@ data class RemoteControlMap(
             return out
         }
 
+        /** Log sink for decode notes; swapped in unit tests (no android.util.Log there). */
+        internal var log: (String) -> Unit = { msg ->
+            runCatching { android.util.Log.w("AerioTV", msg) }
+        }
+
+        private val contextRegex = Regex("\"(player|guide)\"\\s*:\\s*\\{([^{}]*)\\}")
+        private val pairRegex = Regex("\"([^\"]+)\"\\s*:\\s*\"([^\"]*)\"")
+
+        /**
+         * Conflict rule (Logan 2026-10-15): one press holds exactly one action
+         * per context. A JSON parser keeps the LAST of repeated keys, so the
+         * raw blob is scanned for the FIRST value of each press; later
+         * duplicates are dropped and logged. Returns context -> (press -> value).
+         */
+        internal fun firstPressValues(raw: String): Map<String, Map<String, String>> {
+            val out = mutableMapOf<String, Map<String, String>>()
+            for (ctx in contextRegex.findAll(raw)) {
+                val firsts = linkedMapOf<String, String>()
+                for (pair in pairRegex.findAll(ctx.groupValues[2])) {
+                    val press = pair.groupValues[1]
+                    if (press in firsts) {
+                        log("[REMOTE] duplicate action for $press dropped")
+                    } else {
+                        firsts[press] = pair.groupValues[2]
+                    }
+                }
+                out[ctx.groupValues[1]] = firsts
+            }
+            return out
+        }
+
         private fun <A : Any> decodeContext(
             obj: JsonObject?,
+            firsts: Map<String, String>?,
             action: (String) -> A?,
         ): Map<RemoteSlot, A> {
             if (obj == null) return emptyMap()
             val out = mutableMapOf<RemoteSlot, A>()
             for ((key, value) in obj) {
                 val slot = RemoteSlot.fromWire(key) ?: continue
-                val act = runCatching { action(value.jsonPrimitive.content) }.getOrNull() ?: continue
+                val wire = firsts?.get(key) ?: value.jsonPrimitive.content
+                val act = runCatching { action(wire) }.getOrNull() ?: continue
                 out[slot] = act
             }
             return out

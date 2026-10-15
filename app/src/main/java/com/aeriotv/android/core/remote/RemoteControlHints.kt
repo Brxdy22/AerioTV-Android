@@ -134,6 +134,8 @@ object RemoteControlHints {
         RemoteSlot.REWIND -> "Rewind"
         RemoteSlot.CHANNEL_UP -> "Channel Up"
         RemoteSlot.CHANNEL_DOWN -> "Channel Down"
+        RemoteSlot.BACK_SHORT -> "Back"
+        RemoteSlot.BACK_LONG -> "Hold Back"
     }
 
     /** Strip wording for a guide action; null = nothing worth advertising. */
@@ -154,6 +156,7 @@ object RemoteControlHints {
             GuideRemoteAction.RECORD -> "Record"
             GuideRemoteAction.PLAY -> "Play"
             GuideRemoteAction.OPEN_SEARCH -> "Search"
+            GuideRemoteAction.BACK_LADDER -> "Top channel"
             GuideRemoteAction.NAVIGATE, GuideRemoteAction.NONE -> null
         }
 
@@ -195,9 +198,10 @@ object RemoteControlHints {
      * dispatches (RemoteControlMap.guideAction with the group selector): an
      * unset hold-Left opens the drawer in sidebar mode and browses earlier
      * programs with the pills; a slot left on its default navigation or
-     * play is not advertised. Back is never a map slot: with a mini up the guide's Back belongs
-     * to the mini (single = resume, double = top channel), without one a single
-     * Back walks the guide back to the top channel.
+     * play is not advertised. With a mini up the guide's Back belongs to the
+     * mini (single = resume, double = top channel, fixed); without one the
+     * single Back and Hold Back pairs come from the guide map's backShort and
+     * backLong slots (default: the Back ladder, hold unmapped).
      */
     fun guideStripHints(
         map: RemoteControlMap,
@@ -222,7 +226,15 @@ object RemoteControlHints {
                 add(RemoteHint(slotLabel(slot), it))
             }
         }
-        add(RemoteHint(if (miniActive) "Double Back" else "Back", "Top channel"))
+        if (miniActive) {
+            add(RemoteHint("Double Back", "Top channel"))
+        } else {
+            for (slot in listOf(RemoteSlot.BACK_SHORT, RemoteSlot.BACK_LONG)) {
+                val action = map.guideAction(slot, sidebarGroups)
+                if (action == GuideRemoteAction.CLOSE_MINI_PLAYER || action == GuideRemoteAction.RESUME_PLAYER) continue
+                guideStripAction(action, sidebarGroups)?.let { add(RemoteHint(slotLabel(slot), it)) }
+            }
+        }
         if (radioActive && !miniActive) {
             // Back twice stops Radio Mode (Apple TV parity), the player's pair style.
             add(RemoteHint("Back twice", "Stop"))
