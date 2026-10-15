@@ -1197,6 +1197,12 @@ private fun GridRow(
                 if (cell.startMillis >= ve) break
                 i++
                 if (cell.endMillis <= vs) continue
+                // The 5 minute lead (GuideGridState.leadMs) puts the strip edge
+                // before the first half-hour mark, so a program that already
+                // ended inside the lead drew as an untitled sliver left of the
+                // first header label (Logan 2026-10-15). Leave the lead blank
+                // for those; the airing cell still draws from the edge.
+                if (cell.startMillis < vs && cell.endMillis <= nowMs && cell.endMillis <= vs + state.leadMs) continue
                 val airing = nowMs in cell.startMillis until cell.endMillis
                 val x0 = ((cell.startMillis - vs) * pxPerMs).coerceAtLeast(drawnRight)
                 var x1 = ((cell.endMillis - vs) * pxPerMs).coerceAtMost(stripW)
