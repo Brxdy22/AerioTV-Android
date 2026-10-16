@@ -295,28 +295,28 @@ object WhatsNewContent {
      *  versionName in build.gradle.kts to surface a new sheet on next launch. */
     val CURRENT = listOf(
         WhatsNewItem(
-            title = "Radio Mode",
-            body = "Audio Only is now Radio Mode: listen to a channel with no video from a card above the navigation bar, with a full sheet for channels, skips on the Live Rewind buffer, Options, and Stop. Phones and tablets keep playing in the background.",
+            title = "Radio channels",
+            body = "Channels Dispatcharr marks as radio start as audio and open Radio Mode. Admins can Mark or Unmark a Radio Channel from the long-press menu.",
         ),
         WhatsNewItem(
-            title = "Program Info Button",
-            body = "Guide View and List View toggles, with an info button on list rows and expanded schedule rows.",
+            title = "Radio Mode by Default",
+            body = "A new Player setting opens every channel in Radio Mode. Watch in the long-press menu plays video instead.",
         ),
         WhatsNewItem(
-            title = "Multiview picker",
-            body = "Show Subtitles and Show Descriptions (Settings > Player > Multiview), deselect a channel in the picker, and Back to Guide when leaving a Multiview.",
+            title = "Faster audio-only start",
+            body = "Audio-only channels start and join faster, and Dispatcharr HLS output mode no longer fails every tune.",
         ),
         WhatsNewItem(
-            title = "Remote and display",
-            body = "Learn extra remote buttons and map them to actions, and Match Frame Rate is now its own toggle, separate from resolution.",
+            title = "Android TV",
+            body = "Back twice stops Radio Mode, Back and Hold Back are mappable guide keys, Radio Mode keeps your guide focus, and Multiview from the staging banner keeps tile focus.",
         ),
         WhatsNewItem(
-            title = "Recordings",
-            body = "In-progress recordings offer Resume and reload instead of ending, and recordings honor a custom Left/Right remote map.",
+            title = "Exit AerioTV?",
+            body = "Back that would leave the app now asks first on phones, tablets, and TV.",
         ),
         WhatsNewItem(
             title = "Fixes",
-            body = "Program art for Teamarr and dummy EPG channels, HDR after an SDR channel, the guide no longer blanks in the foreground, and TV focus rings follow each control's shape.",
+            body = "Radio Mode shows Channel Unavailable and recovers, ended programs inside the lead are not drawn, Dispatcharr re-login is rate limited, and List view Back scrolls to the top.",
         ),
     )
 }
