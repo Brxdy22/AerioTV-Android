@@ -422,6 +422,11 @@ class PlaybackTracer {
         feedGaps.filter { it.first > sinceMs }.maxOfOrNull { it.second } ?: 0L
     }
 
+    /** Completed feed gaps (end stamp, gap ms) whose closure is after [sinceMs], oldest first. */
+    fun completedGapsSince(sinceMs: Long): List<Pair<Long, Long>> = synchronized(feedLock) {
+        feedGaps.filter { it.first > sinceMs }
+    }
+
     /**
      * Buffered media time gained per unit of wall clock over the trailing
      * [MEDIA_WINDOW_MS]. Null until the ring spans [MEDIA_WINDOW_MIN_MS], so an

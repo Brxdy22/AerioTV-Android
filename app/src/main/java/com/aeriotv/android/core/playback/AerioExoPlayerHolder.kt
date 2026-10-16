@@ -572,45 +572,290 @@ class AerioExoPlayerHolder @Inject constructor(
     // the hold-back to gap + 2 s (cap 20 s) at once, persists it for the next
     // tune's start gate, and rejoins at it now through the repeat-stall rejoin
     // path without its 60 s / 3 minute gating. Video tunes are untouched.
+    //
+    // In-session growth (2026-10-15, Apple bd635ff, Alt Nation): the
+    // provider's bursts grew from 9 s to 19 to 29 s after the first raise and
+    // the session kept its first hold-back, so the buffer ran empty. Every
+    // later starved closure whose gap + 2 s (rounded up to whole seconds)
+    // passes the current audio-only hold-back raises it at once, persists it,
+    // and rejoins that far back through the local window (one rejoin seek per
+    // 15 s at most, none for a raise under 2 s). Cap 32 s.
     private var audioOnlyBurstHandled = false
     private var audioOnlyBurstSinceMs = 0L
+    private var audioOnlyHandledGapEndMs = 0L
+    private var audioOnlyHoldBackNowMs = 0
+    private var audioOnlyRaiseCount = 0
+    private var audioOnlyLastRejoinSeekAtMs = 0L
+    private var audioOnlyPendingRejoinMs = 0
+    private var audioOnlyCapLogged = false
+    private var audioOnlyRejoinDeferredLogged = false
+    private var audioOnlySpacingLogged = false
+    private var audioOnlyInRejoinWindow = false
+    private var audioOnlyBlockedLogged = false
 
     private fun tickAudioOnlyBurst(now: Long) {
-        if (audioOnlyBurstHandled || !_audioOnly.value) return
+        if (!_audioOnly.value) return
         val url = lastPlayUrl ?: return
-        if (PlaybackTracer.urlKind(url) != "live" || ForceHls.isForcedHlsUrl(url)) return
-        if (isTimeshifting || isCatchup || !hasReachedPlaybackRestart) return
-        if (inSwitchWindow() || switchWatchJob?.isActive == true) return
+        // A rejoin of our own into the local window keeps the live feed
+        // measured; any other timeshift (user rewind) is out.
+        if (ForceHls.isForcedHlsUrl(url)) {
+            tickAudioOnlyBurstHls(url, now)
+            return
+        }
+        val blocked = when {
+            PlaybackTracer.urlKind(url) != "live" -> "kind=${PlaybackTracer.urlKind(url)}"
+            isTimeshifting && !audioOnlyInRejoinWindow -> "timeshifting"
+            isCatchup -> "catch-up"
+            !hasReachedPlaybackRestart -> "not restarted"
+            inSwitchWindow() -> "switch window"
+            switchWatchJob?.isActive == true -> "switch watch"
+            currentChannelIdForRebuild == null -> "no channel id"
+            else -> null
+        }
+        if (blocked != null) {
+            if (!audioOnlyBlockedLogged && tracer.completedGapSinceMs(0L) > AUDIO_ONLY_BURST_MIN_GAP_MS) {
+                audioOnlyBlockedLogged = true
+                Log.i(TAG, "[AVP-HOLDBACK] audio-only bursty rule idle: $blocked")
+            }
+            return
+        }
         val channelId = currentChannelIdForRebuild ?: return
         // Only gaps that end after audio playback began: the opening burst
         // and the time to first byte are not the feed's shape.
         if (audioOnlyBurstSinceMs == 0L) {
             audioOnlyBurstSinceMs = now
+            audioOnlyHandledGapEndMs = now
             return
         }
-        val gapMs = tracer.completedGapSinceMs(audioOnlyBurstSinceMs)
-        if (gapMs <= AUDIO_ONLY_BURST_MIN_GAP_MS) return
-        audioOnlyBurstHandled = true
-        val prior = audioOnlyHoldBackMs(channelId)
-        val want = (gapMs + AUDIO_ONLY_HOLDBACK_HEADROOM_MS).coerceAtMost(AUDIO_ONLY_HOLDBACK_MAX_MS.toLong()).toInt()
-        val target = maxOf(prior, want)
-        Log.i(
-            TAG,
-            "[AVP-HOLDBACK] audio-only bursty feed: gap ${"%.1f".format(gapMs / 1000.0)}s -> " +
-                "hold-back ${"%.1f".format(target / 1000.0)}s now (and for the next tune) " +
-                "channel=${lastPlayTitle ?: "-"}",
-        )
-        if (want <= prior + 500) return
+        if (!audioOnlyBurstHandled) {
+            val gapMs = tracer.completedGapSinceMs(audioOnlyBurstSinceMs)
+            if (gapMs <= AUDIO_ONLY_BURST_MIN_GAP_MS) return
+            audioOnlyBurstHandled = true
+            audioOnlyHandledGapEndMs = tracer.completedGapsSince(audioOnlyBurstSinceMs)
+                .lastOrNull()?.first ?: now
+            val prior = audioOnlyHoldBackMs(channelId)
+            val wanted = audioOnlyWantedMs(gapMs)
+            val want = wanted.coerceAtMost(AUDIO_ONLY_HOLDBACK_MAX_MS)
+            val target = maxOf(prior, want)
+            audioOnlyHoldBackNowMs = target
+            Log.i(
+                TAG,
+                "[AVP-HOLDBACK] audio-only bursty feed: gap ${"%.1f".format(gapMs / 1000.0)}s -> " +
+                    "hold-back ${"%.1f".format(target / 1000.0)}s now (and for the next tune) " +
+                    "channel=${lastPlayTitle ?: "-"}",
+            )
+            logAudioOnlyCapIfNeeded(gapMs, wanted)
+            if (want <= prior + 500) return
+            persistAudioOnlyHoldBack(channelId, target)
+            // Rejoin at it now: the local window when it holds it, else a re-tune
+            // whose start gate is the new hold-back.
+            if (resumeGateEligible() && tryRejoin(now)) {
+                audioOnlyLastRejoinSeekAtMs = now
+                if (isTimeshifting) audioOnlyInRejoinWindow = true
+            }
+            return
+        }
+        // Each starved closure after the first is handled once.
+        val fresh = tracer.completedGapsSince(audioOnlyHandledGapEndMs)
+        if (fresh.isNotEmpty()) {
+            audioOnlyHandledGapEndMs = fresh.last().first
+            val gapMs = fresh.maxOf { it.second }
+            if (gapMs > AUDIO_ONLY_BURST_MIN_GAP_MS) {
+                val wanted = audioOnlyWantedMs(gapMs)
+                val want = wanted.coerceAtMost(AUDIO_ONLY_HOLDBACK_MAX_MS)
+                val was = maxOf(audioOnlyHoldBackNowMs, audioOnlyHoldBackMs(channelId))
+                if (want > was) {
+                    audioOnlyRaiseCount += 1
+                    audioOnlyHoldBackNowMs = want
+                    persistAudioOnlyHoldBack(channelId, want)
+                    Log.i(
+                        TAG,
+                        "[AVP-HOLDBACK] audio-only bursty feed: gap ${"%.1f".format(gapMs / 1000.0)}s -> " +
+                            "hold-back ${want / 1000}s now (was ${"%.0f".format(was / 1000.0)}s, " +
+                            "in-session raise #$audioOnlyRaiseCount) channel=${lastPlayTitle ?: "-"}",
+                    )
+                    if (want - was >= AUDIO_ONLY_MIN_RESEEK_RAISE_MS) {
+                        audioOnlyPendingRejoinMs = maxOf(audioOnlyPendingRejoinMs, want)
+                        audioOnlyRejoinDeferredLogged = false
+                        audioOnlySpacingLogged = false
+                    } else {
+                        if (audioOnlyPendingRejoinMs > 0) {
+                            audioOnlyPendingRejoinMs = maxOf(audioOnlyPendingRejoinMs, want)
+                        }
+                        Log.i(
+                            TAG,
+                            "[AVP-NUDGE] audio-only raise ${was / 1000}s -> ${want / 1000}s under " +
+                                "${AUDIO_ONLY_MIN_RESEEK_RAISE_MS / 1000} s, no rejoin seek",
+                        )
+                    }
+                }
+                logAudioOnlyCapIfNeeded(gapMs, wanted)
+            }
+        }
+        retryAudioOnlyRejoin(now)
+    }
+
+    /**
+     * Developer Force HLS twin of the rule above (2026-10-15): Media3 plays
+     * Dispatcharr's HLS at [forceHlsTargetOffsetMs] behind the edge, so that
+     * offset IS the hold-back. Every starved closure whose gap + 2 s (whole
+     * seconds) passes it raises it at once (cap 32 s), persists it under the
+     * HLS offset key (same TTL), and seeks that far behind the playlist edge
+     * when the live window holds it (one seek per 15 s, none under 2 s). The
+     * cushion keeper then holds the new target.
+     */
+    private fun tickAudioOnlyBurstHls(url: String, now: Long) {
+        val p = player ?: return
+        if (isTimeshifting || isCatchup || !hasReachedPlaybackRestart) return
+        if (PlaybackTracer.urlKind(url) != "live") return
+        val channelId = currentChannelIdForRebuild ?: return
+        if (audioOnlyBurstSinceMs == 0L) {
+            audioOnlyBurstSinceMs = now
+            audioOnlyHandledGapEndMs = now
+            audioOnlyHoldBackNowMs = forceHlsTargetOffsetMs
+            return
+        }
+        val fresh = tracer.completedGapsSince(audioOnlyHandledGapEndMs)
+        if (fresh.isNotEmpty()) {
+            audioOnlyHandledGapEndMs = fresh.last().first
+            val gapMs = fresh.maxOf { it.second }
+            if (gapMs > AUDIO_ONLY_BURST_MIN_GAP_MS) {
+                val wanted = audioOnlyWantedMs(gapMs)
+                val want = wanted.coerceAtMost(AUDIO_ONLY_HOLDBACK_MAX_MS)
+                val was = maxOf(audioOnlyHoldBackNowMs, forceHlsTargetOffsetMs)
+                if (want > was) {
+                    audioOnlyRaiseCount += 1
+                    audioOnlyHoldBackNowMs = want
+                    forceHlsTargetOffsetMs = want
+                    val key = channelId + FORCE_HLS_OFFSET_KEY_SUFFIX
+                    val at = System.currentTimeMillis()
+                    cachedLiveStartBuffers = cachedLiveStartBuffers +
+                        (key to com.aeriotv.android.core.preferences.LearnedStartBuffer(want, at))
+                    prefScope.launch {
+                        cachedLiveStartBuffers = appPreferences.setLiveStartBufferMs(key, want, at)
+                    }
+                    Log.i(
+                        TAG,
+                        "[AVP-HOLDBACK] audio-only bursty feed: gap ${"%.1f".format(gapMs / 1000.0)}s -> " +
+                            "hold-back ${want / 1000}s now (was ${"%.0f".format(was / 1000.0)}s, " +
+                            "in-session raise #$audioOnlyRaiseCount) channel=${lastPlayTitle ?: "-"}",
+                    )
+                    if (want - was >= AUDIO_ONLY_MIN_RESEEK_RAISE_MS) {
+                        audioOnlyPendingRejoinMs = maxOf(audioOnlyPendingRejoinMs, want)
+                        audioOnlyRejoinDeferredLogged = false
+                        audioOnlySpacingLogged = false
+                    } else {
+                        if (audioOnlyPendingRejoinMs > 0) audioOnlyPendingRejoinMs = maxOf(audioOnlyPendingRejoinMs, want)
+                        Log.i(TAG, "[AVP-NUDGE] audio-only raise ${was / 1000}s -> ${want / 1000}s under 2 s, no rejoin seek")
+                    }
+                }
+                logAudioOnlyCapIfNeeded(gapMs, wanted)
+            }
+        }
+        val holdback = audioOnlyPendingRejoinMs
+        if (holdback <= 0 || !p.playWhenReady) return
+        val tl = p.currentTimeline
+        if (tl.isEmpty) return
+        val w = tl.getWindow(p.currentMediaItemIndex, androidx.media3.common.Timeline.Window())
+        if (!w.isLive() || w.durationMs == androidx.media3.common.C.TIME_UNSET) return
+        if (w.durationMs < holdback + REJOIN_WINDOW_MARGIN_MS) {
+            if (!audioOnlyRejoinDeferredLogged) {
+                audioOnlyRejoinDeferredLogged = true
+                Log.i(TAG, "[AVP-NUDGE] audio-only rejoin to ${holdback / 1000} s deferred: live window ${w.durationMs} ms does not hold it yet")
+            }
+            return
+        }
+        if (audioOnlyLastRejoinSeekAtMs != 0L && now - audioOnlyLastRejoinSeekAtMs < AUDIO_ONLY_REJOIN_SPACING_MS) {
+            if (!audioOnlySpacingLogged) {
+                audioOnlySpacingLogged = true
+                Log.i(TAG, "[AVP-NUDGE] audio-only rejoin to ${holdback / 1000} s held: last rejoin seek ${now - audioOnlyLastRejoinSeekAtMs} ms ago (min 15 s)")
+            }
+            return
+        }
+        val have = (w.durationMs - p.currentPosition).coerceAtLeast(0L)
+        audioOnlyPendingRejoinMs = 0
+        if (have >= holdback - 500) return
+        audioOnlyLastRejoinSeekAtMs = now
+        Log.i(TAG, "[HOLDBACK] rejoin: seeking to edge-$holdback ms (audio-only in-session raise, was $have ms, window ${w.durationMs} ms)")
+        p.seekTo(p.currentMediaItemIndex, w.durationMs - holdback)
+    }
+
+    /** gap + 2 s, rounded up to whole seconds (uncapped). */
+    private fun audioOnlyWantedMs(gapMs: Long): Int {
+        val ms = gapMs + AUDIO_ONLY_HOLDBACK_HEADROOM_MS
+        return (((ms + 999) / 1000) * 1000).toInt()
+    }
+
+    private fun persistAudioOnlyHoldBack(channelId: String, ms: Int) {
         val learnedAtMs = System.currentTimeMillis()
         val key = channelId + AUDIO_ONLY_HOLDBACK_KEY_SUFFIX
         cachedLiveStartBuffers = cachedLiveStartBuffers +
-            (key to com.aeriotv.android.core.preferences.LearnedStartBuffer(target, learnedAtMs))
+            (key to com.aeriotv.android.core.preferences.LearnedStartBuffer(ms, learnedAtMs))
         prefScope.launch {
-            cachedLiveStartBuffers = appPreferences.setLiveStartBufferMs(key, target, learnedAtMs)
+            cachedLiveStartBuffers = appPreferences.setLiveStartBufferMs(key, ms, learnedAtMs)
         }
-        // Rejoin at it now: the local window when it holds it, else a re-tune
-        // whose start gate is the new hold-back.
-        if (resumeGateEligible()) tryRejoin(now)
+    }
+
+    /** One line per tune when the audio-only ceiling holds the hold-back below gap + 2 s. */
+    private fun logAudioOnlyCapIfNeeded(gapMs: Long, wantedMs: Int) {
+        if (wantedMs <= AUDIO_ONLY_HOLDBACK_MAX_MS || audioOnlyCapLogged) return
+        audioOnlyCapLogged = true
+        Log.i(
+            TAG,
+            "[AVP-HOLDBACK] audio-only hold-back capped at ${AUDIO_ONLY_HOLDBACK_MAX_MS / 1000}s: " +
+                "gap ${"%.1f".format(gapMs / 1000.0)}s wanted ${wantedMs / 1000}s channel=${lastPlayTitle ?: "-"}",
+        )
+    }
+
+    /** Seeks [audioOnlyPendingRejoinMs] behind the local window's head once the
+     *  window holds that much and 15 s passed since the last audio-only rejoin
+     *  seek; otherwise keeps it pending for the next tick. */
+    private fun retryAudioOnlyRejoin(now: Long) {
+        val holdback = audioOnlyPendingRejoinMs
+        if (holdback <= 0) return
+        if (isCatchup || (isTimeshifting && !audioOnlyInRejoinWindow)) return
+        if (player?.playWhenReady != true && !resumeGateActive) return
+        val window = rewindWindow()
+        val headWallMs = window?.get(1) ?: 0L
+        val windowMs = if (window == null) 0L else (window[1] - window[0]).coerceAtLeast(0L)
+        val usable = windowMs - REJOIN_WINDOW_MARGIN_MS
+        if (window == null || headWallMs <= 0L || usable < holdback) {
+            if (!audioOnlyRejoinDeferredLogged) {
+                audioOnlyRejoinDeferredLogged = true
+                Log.i(
+                    TAG,
+                    "[AVP-NUDGE] audio-only rejoin to ${holdback / 1000} s deferred: local window " +
+                        "$windowMs ms does not hold it yet",
+                )
+            }
+            return
+        }
+        if (audioOnlyLastRejoinSeekAtMs != 0L && now - audioOnlyLastRejoinSeekAtMs < AUDIO_ONLY_REJOIN_SPACING_MS) {
+            if (!audioOnlySpacingLogged) {
+                audioOnlySpacingLogged = true
+                Log.i(
+                    TAG,
+                    "[AVP-NUDGE] audio-only rejoin to ${holdback / 1000} s held: last rejoin seek " +
+                        "${now - audioOnlyLastRejoinSeekAtMs} ms ago (min ${AUDIO_ONLY_REJOIN_SPACING_MS / 1000} s)",
+                )
+            }
+            return
+        }
+        audioOnlyPendingRejoinMs = 0
+        audioOnlyLastRejoinSeekAtMs = now
+        releaseResumeGate("rejoin")
+        Log.i(
+            TAG,
+            "[HOLDBACK] rejoin: seeking back $holdback ms into the local window " +
+                "(audio-only in-session raise, window $windowMs ms)",
+        )
+        if (playTimeshift(headWallMs - holdback)) {
+            audioOnlyInRejoinWindow = true
+            lastRejoinAtMs = now
+            lastLiveUnderrunAtMs = 0L
+        } else {
+            Log.i(TAG, "[HOLDBACK] rejoin: local window entry failed")
+        }
     }
 
     /**
@@ -667,7 +912,7 @@ class AerioExoPlayerHolder @Inject constructor(
         val headWallMs = window?.get(1) ?: 0L
         val windowMs = if (window == null) 0L else (window[1] - window[0]).coerceAtLeast(0L)
         val usable = (windowMs - REJOIN_WINDOW_MARGIN_MS).coerceAtLeast(0L)
-        // Audio-only hold-back may reach 20 s (tickAudioOnlyBurst).
+        // Audio-only hold-back may reach 32 s (tickAudioOnlyBurst).
         val maxBack = if (_audioOnly.value) AUDIO_ONLY_HOLDBACK_MAX_MS.toLong() else REJOIN_MAX_BACK_MS
         val back = minOf(want, usable, maxBack)
         if (back >= REJOIN_MIN_BACK_MS && headWallMs > 0L) {
@@ -2873,6 +3118,7 @@ class AerioExoPlayerHolder @Inject constructor(
         if (!isTimeshifting) return
         isTimeshifting = false
         isAdoptedLive = false
+        audioOnlyInRejoinWindow = false
         timeshift.get().onGoLive()
         val url = lastPlayUrl ?: return
         Log.i(TAG, "[REWIND] go live -> re-tune direct stream")
@@ -3155,6 +3401,15 @@ class AerioExoPlayerHolder @Inject constructor(
         lastLiveUnderrunAtMs = 0L
         audioOnlyBurstHandled = false
         audioOnlyBurstSinceMs = 0L
+        audioOnlyHandledGapEndMs = 0L
+        audioOnlyHoldBackNowMs = 0
+        audioOnlyRaiseCount = 0
+        audioOnlyPendingRejoinMs = 0
+        audioOnlyCapLogged = false
+        audioOnlyRejoinDeferredLogged = false
+        audioOnlySpacingLogged = false
+        audioOnlyInRejoinWindow = false
+        audioOnlyBlockedLogged = false
         lastPlayTitle = title
         lastPlaySubtitle = subtitle
         lastPlayArtworkUri = artworkUri
@@ -4730,7 +4985,12 @@ class AerioExoPlayerHolder @Inject constructor(
          *  gap above this sets the hold-back to gap + headroom, capped. */
         private const val AUDIO_ONLY_BURST_MIN_GAP_MS = 4_000L
         private const val AUDIO_ONLY_HOLDBACK_HEADROOM_MS = 2_000L
-        private const val AUDIO_ONLY_HOLDBACK_MAX_MS = 20_000
+        /** Raised from 20 s on 2026-10-15: Alt Nation's bursts grew to 19 to 29 s mid-session. */
+        private const val AUDIO_ONLY_HOLDBACK_MAX_MS = 32_000
+        /** At most one audio-only in-session rejoin seek per this interval. */
+        private const val AUDIO_ONLY_REJOIN_SPACING_MS = 15_000L
+        /** An in-session raise smaller than this is stored but does not seek. */
+        private const val AUDIO_ONLY_MIN_RESEEK_RAISE_MS = 2_000
         /** Known audio-only tunes start on at least 3 x 2 s segments' worth. */
         private const val AUDIO_ONLY_START_GATE_MIN_MS = 6_000
         private const val AUDIO_ONLY_HOLDBACK_KEY_SUFFIX = "#audio_only_holdback"
@@ -4748,7 +5008,7 @@ class AerioExoPlayerHolder @Inject constructor(
         const val FORCE_HLS_START_GATE_MS = 6_500
         private const val FORCE_HLS_TARGET_OFFSET_MS = ForceHls.DEFAULT_TARGET_OFFSET_MS
         private const val FORCE_HLS_MIN_OFFSET_MS = 8_000L
-        private const val FORCE_HLS_MAX_OFFSET_MS = 30_000L
+        private const val FORCE_HLS_MAX_OFFSET_MS = 34_000L // above the 32 s audio-only hold-back cap
         private const val FORCE_HLS_LEARNED_OFFSET_MAX_MS = 20_000
         private const val FORCE_HLS_OFFSET_KEY_SUFFIX = "#hls_live_offset"
         /** Cushion added on top of the worst observed delivery gap so the feed
