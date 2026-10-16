@@ -456,6 +456,11 @@ class SettingsViewModel @Inject constructor(
     // Player Info Card elements (App Behaviors, Apple parity). All default true;
     // they gate ONLY the in-player program info card.
     // GH #127: Pop Up Info Card on Channel Change (default on).
+    val radioModeByDefault: Flow<Boolean> = prefs.radioModeByDefault
+    fun setRadioModeByDefault(value: Boolean) {
+        viewModelScope.launch { prefs.setRadioModeByDefault(value) }
+    }
+
     val playerShowChannelInfoCard: Flow<Boolean> = prefs.playerShowChannelInfoCard
     fun setPlayerShowChannelInfoCard(value: Boolean) {
         viewModelScope.launch { prefs.setPlayerShowChannelInfoCard(value) }

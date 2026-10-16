@@ -100,6 +100,12 @@ class SyncSettingsViewModel @Inject constructor(
      *  AppPreferences.syncRemoteControlMap for why. Per-device. */
     val syncRemoteControlMap: Flow<Boolean> = prefs.syncRemoteControlMap
 
+    /** Radio Mode by Default slice of App Preferences. Default off, per-device. */
+    val syncRadioModeByDefault: Flow<Boolean> = prefs.syncRadioModeByDefault
+    fun setSyncRadioModeByDefault(value: Boolean) {
+        viewModelScope.launch { prefs.setSyncRadioModeByDefault(value) }
+    }
+
     fun setSyncRemoteControlMap(value: Boolean) {
         viewModelScope.launch { prefs.setSyncRemoteControlMap(value) }
     }

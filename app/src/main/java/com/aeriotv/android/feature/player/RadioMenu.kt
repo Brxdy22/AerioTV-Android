@@ -51,6 +51,11 @@ object RadioSelect {
     private const val TAG = "AerioRadio"
     @Volatile private var bypass = false
 
+    /** Mirror of Settings > Player > Radio Mode by Default (AppPreferences
+     *  radioModeByDefault), kept current by Navigation. When true every pick
+     *  takes the declared radio path below. */
+    @Volatile var byDefault = false
+
     /** Run [play] as a plain Watch: no Radio Mode auto-open for this call. */
     fun watchAsVideo(play: () -> Unit) {
         bypass = true
@@ -65,10 +70,11 @@ object RadioSelect {
      * audio), while a Multiview runs, or while casting.
      */
     fun maybeOpen(context: Context, channel: M3UChannel, subtitle: String, beforeStart: () -> Unit = {}): Boolean {
-        if (!com.aeriotv.android.core.playback.DeclaredRadioChannels.isFlagged(channel.id) || bypass || RadioMode.isActive) return false
+        val declared = com.aeriotv.android.core.playback.DeclaredRadioChannels.isFlagged(channel.id)
+        if (!(declared || byDefault) || bypass || RadioMode.isActive) return false
         if (com.aeriotv.android.feature.multiview.MultiviewBackground.state.value != null) return false
         val action = radioMenuAction(context, channel, subtitle, beforeStart) ?: return false
-        android.util.Log.i(TAG, "[RADIO] declared radio channel picked; opening Radio Mode ch=${channel.name}")
+        android.util.Log.i(TAG, "[RADIO] ${if (declared) "declared radio channel" else "Radio Mode by Default"} pick; opening Radio Mode ch=${channel.name}")
         action.onClick()
         return true
     }

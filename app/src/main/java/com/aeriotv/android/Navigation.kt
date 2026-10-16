@@ -912,6 +912,13 @@ fun AerioTVNavHost(
                     hiltViewModel()
                 val tuneStartsInMini by tuneSettingsVm.guideTuneInMini
                     .collectAsStateWithLifecycle(initialValue = false)
+                // Settings > Player > Radio Mode by Default, mirrored for the
+                // synchronous pick decision in RadioSelect.maybeOpen.
+                LaunchedEffect(tuneSettingsVm) {
+                    tuneSettingsVm.radioModeByDefault.collect {
+                        com.aeriotv.android.feature.player.RadioSelect.byDefault = it
+                    }
+                }
                 val playerEntryNav = remember {
                     dagger.hilt.android.EntryPointAccessors.fromApplication(
                         context.applicationContext,

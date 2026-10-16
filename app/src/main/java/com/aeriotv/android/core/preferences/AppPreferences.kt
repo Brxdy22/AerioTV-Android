@@ -545,6 +545,30 @@ class AppPreferences @Inject constructor(
     }
 
     /**
+     * Settings > Player > Radio Mode by Default (Discord request, Apple key
+     * radioModeByDefault). Default OFF. When on, every live channel pick goes
+     * the declared radio path (RadioSelect.maybeOpen); the long-press Watch
+     * still plays video. Stays out of the Drive snapshot unless this device
+     * opts in with [syncRadioModeByDefault].
+     */
+    val radioModeByDefault: Flow<Boolean> =
+        store.data.map { it[KEY_RADIO_MODE_BY_DEFAULT] ?: false }
+    suspend fun setRadioModeByDefault(value: Boolean) {
+        store.edit { it[KEY_RADIO_MODE_BY_DEFAULT] = value }
+    }
+
+    /**
+     * Whether THIS device shares Radio Mode by Default through Drive sync.
+     * Default OFF (slice of App Preferences, like [syncRemoteControlMap]).
+     * Never synced itself; gates both push and pull.
+     */
+    val syncRadioModeByDefault: Flow<Boolean> =
+        store.data.map { it[KEY_SYNC_RADIO_MODE_BY_DEFAULT] ?: false }
+    suspend fun setSyncRadioModeByDefault(value: Boolean) {
+        store.edit { it[KEY_SYNC_RADIO_MODE_BY_DEFAULT] = value }
+    }
+
+    /**
      * Remote hint strip (Logan 2026-09-11): the single "key  action" line
      * shown under the tab bar on Live TV and as the last row of the player
      * controls. Default ON; the toggle lives at the top of Settings >
@@ -1690,6 +1714,10 @@ class AppPreferences @Inject constructor(
         if (data[KEY_SYNC_REMOTE_CONTROL_MAP] != false) {
             data[KEY_REMOTE_CONTROL_MAP]?.takeIf { it.isNotBlank() }?.let { out["remoteControlMap"] = it }
         }
+        // Slice gate (see syncRadioModeByDefault). Absent reads as false: opt-in.
+        if (data[KEY_SYNC_RADIO_MODE_BY_DEFAULT] == true) {
+            data[KEY_RADIO_MODE_BY_DEFAULT]?.let { out["radioModeByDefault"] = it.toString() }
+        }
         data[KEY_GUIDE_GROUP_SELECTOR]?.let { out["guideGroupSelector"] = it }
         data[KEY_GUIDE_SIDEBAR_LAYOUT]?.let { out["guideSidebarLayout"] = it }
         data[KEY_PHONE_GROUP_SELECTOR]?.let { out["phoneGroupSelector"] = it }
@@ -1756,6 +1784,9 @@ class AppPreferences @Inject constructor(
                     if (prefs[KEY_SYNC_REMOTE_CONTROL_MAP] != false) {
                         put("remoteControlMap", KEY_REMOTE_CONTROL_MAP)
                     }
+                    if (prefs[KEY_SYNC_RADIO_MODE_BY_DEFAULT] == true) {
+                        put("radioModeByDefault", KEY_RADIO_MODE_BY_DEFAULT)
+                    }
                     put("guideGroupSelector", KEY_GUIDE_GROUP_SELECTOR)
                     put("guideSidebarLayout", KEY_GUIDE_SIDEBAR_LAYOUT)
                     put("phoneGroupSelector", KEY_PHONE_GROUP_SELECTOR)
@@ -1801,6 +1832,9 @@ class AppPreferences @Inject constructor(
             keys["appleTVChannelFlip"]?.toBooleanStrictOrNull()?.let { prefs[KEY_APPLE_TV_CHANNEL_FLIP] = it }
             if (prefs[KEY_SYNC_REMOTE_CONTROL_MAP] != false) {
                 keys["remoteControlMap"]?.let { prefs[KEY_REMOTE_CONTROL_MAP] = it }
+            }
+            if (prefs[KEY_SYNC_RADIO_MODE_BY_DEFAULT] == true) {
+                keys["radioModeByDefault"]?.toBooleanStrictOrNull()?.let { prefs[KEY_RADIO_MODE_BY_DEFAULT] = it }
             }
             keys["guideGroupSelector"]?.let { prefs[KEY_GUIDE_GROUP_SELECTOR] = it }
             keys["guideSidebarLayout"]?.let { prefs[KEY_GUIDE_SIDEBAR_LAYOUT] = it }
@@ -2344,6 +2378,8 @@ class AppPreferences @Inject constructor(
         val KEY_REMOTE_CONTROL_MAP = stringPreferencesKey("remote_control_map")
         val KEY_REMOTE_LEARNED_BUTTONS = stringPreferencesKey("remote_learned_buttons")
         val KEY_SYNC_REMOTE_CONTROL_MAP = booleanPreferencesKey("sync_remote_control_map")
+        val KEY_RADIO_MODE_BY_DEFAULT = booleanPreferencesKey("radio_mode_by_default")
+        val KEY_SYNC_RADIO_MODE_BY_DEFAULT = booleanPreferencesKey("sync_radio_mode_by_default")
         val KEY_GUIDE_GROUP_SELECTOR = stringPreferencesKey("guide_group_selector")
         val KEY_GUIDE_SIDEBAR_LAYOUT = stringPreferencesKey("guide_sidebar_layout")
         val KEY_PHONE_GROUP_SELECTOR = stringPreferencesKey("phone_group_selector")

@@ -10,6 +10,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.PlaylistPlay
+import androidx.compose.material.icons.filled.Radio
 import androidx.compose.material.icons.filled.CropFree
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.CropSquare
@@ -85,6 +86,8 @@ fun PlayerSettingsScreen(
     val playerPrefsScope = androidx.compose.runtime.rememberCoroutineScope()
     val skipWithoutControls by playerPrefs.skipWithoutControls.collectAsStateWithLifecycle(initialValue = false)
 
+    val radioModeByDefault by viewModel.radioModeByDefault
+        .collectAsStateWithLifecycle(initialValue = false)
     val showChannelInfoCard by viewModel.playerShowChannelInfoCard
         .collectAsStateWithLifecycle(initialValue = true)
     val cardChannelLogo by viewModel.playerCardShowChannelLogo
@@ -216,6 +219,23 @@ fun PlayerSettingsScreen(
                         leadingIcon = if (isTv) Icons.Filled.FilterNone else null,
                         checked = showChannelInfoCard,
                         onCheckedChange = viewModel::setPlayerShowChannelInfoCard,
+                    )
+                }
+
+                // MARK: Radio Mode
+                //
+                // Radio Mode by Default (Discord request, Apple parity): every
+                // live channel pick opens Radio Mode; the long-press Watch
+                // still plays video. Default off.
+                SettingsSection(
+                    header = "Radio Mode",
+                    footer = RADIO_MODE_BY_DEFAULT_FOOTER,
+                ) {
+                    SettingsToggleRow(
+                        title = "Radio Mode by Default",
+                        leadingIcon = if (isTv) Icons.Filled.Radio else null,
+                        checked = radioModeByDefault,
+                        onCheckedChange = viewModel::setRadioModeByDefault,
                     )
                 }
 
@@ -705,3 +725,6 @@ private const val LIVE_REWIND_FOOTER =
 interface PlayerSettingsEntryPoint {
     fun appPreferences(): com.aeriotv.android.core.preferences.AppPreferences
 }
+
+private const val RADIO_MODE_BY_DEFAULT_FOOTER =
+    "Every channel opens in Radio Mode. Long-press a channel and choose Watch to play video."

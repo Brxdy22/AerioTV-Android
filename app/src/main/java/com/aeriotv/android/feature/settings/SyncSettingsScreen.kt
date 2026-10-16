@@ -26,6 +26,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Radio
 import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.CloudDownload
 import androidx.compose.material.icons.filled.CloudOff
@@ -967,6 +968,16 @@ fun SyncCategoriesScreen(
                                     subtitle = "Your customized remote button assignments. Turn this off on a TV whose remote is a different model from your others.",
                                     checked = shareRemoteMap,
                                     onCheckedChange = { viewModel.setSyncRemoteControlMap(it) },
+                                    enabled = masterEnabled,
+                                )
+                                val shareRadioDefault by viewModel.syncRadioModeByDefault
+                                    .collectAsStateWithLifecycle(initialValue = false)
+                                SyncTileToggleRow(
+                                    icon = Icons.Filled.Radio,
+                                    title = "Radio Mode by Default",
+                                    subtitle = "Whether every channel opens in Radio Mode. Off by default, so each device keeps its own choice.",
+                                    checked = shareRadioDefault,
+                                    onCheckedChange = { viewModel.setSyncRadioModeByDefault(it) },
                                     enabled = masterEnabled,
                                 )
                             }
