@@ -2,6 +2,9 @@ package com.aeriotv.android.feature.livetv
 
 import com.aeriotv.android.ui.theme.textAccent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -1010,9 +1013,16 @@ private fun DraggablePhoneGroupDrawer(
     androidx.compose.runtime.SideEffect { drag?.drawerWidthPx = widthPx }
     val progress = remember { androidx.compose.animation.core.Animatable(if (open) 1f else 0f) }
     val dragPx = drag?.dragPx
-    val dragging = dragPx != null
-    LaunchedEffect(dragPx, widthPx) {
-        if (dragPx != null) progress.snapTo((dragPx / widthPx).coerceIn(0f, 1f))
+    // Logan 2026-10-16: an open drawer closes by dragging it (or the scrim)
+    // toward the leading edge. Travel toward the edge while that drag is live.
+    var closePx by remember { mutableStateOf<Float?>(null) }
+    val dragging = dragPx != null || closePx != null
+    LaunchedEffect(dragPx, closePx, widthPx) {
+        val c = closePx
+        when {
+            dragPx != null -> progress.snapTo((dragPx / widthPx).coerceIn(0f, 1f))
+            c != null -> progress.snapTo((1f - c / widthPx).coerceIn(0f, 1f))
+        }
     }
     LaunchedEffect(open, dragging) {
         if (!dragging) {
@@ -1028,31 +1038,111 @@ private fun DraggablePhoneGroupDrawer(
     if (p <= 0f && !open && !dragging) return
     val rtl = androidx.compose.ui.platform.LocalLayoutDirection.current ==
         androidx.compose.ui.unit.LayoutDirection.Rtl
+    val dismiss by androidx.compose.runtime.rememberUpdatedState(onDismiss)
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .graphicsLayer { alpha = p }
-            .background(Color.Black.copy(alpha = 0.45f))
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = { if (open) onDismiss() },
-            ),
-    )
-    Box(
-        modifier = Modifier
-            .fillMaxHeight()
-            .width(drawerWidth)
-            .graphicsLayer {
-                val hidden = (1f - p) * widthPx
-                translationX = if (rtl) hidden else -hidden
+            .pointerInput(open, rtl, widthPx) {
+                if (!open) return@pointerInput
+                closeDragDetector(
+                    rtl = rtl,
+                    widthPx = widthPx,
+                    onDrag = { closePx = it },
+                    onEnd = { commit ->
+                        if (commit) {
+                            android.util.Log.i("AerioFocus", "[GROUPS] drag closed sidebar")
+                            dismiss()
+                        }
+                        // Same frame as dismiss(): the spring settles from here.
+                        closePx = null
+                    },
+                )
+            },
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .graphicsLayer { alpha = p }
+                .background(Color.Black.copy(alpha = 0.45f))
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = { if (open) onDismiss() },
+                ),
+        )
+        Box(
+            modifier = Modifier
+                .fillMaxHeight()
+                .width(drawerWidth)
+                .graphicsLayer {
+                    val hidden = (1f - p) * widthPx
+                    translationX = if (rtl) hidden else -hidden
+                }
+                .background(MaterialTheme.colorScheme.background)
+                .clickable(
+                    interactionSource = remember { MutableInteractionSource() },
+                    indication = null,
+                    onClick = {},
+                )
+                .statusBarsPadding(),
+        ) { content() }
+    }
+}
+
+/**
+ * Close drag for the open drawer: observes on the Initial pass and claims a
+ * gesture only once it is horizontal-dominant past touch slop and heading to
+ * the leading edge, so the drawer list's vertical scroll, row taps and pin
+ * stay with their children. A pointer still down past the long-press timeout
+ * without being claimed belongs to long-press reorder and is left alone.
+ * Release closes past 40% of [widthPx] or on an outward fling over 300 dp/s.
+ */
+private suspend fun androidx.compose.ui.input.pointer.PointerInputScope.closeDragDetector(
+    rtl: Boolean,
+    widthPx: Float,
+    onDrag: (Float) -> Unit,
+    onEnd: (Boolean) -> Unit,
+) {
+    val slop = viewConfiguration.touchSlop
+    val longPressMs = viewConfiguration.longPressTimeoutMillis
+    val flingPx = 300.dp.toPx()
+    awaitEachGesture {
+        val down = awaitFirstDown(
+            requireUnconsumed = false,
+            pass = androidx.compose.ui.input.pointer.PointerEventPass.Initial,
+        )
+        val velocity = androidx.compose.ui.input.pointer.util.VelocityTracker()
+        velocity.addPosition(down.uptimeMillis, down.position)
+        var dx = 0f
+        var dy = 0f
+        var tracking = false
+        var released = false
+        var travel = 0f
+        try {
+            while (true) {
+                val event = awaitPointerEvent(androidx.compose.ui.input.pointer.PointerEventPass.Initial)
+                val change = event.changes.firstOrNull { it.id == down.id } ?: break
+                velocity.addPosition(change.uptimeMillis, change.position)
+                if (!change.pressed) { released = true; break }
+                val d = change.position - change.previousPosition
+                // Positive = toward the leading edge (closing).
+                dx += if (rtl) d.x else -d.x
+                dy += d.y
+                if (!tracking) {
+                    if (change.uptimeMillis - down.uptimeMillis > longPressMs) break
+                    if (kotlin.math.abs(dy) > slop && kotlin.math.abs(dy) >= kotlin.math.abs(dx)) break
+                    if (dx < -slop) break
+                    if (dx > slop && dx > kotlin.math.abs(dy)) tracking = true else continue
+                }
+                change.consume()
+                travel = (dx - slop).coerceIn(0f, widthPx)
+                onDrag(travel)
             }
-            .background(MaterialTheme.colorScheme.background)
-            .clickable(
-                interactionSource = remember { MutableInteractionSource() },
-                indication = null,
-                onClick = {},
-            )
-            .statusBarsPadding(),
-    ) { content() }
+        } finally {
+            if (tracking) {
+                val vx = velocity.calculateVelocity().x.let { if (rtl) it else -it }
+                onEnd(released && (travel > widthPx * 0.4f || vx > flingPx))
+            }
+        }
+    }
 }
