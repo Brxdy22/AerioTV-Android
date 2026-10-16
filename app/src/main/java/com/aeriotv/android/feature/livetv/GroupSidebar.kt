@@ -2,6 +2,7 @@ package com.aeriotv.android.feature.livetv
 
 import com.aeriotv.android.ui.theme.textAccent
 import androidx.compose.foundation.background
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
@@ -922,57 +923,32 @@ internal fun PhoneGroupDrawerHost(
     /** Thumbtack tap pins the default group; see [PhoneGroupDrawer]. */
     onSetDefault: ((String) -> Unit)? = null,
     hiddenGroupCount: Int = 0,
+    /**
+     * Apple issue #102: when non-null the drawer is driven by one progress
+     * value (0 closed, 1 open) so an edge swipe can slide it out under the
+     * finger. Open and close from the header button animate the same value.
+     * Null (the guide) still animates the same way, just without a drag.
+     */
+    edgeDrag: EdgeDrawerDragState? = null,
 ) {
     // One width for the surface AND the slide animation: the drawer fits its
     // longest label instead of a fixed 78 percent of the screen.
     val drawerWidth = rememberPhoneDrawerWidth(tokens, labelFor)
     androidx.activity.compose.BackHandler(enabled = open) { onDismiss() }
-    androidx.compose.animation.AnimatedVisibility(
-        visible = open,
-        enter = androidx.compose.animation.fadeIn(),
-        exit = androidx.compose.animation.fadeOut(),
+    DraggablePhoneGroupDrawer(
+        open = open, onDismiss = onDismiss, drawerWidth = drawerWidth, drag = edgeDrag,
     ) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .background(Color.Black.copy(alpha = 0.45f))
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = onDismiss,
-                ),
+        PhoneGroupDrawer(
+            tokens = tokens,
+            selected = selected,
+            defaultToken = defaultToken,
+            labelFor = labelFor,
+            onSelect = { onSelect(it); onDismiss() },
+            onReorder = onReorder,
+            onManageGroups = onManageGroups,
+            onSetDefault = onSetDefault,
+            hiddenGroupCount = hiddenGroupCount,
         )
-    }
-    androidx.compose.animation.AnimatedVisibility(
-        visible = open,
-        enter = androidx.compose.animation.slideInHorizontally { -it },
-        exit = androidx.compose.animation.slideOutHorizontally { -it },
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxHeight()
-                .width(drawerWidth)
-                .background(MaterialTheme.colorScheme.background)
-                // Swallow taps so they never reach the scrim below.
-                .clickable(
-                    interactionSource = remember { MutableInteractionSource() },
-                    indication = null,
-                    onClick = {},
-                )
-                .statusBarsPadding(),
-        ) {
-            PhoneGroupDrawer(
-                tokens = tokens,
-                selected = selected,
-                defaultToken = defaultToken,
-                labelFor = labelFor,
-                onSelect = { onSelect(it); onDismiss() },
-                onReorder = onReorder,
-                onManageGroups = onManageGroups,
-                onSetDefault = onSetDefault,
-                hiddenGroupCount = hiddenGroupCount,
-            )
-        }
     }
 }
 
@@ -1007,4 +983,76 @@ internal fun RevealPrependedGroups(
             listState.scrollToItem(0)
         }
     }
+}
+
+/**
+ * Live drag state shared by the edge-swipe detector and
+ * [PhoneGroupDrawerHost]. [dragPx] is the finger's travel toward the content
+ * while an edge swipe is in flight (null otherwise); the host publishes its
+ * measured [drawerWidthPx] so the caller can decide open versus closed.
+ */
+@androidx.compose.runtime.Stable
+internal class EdgeDrawerDragState {
+    var dragPx by androidx.compose.runtime.mutableStateOf<Float?>(null)
+    var drawerWidthPx by androidx.compose.runtime.mutableFloatStateOf(1f)
+}
+
+@Composable
+private fun DraggablePhoneGroupDrawer(
+    open: Boolean,
+    onDismiss: () -> Unit,
+    drawerWidth: Dp,
+    drag: EdgeDrawerDragState?,
+    content: @Composable () -> Unit,
+) {
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    val widthPx = with(density) { drawerWidth.toPx() }.coerceAtLeast(1f)
+    androidx.compose.runtime.SideEffect { drag?.drawerWidthPx = widthPx }
+    val progress = remember { androidx.compose.animation.core.Animatable(if (open) 1f else 0f) }
+    val dragPx = drag?.dragPx
+    val dragging = dragPx != null
+    LaunchedEffect(dragPx, widthPx) {
+        if (dragPx != null) progress.snapTo((dragPx / widthPx).coerceIn(0f, 1f))
+    }
+    LaunchedEffect(open, dragging) {
+        if (!dragging) {
+            progress.animateTo(
+                if (open) 1f else 0f,
+                androidx.compose.animation.core.spring(
+                    stiffness = androidx.compose.animation.core.Spring.StiffnessMediumLow,
+                ),
+            )
+        }
+    }
+    val p = progress.value
+    if (p <= 0f && !open && !dragging) return
+    val rtl = androidx.compose.ui.platform.LocalLayoutDirection.current ==
+        androidx.compose.ui.unit.LayoutDirection.Rtl
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .graphicsLayer { alpha = p }
+            .background(Color.Black.copy(alpha = 0.45f))
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = { if (open) onDismiss() },
+            ),
+    )
+    Box(
+        modifier = Modifier
+            .fillMaxHeight()
+            .width(drawerWidth)
+            .graphicsLayer {
+                val hidden = (1f - p) * widthPx
+                translationX = if (rtl) hidden else -hidden
+            }
+            .background(MaterialTheme.colorScheme.background)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null,
+                onClick = {},
+            )
+            .statusBarsPadding(),
+    ) { content() }
 }

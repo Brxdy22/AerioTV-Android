@@ -250,6 +250,7 @@ fun ChannelListScreen(
     // Apple issue #102: edge swipe opens the drawer and replaces the group swipe.
     val edgeSwipeSetting by settingsVm.liveTvEdgeSwipeOpensSidebar.collectAsStateWithLifecycle(initialValue = false)
     val edgeSwipeMode = phoneSidebarMode && edgeSwipeSetting
+    val edgeDrawerDrag = remember { com.aeriotv.android.feature.livetv.EdgeDrawerDragState() }
     // Multiview staging for the phone row menu (same store the guide's cell
     // menu toggles).
     val multiviewStore = rememberMultiviewStoreHandle()
@@ -673,7 +674,9 @@ fun ChannelListScreen(
         else if (edgeSwipeMode) Modifier
             .fillMaxSize()
             .then(
-                Modifier.edgeSwipeOpensSidebar(enabled = !phoneDrawerOpen) { phoneDrawerOpen = true },
+                Modifier.edgeSwipeOpensSidebar(enabled = !phoneDrawerOpen, drag = edgeDrawerDrag) {
+                    phoneDrawerOpen = true
+                },
             )
         else Modifier
             .fillMaxSize()
@@ -829,6 +832,7 @@ fun ChannelListScreen(
     if (!isTv) com.aeriotv.android.feature.livetv.PhoneGroupDrawerHost(
         open = phoneDrawerOpen,
         onDismiss = { phoneDrawerOpen = false },
+        edgeDrag = edgeDrawerDrag,
         tokens = drawerTokens,
         selected = state.selectedGroup,
         defaultToken = defaultGroupToken,

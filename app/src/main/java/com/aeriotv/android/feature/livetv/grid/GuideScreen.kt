@@ -51,7 +51,9 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.ui.text.input.ImeAction
 import com.aeriotv.android.feature.collections.AddToCollectionFlow
 import com.aeriotv.android.feature.collections.CollectionPill
+import androidx.compose.ui.platform.LocalDensity
 import com.aeriotv.android.feature.livetv.LiveTvPhoneCircle
+import com.aeriotv.android.feature.livetv.edgeSwipeOpensSidebar
 import com.aeriotv.android.feature.livetv.LiveTvPhoneHeaderRow
 import com.aeriotv.android.feature.livetv.PhoneGroupDrawerHost
 import com.aeriotv.android.feature.livetv.ManageGroupsSheet
@@ -231,6 +233,10 @@ fun GuideScreen(
     val phoneGroupSelector by settingsVm.phoneGroupSelector.collectAsStateWithLifecycle()
     val phoneSidebarMode = !isTv && phoneGroupSelector != "pills" && !favoritesOnly
     var phoneDrawerOpen by remember { mutableStateOf(false) }
+    // Apple issue #102 (Logan 2026-10-16): with the setting on, a drag toward
+    // the content that starts on the channel column slides the drawer out.
+    val edgeSwipeSetting by settingsVm.liveTvEdgeSwipeOpensSidebar.collectAsStateWithLifecycle()
+    val edgeDrawerDrag = remember { com.aeriotv.android.feature.livetv.EdgeDrawerDragState() }
     val remoteMap by settingsVm.remoteControlMap.collectAsStateWithLifecycle()
     val tabActive = com.aeriotv.android.feature.main.LocalTabIsActive.current
     var groupSidebarOpen by remember { mutableStateOf(false) }
@@ -1539,7 +1545,16 @@ fun GuideScreen(
                 focusEnabled = !(sidebarShiftMode && groupSidebarOpen && !gridHasFocus),
                 onGridFocusChanged = { gridHasFocus = it },
                 traceGates = traceGates,
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier.fillMaxSize().then(
+                    with(LocalDensity.current) {
+                        Modifier.edgeSwipeOpensSidebar(
+                            enabled = phoneSidebarMode && edgeSwipeSetting && !phoneDrawerOpen,
+                            drag = edgeDrawerDrag,
+                            railBandPx = railWidth.toPx(),
+                            topExcludePx = headerHeight.toPx(),
+                        ) { phoneDrawerOpen = true }
+                    },
+                ),
             )
             }
             }
@@ -1653,6 +1668,7 @@ fun GuideScreen(
         PhoneGroupDrawerHost(
             open = phoneDrawerOpen,
             onDismiss = { phoneDrawerOpen = false },
+            edgeDrag = edgeDrawerDrag,
             tokens = drawerTokens,
             selected = state.selectedGroup,
             defaultToken = defaultGroupToken,
