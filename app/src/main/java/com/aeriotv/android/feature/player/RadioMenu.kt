@@ -56,6 +56,12 @@ object RadioSelect {
      *  takes the declared radio path below. */
     @Volatile var byDefault = false
 
+    /** True when a plain pick of [channel] would open Radio Mode (declared
+     *  radio OR Radio Mode by Default). TV long-press menus show Watch first
+     *  exactly then, so video stays one press away (Apple parity). */
+    fun picksOpenRadio(channel: M3UChannel): Boolean =
+        com.aeriotv.android.core.playback.DeclaredRadioChannels.isFlagged(channel.id) || byDefault
+
     /** Run [play] as a plain Watch: no Radio Mode auto-open for this call. */
     fun watchAsVideo(play: () -> Unit) {
         bypass = true

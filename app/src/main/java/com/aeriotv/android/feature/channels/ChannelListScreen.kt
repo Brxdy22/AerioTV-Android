@@ -1487,6 +1487,11 @@ internal fun ChannelRow(
                     TvActionMenuDialog(
                         title = channel.name,
                         actions = buildList {
+                            // Watch first only when a plain Select would open
+                            // Radio Mode (declared radio or Radio Mode by Default).
+                            if (com.aeriotv.android.feature.player.RadioSelect.picksOpenRadio(channel)) {
+                                add(TvMenuAction("Watch", Icons.Filled.PlayArrow) { com.aeriotv.android.feature.player.RadioSelect.watchAsVideo { onPlay() } })
+                            }
                             com.aeriotv.android.feature.player.radioMenuAction(context, channel, nowProgramme?.title.orEmpty())?.let { add(it) }
                             com.aeriotv.android.feature.player.radioFlagMenuAction(context, channel, flagVm.state.value.playlist, flagVm)?.let { add(it) }
                             add(

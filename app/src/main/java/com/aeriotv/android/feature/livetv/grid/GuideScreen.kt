@@ -1795,7 +1795,12 @@ fun GuideScreen(
             )
         } else {
         val actions = buildList {
-            // Apple order: Radio Mode first on TV (no Watch row here).
+            // Apple order on TV: Watch first only when a plain Select would
+            // open Radio Mode (declared radio or Radio Mode by Default), then
+            // Radio Mode.
+            if (isLive && channel.url.isNotBlank() && com.aeriotv.android.feature.player.RadioSelect.picksOpenRadio(channel)) {
+                add(TvMenuAction("Watch", Icons.Filled.PlayArrow) { com.aeriotv.android.feature.player.RadioSelect.watchAsVideo { onChannelClick(channel) } })
+            }
             com.aeriotv.android.feature.player.radioMenuAction(context, channel, if (isLive) cell.title else "") { miniPlayerVm.dismiss() }?.let { add(it) }
             com.aeriotv.android.feature.player.radioFlagMenuAction(context, channel, state.playlist, viewModel)?.let { add(it) }
             add(TvMenuAction(if (isFavorite) "Remove from Favorites" else "Add to Favorites") { favoritesVm.toggle(channel) })
