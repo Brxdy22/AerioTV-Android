@@ -1123,7 +1123,13 @@ private suspend fun androidx.compose.ui.input.pointer.PointerInputScope.closeDra
                 val event = awaitPointerEvent(androidx.compose.ui.input.pointer.PointerEventPass.Initial)
                 val change = event.changes.firstOrNull { it.id == down.id } ?: break
                 velocity.addPosition(change.uptimeMillis, change.position)
-                if (!change.pressed) { released = true; break }
+                if (!change.pressed) {
+                    // Consume the up once claimed so the row under the finger
+                    // never completes a press (no click on release).
+                    if (tracking) change.consume()
+                    released = true
+                    break
+                }
                 val d = change.position - change.previousPosition
                 // Positive = toward the leading edge (closing).
                 dx += if (rtl) d.x else -d.x
