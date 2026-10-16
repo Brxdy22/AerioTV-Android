@@ -107,6 +107,7 @@ fun LiveTvSettingsScreen(
     val defaultLiveTVView by viewModel.defaultLiveTVView.collectAsStateWithLifecycle(initialValue = "")
     val liveTvLayout by viewModel.liveTvLayout.collectAsStateWithLifecycle(initialValue = "basic")
     val phoneGroupSelector by viewModel.phoneGroupSelector.collectAsStateWithLifecycle(initialValue = "sidebar")
+    val edgeSwipeOpensSidebar by viewModel.liveTvEdgeSwipeOpensSidebar.collectAsStateWithLifecycle(initialValue = false)
     val guideGroupSelector by viewModel.guideGroupSelector.collectAsStateWithLifecycle(initialValue = "pills")
     val showEpgBadges by viewModel.showEpgBadges(isTv).collectAsStateWithLifecycle(initialValue = true)
     val hiddenEpgBadges by viewModel.hiddenEpgBadges.collectAsStateWithLifecycle(initialValue = emptySet())
@@ -362,6 +363,20 @@ fun LiveTvSettingsScreen(
                                 selected = if (phoneGroupSelector == "pills") "pills" else "sidebar",
                                 onSelect = viewModel::setPhoneGroupSelector,
                             )
+                        }
+                        // Apple issue #102 parity: only with Sidebar Menu.
+                        if (phoneGroupSelector != "pills") {
+                            SettingsSection(
+                                header = "",
+                                footer = "A swipe in from the left edge opens the group sidebar. " +
+                                    "Swiping left or right to change groups is off while this is on.",
+                            ) {
+                                SettingsToggleRow(
+                                    title = "Swipe from Left Edge Opens Sidebar",
+                                    checked = edgeSwipeOpensSidebar,
+                                    onCheckedChange = viewModel::setLiveTvEdgeSwipeOpensSidebar,
+                                )
+                            }
                         }
                     }
                 }

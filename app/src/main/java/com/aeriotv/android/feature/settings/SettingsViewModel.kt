@@ -380,6 +380,12 @@ class SettingsViewModel @Inject constructor(
     fun setPhoneGroupSelector(mode: String) {
         viewModelScope.launch { prefs.setPhoneGroupSelector(mode) }
     }
+    /** Phone / tablet: swipe in from the start edge opens the group sidebar. */
+    val liveTvEdgeSwipeOpensSidebar: StateFlow<Boolean> = prefs.liveTvEdgeSwipeOpensSidebar
+        .stateIn(viewModelScope, SharingStarted.Eagerly, false)
+    fun setLiveTvEdgeSwipeOpensSidebar(enabled: Boolean) {
+        viewModelScope.launch { prefs.setLiveTvEdgeSwipeOpensSidebar(enabled) }
+    }
 
     /** Live TV tune target: false = fullscreen (default), true = corner mini. */
     val guideTuneInMini: StateFlow<Boolean> = prefs.guideTuneInMini

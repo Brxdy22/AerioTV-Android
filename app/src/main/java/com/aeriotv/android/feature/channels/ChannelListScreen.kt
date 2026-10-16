@@ -17,6 +17,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import com.aeriotv.android.feature.livetv.edgeSwipeOpensSidebar
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -246,6 +247,9 @@ fun ChannelListScreen(
     val phoneGroupSelector by settingsVm.phoneGroupSelector.collectAsStateWithLifecycle(initialValue = "sidebar")
     val phoneSidebarMode = !isTv && phoneGroupSelector != "pills"
     var phoneDrawerOpen by remember { mutableStateOf(false) }
+    // Apple issue #102: edge swipe opens the drawer and replaces the group swipe.
+    val edgeSwipeSetting by settingsVm.liveTvEdgeSwipeOpensSidebar.collectAsStateWithLifecycle(initialValue = false)
+    val edgeSwipeMode = phoneSidebarMode && edgeSwipeSetting
     // Multiview staging for the phone row menu (same store the guide's cell
     // menu toggles).
     val multiviewStore = rememberMultiviewStoreHandle()
@@ -666,6 +670,11 @@ fun ChannelListScreen(
             .fillMaxSize()
             .graphicsLayer { translationX = groupDragOffset.value }
         val groupSwipeGestureModifier = if (isTv) Modifier.fillMaxSize()
+        else if (edgeSwipeMode) Modifier
+            .fillMaxSize()
+            .then(
+                Modifier.edgeSwipeOpensSidebar(enabled = !phoneDrawerOpen) { phoneDrawerOpen = true },
+            )
         else Modifier
             .fillMaxSize()
             .pointerInput(groups) {

@@ -628,6 +628,17 @@ class AppPreferences @Inject constructor(
     }
 
     /**
+     * Phone / tablet (Apple issue #102 parity): with the Sidebar Menu group
+     * selector, a swipe in from the start edge opens the group sidebar and the
+     * left/right group-change swipes are off. Default false.
+     */
+    val liveTvEdgeSwipeOpensSidebar: Flow<Boolean> =
+        store.data.map { it[KEY_LIVE_TV_EDGE_SWIPE_OPENS_SIDEBAR] ?: false }
+    suspend fun setLiveTvEdgeSwipeOpensSidebar(enabled: Boolean) {
+        store.edit { it[KEY_LIVE_TV_EDGE_SWIPE_OPENS_SIDEBAR] = enabled }
+    }
+
+    /**
      * Remote Control (Logan spec 2026-07-20): when true, tuning a channel
      * from the Live TV tab starts it in the corner MINI player (the common
      * IPTV-client two-stage tune) instead of fullscreen. Default false =
@@ -1721,6 +1732,7 @@ class AppPreferences @Inject constructor(
         data[KEY_GUIDE_GROUP_SELECTOR]?.let { out["guideGroupSelector"] = it }
         data[KEY_GUIDE_SIDEBAR_LAYOUT]?.let { out["guideSidebarLayout"] = it }
         data[KEY_PHONE_GROUP_SELECTOR]?.let { out["phoneGroupSelector"] = it }
+        data[KEY_LIVE_TV_EDGE_SWIPE_OPENS_SIDEBAR]?.let { out["liveTvEdgeSwipeOpensSidebar"] = it.toString() }
         data[KEY_GUIDE_TUNE_IN_MINI]?.let { out["guideTuneInMini"] = it.toString() }
         data[KEY_GUIDE_PROGRAM_INFO_BUTTON]?.let { out["guideProgramInfoButton"] = it }
         data[KEY_PLAYER_SHOW_CHANNEL_INFO_CARD]?.let { out["playerShowChannelInfoCard"] = it.toString() }
@@ -1790,6 +1802,7 @@ class AppPreferences @Inject constructor(
                     put("guideGroupSelector", KEY_GUIDE_GROUP_SELECTOR)
                     put("guideSidebarLayout", KEY_GUIDE_SIDEBAR_LAYOUT)
                     put("phoneGroupSelector", KEY_PHONE_GROUP_SELECTOR)
+                    put("liveTvEdgeSwipeOpensSidebar", KEY_LIVE_TV_EDGE_SWIPE_OPENS_SIDEBAR)
                     put("guideTuneInMini", KEY_GUIDE_TUNE_IN_MINI)
                     put("guideProgramInfoButton", KEY_GUIDE_PROGRAM_INFO_BUTTON)
                     put("playerShowChannelInfoCard", KEY_PLAYER_SHOW_CHANNEL_INFO_CARD)
@@ -1839,6 +1852,8 @@ class AppPreferences @Inject constructor(
             keys["guideGroupSelector"]?.let { prefs[KEY_GUIDE_GROUP_SELECTOR] = it }
             keys["guideSidebarLayout"]?.let { prefs[KEY_GUIDE_SIDEBAR_LAYOUT] = it }
             keys["phoneGroupSelector"]?.let { prefs[KEY_PHONE_GROUP_SELECTOR] = it }
+            keys["liveTvEdgeSwipeOpensSidebar"]?.toBooleanStrictOrNull()
+                ?.let { prefs[KEY_LIVE_TV_EDGE_SWIPE_OPENS_SIDEBAR] = it }
             keys["guideTuneInMini"]?.toBooleanStrictOrNull()?.let { prefs[KEY_GUIDE_TUNE_IN_MINI] = it }
             keys["guideProgramInfoButton"]?.takeIf { it in GuideProgramInfoButton.VALUES }
                 ?.let { prefs[KEY_GUIDE_PROGRAM_INFO_BUTTON] = it }
@@ -2383,6 +2398,7 @@ class AppPreferences @Inject constructor(
         val KEY_GUIDE_GROUP_SELECTOR = stringPreferencesKey("guide_group_selector")
         val KEY_GUIDE_SIDEBAR_LAYOUT = stringPreferencesKey("guide_sidebar_layout")
         val KEY_PHONE_GROUP_SELECTOR = stringPreferencesKey("phone_group_selector")
+        val KEY_LIVE_TV_EDGE_SWIPE_OPENS_SIDEBAR = booleanPreferencesKey("live_tv_edge_swipe_opens_sidebar")
         val KEY_GUIDE_TUNE_IN_MINI = booleanPreferencesKey("guide_tune_in_mini")
         val KEY_GUIDE_PROGRAM_INFO_BUTTON = stringPreferencesKey("guideProgramInfoButton")
         val KEY_PROGRAM_INFO_BUTTON_GUIDE = booleanPreferencesKey("programInfoButtonGuide")
