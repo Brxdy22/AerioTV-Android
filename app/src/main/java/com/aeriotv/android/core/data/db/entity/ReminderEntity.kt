@@ -3,7 +3,8 @@ package com.aeriotv.android.core.data.db.entity
 import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
-import androidx.room.PrimaryKey
+import androidx.room.ColumnInfo
+import com.aeriotv.android.core.profiles.ProfileScope
 
 /**
  * One row per scheduled programme reminder. Mirrors iOS `programReminders`
@@ -22,6 +23,7 @@ import androidx.room.PrimaryKey
  */
 @Entity(
     tableName = "reminder",
+    primaryKeys = ["reminderKey", "profileScope"],
     foreignKeys = [
         ForeignKey(
             entity = PlaylistEntity::class,
@@ -33,7 +35,7 @@ import androidx.room.PrimaryKey
     indices = [Index("playlistId")],
 )
 data class ReminderEntity(
-    @PrimaryKey val reminderKey: String,
+    val reminderKey: String,
     val channelName: String,
     val programTitle: String,
     val startMillis: Long,
@@ -41,6 +43,9 @@ data class ReminderEntity(
     /** Stable AlarmManager request code derived from `reminderKey.hashCode()`. */
     val alarmRequestCode: Int,
     val playlistId: String? = null,
+    /** Profiles (DB v37): "" = default profile (every pre-v37 row). */
+    @ColumnInfo(defaultValue = "")
+    val profileScope: String = ProfileScope.current(),
 )
 
 /** Composite key matching the iOS shape so a reminder's identity is portable. */

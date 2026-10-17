@@ -496,6 +496,45 @@ object DatabaseModule {
         }
     }
 
+    /**
+     * v37 Profiles (2026-10-16): favorites, watch progress, reminders and the
+     * local recordings index are scoped per Dispatcharr profile. Every existing
+     * row becomes the DEFAULT profile (profileScope = ''), so no row is
+     * dropped, rewritten or re-keyed; only the primary key widens to
+     * (key, profileScope). SQLite cannot alter a primary key, so the three
+     * keyed tables are rebuilt with copy-then-swap inside Room's migration
+     * transaction; the CREATE statements are Room's generated v37 schema
+     * verbatim. local_recording only gains the column.
+     */
+    internal val MIGRATION_36_37 = object : Migration(36, 37) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            migrate36to37(db::execSQL)
+        }
+    }
+
+    /** Pure SQL list so the sqlite3 dry run and a unit test can replay it. */
+    internal val MIGRATION_36_37_SQL = listOf(
+        "CREATE TABLE IF NOT EXISTS `favorite_channel_new` (`channelId` TEXT NOT NULL, `channelName` TEXT NOT NULL, `displayOrder` INTEGER NOT NULL, `addedAt` INTEGER NOT NULL, `profileScope` TEXT NOT NULL DEFAULT '', PRIMARY KEY(`channelId`, `profileScope`))",
+        "INSERT INTO `favorite_channel_new` (`channelId`, `channelName`, `displayOrder`, `addedAt`, `profileScope`) SELECT `channelId`, `channelName`, `displayOrder`, `addedAt`, '' FROM `favorite_channel`",
+        "DROP TABLE `favorite_channel`",
+        "ALTER TABLE `favorite_channel_new` RENAME TO `favorite_channel`",
+        "CREATE TABLE IF NOT EXISTS `watch_progress_new` (`videoId` TEXT NOT NULL, `title` TEXT NOT NULL, `posterUrl` TEXT, `positionMs` INTEGER NOT NULL, `durationMs` INTEGER NOT NULL, `updatedAt` INTEGER NOT NULL, `playlistId` TEXT, `vodType` TEXT NOT NULL, `seriesId` TEXT, `seasonNumber` INTEGER NOT NULL, `episodeNumber` INTEGER NOT NULL, `streamUrl` TEXT, `isFinished` INTEGER NOT NULL, `upNextQueue` TEXT, `profileScope` TEXT NOT NULL DEFAULT '', PRIMARY KEY(`videoId`, `profileScope`), FOREIGN KEY(`playlistId`) REFERENCES `playlists`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "INSERT INTO `watch_progress_new` (`videoId`, `title`, `posterUrl`, `positionMs`, `durationMs`, `updatedAt`, `playlistId`, `vodType`, `seriesId`, `seasonNumber`, `episodeNumber`, `streamUrl`, `isFinished`, `upNextQueue`, `profileScope`) SELECT `videoId`, `title`, `posterUrl`, `positionMs`, `durationMs`, `updatedAt`, `playlistId`, `vodType`, `seriesId`, `seasonNumber`, `episodeNumber`, `streamUrl`, `isFinished`, `upNextQueue`, '' FROM `watch_progress`",
+        "DROP TABLE `watch_progress`",
+        "ALTER TABLE `watch_progress_new` RENAME TO `watch_progress`",
+        "CREATE INDEX IF NOT EXISTS `index_watch_progress_playlistId` ON `watch_progress` (`playlistId`)",
+        "CREATE TABLE IF NOT EXISTS `reminder_new` (`reminderKey` TEXT NOT NULL, `channelName` TEXT NOT NULL, `programTitle` TEXT NOT NULL, `startMillis` INTEGER NOT NULL, `endMillis` INTEGER NOT NULL, `alarmRequestCode` INTEGER NOT NULL, `playlistId` TEXT, `profileScope` TEXT NOT NULL DEFAULT '', PRIMARY KEY(`reminderKey`, `profileScope`), FOREIGN KEY(`playlistId`) REFERENCES `playlists`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "INSERT INTO `reminder_new` (`reminderKey`, `channelName`, `programTitle`, `startMillis`, `endMillis`, `alarmRequestCode`, `playlistId`, `profileScope`) SELECT `reminderKey`, `channelName`, `programTitle`, `startMillis`, `endMillis`, `alarmRequestCode`, `playlistId`, '' FROM `reminder`",
+        "DROP TABLE `reminder`",
+        "ALTER TABLE `reminder_new` RENAME TO `reminder`",
+        "CREATE INDEX IF NOT EXISTS `index_reminder_playlistId` ON `reminder` (`playlistId`)",
+        "ALTER TABLE `local_recording` ADD COLUMN `profileScope` TEXT NOT NULL DEFAULT ''",
+    )
+
+    internal fun migrate36to37(exec: (String) -> Unit) {
+        MIGRATION_36_37_SQL.forEach(exec)
+    }
+
     @Provides
     @Singleton
     fun provideDatabase(@ApplicationContext context: Context): AerioDatabase =
@@ -504,7 +543,7 @@ object DatabaseModule {
             // exists. Destructive fallback is scoped to ONLY pre-v10 dev builds
             // so an unmapped future migration can never silently wipe a real
             // user's saved servers and credentials in the field.
-            .addMigrations(MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20, MIGRATION_20_21, MIGRATION_21_22, MIGRATION_22_23, MIGRATION_23_24, MIGRATION_24_25, MIGRATION_25_26, MIGRATION_26_27, MIGRATION_27_28, MIGRATION_28_29, MIGRATION_29_30, MIGRATION_30_31, MIGRATION_31_32, MIGRATION_32_33, MIGRATION_33_34, MIGRATION_34_35, MIGRATION_35_36)
+            .addMigrations(MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17, MIGRATION_17_18, MIGRATION_18_19, MIGRATION_19_20, MIGRATION_20_21, MIGRATION_21_22, MIGRATION_22_23, MIGRATION_23_24, MIGRATION_24_25, MIGRATION_25_26, MIGRATION_26_27, MIGRATION_27_28, MIGRATION_28_29, MIGRATION_29_30, MIGRATION_30_31, MIGRATION_31_32, MIGRATION_32_33, MIGRATION_33_34, MIGRATION_34_35, MIGRATION_35_36, MIGRATION_36_37)
             .fallbackToDestructiveMigrationFrom(true, 1, 2, 3, 4, 5, 6, 7, 8, 9)
             .build()
 

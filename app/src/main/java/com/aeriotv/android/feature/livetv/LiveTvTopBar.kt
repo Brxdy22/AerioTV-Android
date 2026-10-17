@@ -543,6 +543,9 @@ fun LiveTvPhoneHeaderRow(
                 onActionTaken = {},
             )
         }
+        // Profiles: avatar switcher, drawn only when the active Dispatcharr
+        // playlist has 2+ profiles (renders nothing otherwise).
+        com.aeriotv.android.feature.settings.ProfileSwitcherButton()
     }
 }
 

@@ -9,6 +9,7 @@ import androidx.datastore.preferences.preferencesDataStore
 import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
@@ -51,6 +52,14 @@ class HiddenTitlesStore @Inject constructor(
     companion object {
         private val KEY = stringPreferencesKey("entries")
 
+        /** Profiles (2026-10-16): the bare "entries" key IS the default
+         *  profile (existing values stay put); another profile reads and
+         *  writes "entries@prof:<id>". Drive sync runs under
+         *  ProfileScope.defaultOnly(), so it keeps the bare key. */
+        private fun skey() = stringPreferencesKey(
+            com.aeriotv.android.core.profiles.ProfileScope.keyName("entries"),
+        )
+
         private fun Entry.sameIdentity(o: Entry) = key == o.key && playlistId == o.playlistId
 
         private fun Entry.stamp(): Long = maxOf(hiddenAt, unhiddenAt ?: 0L)
@@ -75,23 +84,27 @@ class HiddenTitlesStore @Inject constructor(
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
 
     /** The hidden keys for a playlist; rows with no scope match every playlist. */
-    fun observe(playlistId: String?): Flow<Set<String>> = store.data.map { prefs ->
-        decode(prefs[KEY])
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    fun observe(playlistId: String?): Flow<Set<String>> = com.aeriotv.android.core.profiles.ProfileScope.token.flatMapLatest { store.data }.map { prefs ->
+        decode(prefs[skey()])
             .filter { it.isLive }
             .filter { playlistId == null || it.playlistId == null || it.playlistId == playlistId }
             .mapTo(HashSet()) { it.key }
     }
 
     /** Every row including tombstones, for the sync snapshot. */
-    suspend fun allOnce(): List<Entry> = decode(store.data.first()[KEY])
+    suspend fun allOnce(): List<Entry> = decode(store.data.first()[skey()])
 
     suspend fun hide(key: String, playlistId: String?) {
+        // Resolved here: DataStore runs the edit block on its own thread,
+        // outside the caller's ProfileScope context (Drive sync).
+        val k = skey()
         store.edit { prefs ->
             val now = System.currentTimeMillis()
-            val current = decode(prefs[KEY])
+            val current = decode(prefs[k])
             val existing = current.firstOrNull { it.key == key && it.playlistId == playlistId }
             if (existing != null && existing.isLive) return@edit
-            prefs[KEY] = json.encodeToString(
+            prefs[k] = json.encodeToString(
                 if (existing == null) {
                     current + Entry(key = key, playlistId = playlistId, hiddenAt = now)
                 } else {
@@ -108,9 +121,12 @@ class HiddenTitlesStore @Inject constructor(
     }
 
     suspend fun unhide(key: String, playlistId: String?) {
+        // Resolved here: DataStore runs the edit block on its own thread,
+        // outside the caller's ProfileScope context (Drive sync).
+        val k = skey()
         store.edit { prefs ->
             val now = System.currentTimeMillis()
-            val current = decode(prefs[KEY])
+            val current = decode(prefs[k])
             var changed = false
             val next = current.map {
                 if (it.key == key && (it.playlistId == playlistId || it.playlistId == null) && it.isLive) {
@@ -121,7 +137,7 @@ class HiddenTitlesStore @Inject constructor(
                 }
             }
             if (!changed) return@edit
-            prefs[KEY] = json.encodeToString(next)
+            prefs[k] = json.encodeToString(next)
         }
     }
 
@@ -131,10 +147,18 @@ class HiddenTitlesStore @Inject constructor(
      * on another resolve the same way everywhere.
      */
     suspend fun mergeRemote(remote: List<Entry>) {
+        // Resolved here: DataStore runs the edit block on its own thread,
+        // outside the caller's ProfileScope context (Drive sync).
+        val k = skey()
         if (remote.isEmpty()) return
         store.edit { prefs ->
-            prefs[KEY] = json.encodeToString(mergeEntries(decode(prefs[KEY]), remote))
+            prefs[k] = json.encodeToString(mergeEntries(decode(prefs[k]), remote))
         }
+    }
+
+    /** Remove Profile cleanup. */
+    suspend fun deleteScope(profileId: String) {
+        store.edit { it.remove(stringPreferencesKey(com.aeriotv.android.core.profiles.ProfileScope.keyName("entries", profileId))) }
     }
 
     private fun decode(raw: String?): List<Entry> =

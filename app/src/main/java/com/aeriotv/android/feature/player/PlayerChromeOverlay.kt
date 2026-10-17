@@ -289,7 +289,9 @@ fun PlayerChromeOverlay(
     // Dispatcharr account is coerced to a local device recording inside
     // RecordProgramSheet. Keep the dispatcharrChannelId gate so M3U/Xtream
     // channels (no recordable id) still hide the pill.
-    val canRecord = channel?.dispatcharrChannelId != null
+    // Profiles: Record needs dvr_access == manage for the active user.
+    val canRecord = channel?.dispatcharrChannelId != null &&
+        com.aeriotv.android.ui.LocalDvrAccess.current == "manage"
     // Switch Stream routes through Capability.CanSwitchStream
     // (LocalIsDispatcharrAdmin), which resolves to admin TODAY because
     // POST /proxy/ts/change_stream is still IsAdmin server-side. If Dispatcharr

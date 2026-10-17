@@ -26,6 +26,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.collectAsState
+import androidx.compose.foundation.background
 import androidx.compose.runtime.getValue
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
@@ -58,6 +59,7 @@ class MainActivity : ComponentActivity() {
     @Inject lateinit var appPreferences: AppPreferences
     @Inject lateinit var miniPlayerSession: MiniPlayerSession
     @Inject lateinit var exoHolder: AerioExoPlayerHolder
+    @Inject lateinit var profileManager: com.aeriotv.android.core.profiles.ProfileManager
     @Inject lateinit var exoWindowState: ExoWindowState
     @Inject lateinit var castReceiver: AerioCastReceiverController
     @Inject lateinit var castSender: com.aeriotv.android.core.cast.AerioCastSender
@@ -1459,6 +1461,29 @@ class MainActivity : ComponentActivity() {
                                 deepLinkTarget = deepLinkTarget.value,
                                 onDeepLinkConsumed = { deepLinkTarget.value = null },
                             )
+                            // Profiles: while a switch is in flight nothing may
+                            // start playback. A non-dismissable dialog eats every
+                            // touch and key until the new profile has loaded.
+                            val profileSwitching by profileManager.switching.collectAsState()
+                            if (profileSwitching) {
+                                androidx.compose.ui.window.Dialog(
+                                    onDismissRequest = {},
+                                    properties = androidx.compose.ui.window.DialogProperties(
+                                        dismissOnBackPress = false,
+                                        dismissOnClickOutside = false,
+                                        usePlatformDefaultWidth = false,
+                                    ),
+                                ) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxSize()
+                                            .background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.55f)),
+                                        contentAlignment = androidx.compose.ui.Alignment.Center,
+                                    ) {
+                                        androidx.compose.material3.CircularProgressIndicator()
+                                    }
+                                }
+                            }
                             // Exit AerioTV? confirm (Logan 2026-10-14): raised by the
                             // root Back fallback registered in onCreate (any Back no
                             // screen consumed, every form factor) and by a held Back

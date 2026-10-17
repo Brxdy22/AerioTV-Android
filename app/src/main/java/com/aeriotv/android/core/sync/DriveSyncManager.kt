@@ -275,7 +275,17 @@ class DriveSyncManager @Inject constructor(
         return result
     }
 
-    private suspend fun pushCategory(token: String, category: SyncCategory): Boolean {
+    // Profiles phase 1: sync carries the DEFAULT profile only. defaultOnly()
+    // pins every scoped DAO/pref read and write to scope "" and makes the
+    // playlist DAO return the stored (default) login, so a non-default active
+    // profile never leaks into, or is overwritten by, the Drive snapshot.
+    // PHASE 2 HOOK: per-profile sync replaces this with a profile id per file.
+    private suspend fun pushCategory(token: String, category: SyncCategory): Boolean =
+        kotlinx.coroutines.withContext(com.aeriotv.android.core.profiles.ProfileScope.defaultOnly()) {
+            pushCategoryDefaultProfile(token, category)
+        }
+
+    private suspend fun pushCategoryDefaultProfile(token: String, category: SyncCategory): Boolean {
         val payload = when (category) {
             SyncCategory.Playlists -> json.encodeToString(buildPlaylistsSnapshot())
             SyncCategory.WatchProgress -> json.encodeToString(buildWatchProgressSnapshot())
@@ -301,7 +311,7 @@ class DriveSyncManager @Inject constructor(
     ): PullOutcome {
         val fileId = driveClient.findFileId(token, category.fileName) ?: return PullOutcome.NoRemote
         val body = driveClient.download(token, fileId) ?: return PullOutcome.Failed
-        return runCatching {
+        return kotlinx.coroutines.withContext(com.aeriotv.android.core.profiles.ProfileScope.defaultOnly()) { runCatching {
             when (category) {
                 SyncCategory.Playlists -> applyPlaylistsSnapshot(json.decodeFromString(body), replace)
                 SyncCategory.WatchProgress -> applyWatchProgressSnapshot(json.decodeFromString(body))
@@ -313,7 +323,7 @@ class DriveSyncManager @Inject constructor(
             }
             PullOutcome.Applied
         }.onFailure { Log.w(TAG, "decode ${category.name} failed", it) }
-            .getOrDefault(PullOutcome.Failed)
+            .getOrDefault(PullOutcome.Failed) }
     }
 
     private enum class PullOutcome { Applied, NoRemote, Failed }

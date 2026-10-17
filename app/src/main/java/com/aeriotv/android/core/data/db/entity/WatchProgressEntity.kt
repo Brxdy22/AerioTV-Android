@@ -3,7 +3,8 @@ package com.aeriotv.android.core.data.db.entity
 import androidx.room.Entity
 import androidx.room.ForeignKey
 import androidx.room.Index
-import androidx.room.PrimaryKey
+import androidx.room.ColumnInfo
+import com.aeriotv.android.core.profiles.ProfileScope
 
 /**
  * Per-video playback position persistence. Mirrors iOS `WatchProgress`
@@ -22,6 +23,7 @@ import androidx.room.PrimaryKey
  */
 @Entity(
     tableName = "watch_progress",
+    primaryKeys = ["videoId", "profileScope"],
     foreignKeys = [
         ForeignKey(
             entity = PlaylistEntity::class,
@@ -33,7 +35,7 @@ import androidx.room.PrimaryKey
     indices = [Index("playlistId")],
 )
 data class WatchProgressEntity(
-    @PrimaryKey val videoId: String,
+    val videoId: String,
     val title: String,
     val posterUrl: String?,
     val positionMs: Long,
@@ -53,4 +55,7 @@ data class WatchProgressEntity(
     val streamUrl: String? = null,   // resolved stream for seeded next-episode rows
     val isFinished: Boolean = false,
     val upNextQueue: String? = null, // JSON [UpNextEntry]
+    /** Profiles (DB v37): "" = default profile (every pre-v37 row). */
+    @ColumnInfo(defaultValue = "")
+    val profileScope: String = ProfileScope.current(),
 )

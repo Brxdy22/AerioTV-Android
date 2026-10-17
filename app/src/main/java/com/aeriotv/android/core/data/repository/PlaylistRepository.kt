@@ -2937,6 +2937,18 @@ class PlaylistRepository @Inject constructor(
      * sort by).
      */
     suspend fun loadCachedChannels(playlistId: String): List<M3UChannel> =
+        stripCatchupIfDenied(playlistId, loadCachedChannelsRaw(playlistId))
+
+    /** Profiles: a Dispatcharr user with catchup_enabled=false sees every
+     *  channel as having no archive, even from a cache written by another
+     *  user. Non-Dispatcharr playlists are untouched. */
+    private suspend fun stripCatchupIfDenied(playlistId: String, channels: List<M3UChannel>): List<M3UChannel> {
+        val row = dao.byId(playlistId) ?: return channels
+        if (!row.isDispatcharrDirectConnect() || row.dispatcharrCanUseCatchup()) return channels
+        return channels.map { if (it.catchupDays > 0 || it.catchupStreamId != null) it.copy(catchupDays = 0, catchupStreamId = null) else it }
+    }
+
+    private suspend fun loadCachedChannelsRaw(playlistId: String): List<M3UChannel> =
         // distinctBy url: an exact-duplicate stream (identical URL) is dropped so
         // the Live TV lists (keyed by url) can never see a duplicate key. Channels
         // that merely SHARE a tvg-id but have different URLs are kept (they are
@@ -2972,7 +2984,7 @@ class PlaylistRepository @Inject constructor(
             var position = 0
             for (chunk in channels.asSequence().chunked(CHANNEL_CACHE_CHUNK)) {
                 channelSnapshotDao.insertAll(
-                    chunk.map { ch -> ch.toCacheEntity(playlistId, position++, now) },
+                    chunk.map { ch -> ch.toCacheEntity(com.aeriotv.android.core.profiles.ProfileScope.cacheKey(playlistId), position++, now) },
                 )
             }
             // Stamp the displayed count from the list ACTUALLY PERSISTED, in the
@@ -3243,8 +3255,15 @@ class PlaylistRepository @Inject constructor(
      * source's movies/series so stale, unplayable VOD never lingers after a
      * playlist is deleted or switched (iOS Issue #25).
      */
+    /** Emits again on a Dispatcharr profile switch (same id, new user), so
+     *  every "playlist switched" collector (DVR, On Demand) reloads for the
+     *  new profile exactly as it does for a playlist switch. */
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     fun observeActiveId(): kotlinx.coroutines.flow.Flow<String?> =
-        dao.observeActive().map { it.firstOrNull()?.id }.distinctUntilChanged()
+        dao.observeActive()
+            .map { it.firstOrNull()?.id to com.aeriotv.android.core.profiles.ProfileScope.token.value }
+            .distinctUntilChanged()
+            .map { it.first }
     suspend fun allOnce(): List<PlaylistEntity> = dao.allOnce()
 
     /**
@@ -3252,7 +3271,11 @@ class PlaylistRepository @Inject constructor(
      * the resolved entity + channel list, mirroring loadAndPersist's shape
      * so callers can drop a switch into the same state-update flow.
      */
-    suspend fun switchActive(playlistId: String): Result<Pair<PlaylistEntity, List<M3UChannel>>> = runCatching {
+    suspend fun switchActive(
+        playlistId: String,
+        probe: Boolean = true,
+    ): Result<Pair<PlaylistEntity, List<M3UChannel>>> = runCatching {
+        val t0 = System.currentTimeMillis()
         dao.switchActive(playlistId)
         // Capability probing is ACTIVE-PLAYLIST ONLY, so the row that just
         // became active is probed here: it may never have been probed at
@@ -3266,8 +3289,13 @@ class PlaylistRepository @Inject constructor(
         // (the Movies tab only came back after a relaunch). An inactive
         // playlist is never probed, so its snapshot's age says nothing about
         // whether it is still true: a switch is the one moment we must ask.
-        runCatching { probeCapabilities(playlistId, force = true, trigger = "playlist switch") }
-            .onFailure { Log.w(TAG_CAPS, "switch-active capability probe failed", it) }
+        // A profile switch has just probed (ProfileManager.switchTo), so it
+        // passes probe=false: probing again only doubled the round trips.
+        if (probe) {
+            runCatching { probeCapabilities(playlistId, force = true, trigger = "playlist switch") }
+                .onFailure { Log.w(TAG_CAPS, "switch-active capability probe failed", it) }
+        }
+        val tProbe = System.currentTimeMillis()
         val entity = dao.byId(playlistId)
             ?: throw IllegalStateException("Playlist $playlistId vanished after switch")
         val base = effectiveBaseUrl(entity)
@@ -3278,6 +3306,10 @@ class PlaylistRepository @Inject constructor(
                     fetchChannelsFor(
                         sourceType, base, entity.epgUrl, key,
                         entity.dispatcharrProfileId, entity.dispatcharrAccountProfileIdList(),
+                        // Profiles: the switch reload must honor the user's
+                        // catchup_enabled like refresh() does, or a catch-up
+                        // denied profile still sees Watch from Start.
+                        catchupEnabled = entity.dispatcharrCanUseCatchup(),
                     )
                 }
             else -> fetchChannelsFor(
@@ -3295,6 +3327,12 @@ class PlaylistRepository @Inject constructor(
             android.util.Log.w("PlaylistRepository", "saveChannelsToCache failed (switchActive)", t)
         }
         publishActiveCredentials(updated)
+        val tEnd = System.currentTimeMillis()
+        Log.i(
+            "PlaylistRepo",
+            "[SWITCH] switchActive probe=${tProbe - t0}ms channels+cache=${tEnd - tProbe}ms " +
+                "(${channels.size} channels, probe=$probe)",
+        )
         updated to channels
     }
 
@@ -3330,7 +3368,7 @@ class PlaylistRepository @Inject constructor(
         // one store must not abort the delete itself.
         runCatching { purgeEpgCache(playlistId) }
             .onFailure { Log.w("PlaylistRepo", "delete: EPG purge failed", it) }
-        runCatching { channelSnapshotDao.deleteForPlaylist(playlistId) }
+        runCatching { channelSnapshotDao.deleteAllProfilesForPlaylist(playlistId) }
             .onFailure { Log.w("PlaylistRepo", "delete: channel snapshot purge failed", it) }
         runCatching { vodCatalogStore.deleteForPlaylistId(playlistId) }
             .onFailure { Log.w("PlaylistRepo", "delete: VOD catalog purge failed", it) }

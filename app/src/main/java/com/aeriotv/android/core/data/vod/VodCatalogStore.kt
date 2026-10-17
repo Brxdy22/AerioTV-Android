@@ -270,6 +270,21 @@ class VodCatalogStore @Inject constructor(
         }
     }
 
+    /** Remove Profile: drop the catalog identities one Dispatcharr user owns
+     *  on this playlist (identity field 3 is the username). */
+    suspend fun deleteForPlaylistUser(playlistId: String, username: String) = withContext(Dispatchers.IO) {
+        writeLock.withLock {
+            val keys = (dao.titlePlaylistKeys() + dao.knownPlaylistKeys()).toSet()
+                .filter { playlistIdOf(it) == playlistId && it.split('|').getOrNull(3) == username }
+            for (k in keys) {
+                db.withTransaction {
+                    dao.deleteTitlesFor(k); dao.deleteStateFor(k); dao.deleteLanesFor(k)
+                }
+            }
+            Log.i(TAG, "[VOD-DB] dropped ${keys.size} catalog identities for a removed profile")
+        }
+    }
+
     /** identity() is "v1|<playlistId>|<url>|..."; null for an unknown shape. */
     private fun playlistIdOf(key: String): String? = key.split('|').getOrNull(1)
 

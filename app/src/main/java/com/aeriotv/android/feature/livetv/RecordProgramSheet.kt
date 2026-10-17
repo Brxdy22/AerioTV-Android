@@ -96,6 +96,12 @@ fun RecordProgramSheet(
     playlistViewModel: PlaylistViewModel = hiltViewModel(),
     settingsViewModel: SettingsViewModel = hiltViewModel(),
 ) {
+    // Profiles backstop: no profile without dvr_access == manage can reach
+    // a recording write, whatever entry point opened this sheet.
+    if (com.aeriotv.android.ui.LocalDvrAccess.current != "manage") {
+        androidx.compose.runtime.LaunchedEffect(Unit) { onDismiss() }
+        return
+    }
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
 

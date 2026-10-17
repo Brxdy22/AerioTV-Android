@@ -1047,6 +1047,9 @@ internal fun ChannelRow(
      *  current / all) for this row's current program. */
     infoButtonMode: String = com.aeriotv.android.core.preferences.GuideProgramInfoButton.OFF,
 ) {
+    // Profiles: every Record entry point requires dvr_access == manage
+    // (non-Dispatcharr sources resolve to manage, so local recording stays).
+    val dvrCanRecord = com.aeriotv.android.ui.LocalDvrAccess.current == "manage"
     // iPhone-shaped row on phone and tablet (time on the title line, italic
     // sub-title line); TV keeps the fixed-slot layout.
     val phoneRow = !rememberIsTvDevice()
@@ -1566,7 +1569,7 @@ internal fun ChannelRow(
                             // rows in the expanded panel already did. The sheet
                             // hides the Destination toggle when the source can't
                             // schedule server-side, so there is no dead end.
-                            if (channel.url.isNotBlank()) {
+                            if (dvrCanRecord && channel.url.isNotBlank()) {
                                 add(
                                     TvMenuAction(
                                         if (nowProgramme != null) "Record from Now" else "Record",
@@ -1624,7 +1627,7 @@ internal fun ChannelRow(
                                 onShowProgramInfo(nowProgramme.toInfoTarget(channel.name, channel.dispatcharrChannelId))
                             })
                         }
-                        if (channel.url.isNotBlank()) {
+                        if (dvrCanRecord && channel.url.isNotBlank()) {
                             add(TvMenuAction(if (nowProgramme != null) "Record from Now" else "Record", Icons.Outlined.FiberManualRecord) { recordFromMenu() })
                         }
                     },
@@ -1856,6 +1859,9 @@ private fun UpcomingProgrammeRow(
     onInfo: (() -> Unit)? = null,
     remindersVm: RemindersViewModel = hiltViewModel(),
 ) {
+    // Profiles: every Record entry point requires dvr_access == manage
+    // (non-Dispatcharr sources resolve to manage, so local recording stays).
+    val dvrCanRecord = com.aeriotv.android.ui.LocalDvrAccess.current == "manage"
     val context = LocalContext.current
     var menuOpen by remember { mutableStateOf(false) }
     val menuGuard = com.aeriotv.android.core.tv.rememberTvMenuGuard()
@@ -1995,7 +2001,7 @@ private fun UpcomingProgrammeRow(
                     }
                 },
             )
-            if (!isPast) add(TvMenuAction("Record", Icons.Outlined.FiberManualRecord) { onShowRecord() })
+            if (!isPast && dvrCanRecord) add(TvMenuAction("Record", Icons.Outlined.FiberManualRecord) { onShowRecord() })
         }
         if (isTv) {
             if (menuOpen) {

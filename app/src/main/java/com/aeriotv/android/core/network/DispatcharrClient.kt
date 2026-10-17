@@ -373,6 +373,35 @@ class DispatcharrClient @Inject constructor() {
      * derives it from the level). Null on ANY failure so a transient error
      * never clobbers a persisted value. Mirrors iOS DispatcharrUser 5d7763e.
      */
+    /** Profiles: the full /api/accounts/users/me/ record for the user [apiKey]
+     *  authenticates as, or null on any failure. */
+    suspend fun fetchMe(baseUrl: String, apiKey: String): MeResponse? = runCatching {
+        val response = client.get("${baseUrl.trimEnd('/')}/api/accounts/users/me/") { applyAuth(apiKey) }
+        if (!response.status.isSuccess()) return@runCatching null
+        response.body<MeResponse>()
+    }.getOrNull()
+
+    /**
+     * Profiles > Add Profile: GET /api/accounts/users/ with the ADMIN profile's
+     * key. Accepts a bare array or a paginated {"results": [...]} body.
+     * Throws [DispatcharrError.Transport] with the HTTP code on a non-2xx
+     * (a non-admin key answers 403).
+     */
+    suspend fun listUsers(baseUrl: String, apiKey: String): List<DispatcharrUserSummary> {
+        val response = client.get("${baseUrl.trimEnd('/')}/api/accounts/users/") { applyAuth(apiKey) }
+        if (!response.status.isSuccess()) {
+            throw DispatcharrError.Transport("Users list: HTTP ${response.status.value}")
+        }
+        val root: JsonElement = response.body()
+        val rows = when (root) {
+            is JsonArray -> root
+            is JsonObject -> root["results"] as? JsonArray ?: JsonArray(emptyList())
+            else -> JsonArray(emptyList())
+        }
+        val lenient = Json { ignoreUnknownKeys = true; isLenient = true }
+        return rows.mapNotNull { runCatching { lenient.decodeFromJsonElement(DispatcharrUserSummary.serializer(), it) }.getOrNull() }
+    }
+
     data class AccountPermissions(
         val dvrAccess: String?,
         val vodMoviesEnabled: Boolean,
@@ -2491,6 +2520,25 @@ data class MeResponse(
      *  JsonObject: the dict is admin-shaped and free-form. */
     @SerialName("custom_properties")
     val customProperties: JsonObject? = null,
+    /** Concurrent stream cap (0 = unlimited). Informational on the profile row. */
+    @SerialName("stream_limit")
+    val streamLimit: Int = 0,
+)
+
+/** One row of GET /api/accounts/users/ (admin only), for Add Profile. Field
+ *  names per Dispatcharr apps/accounts/serializers.py UserSerializer. */
+@Serializable
+data class DispatcharrUserSummary(
+    val id: Int,
+    val username: String,
+    /** Returned to admins by Dispatcharr (measured on Logan's server
+     *  2026-10-17); null or blank when the user never minted a key. */
+    @SerialName("api_key") val apiKey: String? = null,
+    @SerialName("user_level") val userLevel: Int? = null,
+    @SerialName("stream_limit") val streamLimit: Int = 0,
+    @SerialName("is_superuser") val isSuperuser: Boolean = false,
+    @SerialName("is_staff") val isStaff: Boolean = false,
+    @SerialName("custom_properties") val customProperties: JsonObject? = null,
 )
 
 @Serializable

@@ -1,7 +1,8 @@
 package com.aeriotv.android.core.data.db.entity
 
 import androidx.room.Entity
-import androidx.room.PrimaryKey
+import androidx.room.ColumnInfo
+import com.aeriotv.android.core.profiles.ProfileScope
 
 /**
  * Per-channel favorite flag. Mirrors iOS `favoriteChannelIDs` + `favoriteOrder`
@@ -9,10 +10,13 @@ import androidx.room.PrimaryKey
  * user's manual reorder positions; defaults to addedAt so new favourites land
  * at the end of the existing list.
  */
-@Entity(tableName = "favorite_channel")
+@Entity(tableName = "favorite_channel", primaryKeys = ["channelId", "profileScope"])
 data class FavoriteChannelEntity(
-    @PrimaryKey val channelId: String,
+    val channelId: String,
     val channelName: String,
     val displayOrder: Long,
     val addedAt: Long,
+    /** Profiles (DB v37): "" = default profile (every pre-v37 row). */
+    @ColumnInfo(defaultValue = "")
+    val profileScope: String = ProfileScope.current(),
 )

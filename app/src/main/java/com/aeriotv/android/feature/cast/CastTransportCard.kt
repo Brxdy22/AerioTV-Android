@@ -84,6 +84,7 @@ fun CastTransportCard(
      *  card's Add Channel uses. Null hides Add Channel (Logan 2026-10-11). */
     compositeHeaders: (() -> Map<String, String>)? = null,
 ) {
+    val dvrCanRecord = com.aeriotv.android.ui.LocalDvrAccess.current == "manage"
     val castState by castSender.state.collectAsStateWithLifecycle()
     val castContent by castSender.content.collectAsStateWithLifecycle()
     val castIsPlaying by castSender.isPlaying.collectAsStateWithLifecycle()
@@ -628,7 +629,7 @@ fun CastTransportCard(
                 }
             } ?: "Off",
             recordProgramTitle = recordableTarget?.title,
-            onRecordCurrentProgram = recordableTarget?.let { target ->
+            onRecordCurrentProgram = recordableTarget?.takeIf { dvrCanRecord }?.let { target ->
                 { recordTarget = target }
             },
             onSleepMinutes = { minutes ->

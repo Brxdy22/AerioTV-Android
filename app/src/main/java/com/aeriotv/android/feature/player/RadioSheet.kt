@@ -66,6 +66,7 @@ fun RadioTransportCard(
     /** The caller's row gives the frame (phone, Control a TV button beside it). */
     inRow: Boolean = false,
 ) {
+    val dvrCanRecord = com.aeriotv.android.ui.LocalDvrAccess.current == "manage"
     val context = LocalContext.current
     val radio by RadioMode.state.collectAsStateWithLifecycle()
     val session = radio ?: return
@@ -275,7 +276,7 @@ fun RadioTransportCard(
                 }
             },
             recordProgramTitle = programme?.title,
-            onRecordCurrentProgram = programme?.let { pr -> { recordTarget = pr.toInfoTarget(channel.name, channel.dispatcharrChannelId) } },
+            onRecordCurrentProgram = programme?.takeIf { dvrCanRecord }?.let { pr -> { recordTarget = pr.toInfoTarget(channel.name, channel.dispatcharrChannelId) } },
             onSeekBy = { delta -> RadioMode.seekToWall(context, RadioMode.positionWallMs(context) + delta) },
             onSeekToWall = { target -> RadioMode.seekToWall(context, target) },
             onGoLive = { RadioMode.goLive(context) },

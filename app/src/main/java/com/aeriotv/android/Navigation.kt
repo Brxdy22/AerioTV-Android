@@ -80,6 +80,7 @@ import kotlinx.coroutines.launch
 interface NavEntryPoint {
     fun appPreferences(): AppPreferences
     fun castReceiver(): com.aeriotv.android.core.cast.AerioCastReceiverController
+    fun profileManager(): com.aeriotv.android.core.profiles.ProfileManager
 }
 
 object Routes {
@@ -308,6 +309,23 @@ fun AerioTVNavHost(
     }
     val dlGraphEntry = remember(dlCurrentEntry) {
         runCatching { navController.getBackStackEntry(Routes.PLAYLIST_GRAPH) }.getOrNull()
+    }
+    // Profiles: when a switch completes, close any player route left open
+    // (a tap that slipped in before the scrim, now stopped and IDLE).
+    val profileManagerForNav = remember {
+        dagger.hilt.android.EntryPointAccessors.fromApplication(
+            navHostContext.applicationContext, NavEntryPoint::class.java,
+        ).profileManager()
+    }
+    LaunchedEffect(profileManagerForNav) {
+        profileManagerForNav.closePlayerRequests.collect {
+            if (navController.currentDestination?.route != Routes.MAIN &&
+                runCatching { navController.getBackStackEntry(Routes.MAIN) }.isSuccess
+            ) {
+                android.util.Log.i("AerioProfiles", "[PROFILE] closing player left open across the switch")
+                runCatching { navController.popBackStack(Routes.MAIN, false) }
+            }
+        }
     }
     val dlCastReceiver = remember {
         dagger.hilt.android.EntryPointAccessors.fromApplication(
@@ -1366,6 +1384,7 @@ fun AerioTVNavHost(
                     LocalCapabilities provides
                         (gatePlaylist?.capabilities() ?: CapabilitySet.UNKNOWN),
                     LocalCanRecordToServer provides (gatePlaylist?.canRecordToServer() ?: true),
+                    LocalDvrAccess provides (gatePlaylist?.dispatcharrEffectiveDvrAccess() ?: "manage"),
                     // Switch Stream: change_stream is still IsAdmin server-side,
                     // but the gate now runs through Capability.CanSwitchStream.
                     LocalIsDispatcharrAdmin provides (gatePlaylist?.canSwitchStream() ?: false),

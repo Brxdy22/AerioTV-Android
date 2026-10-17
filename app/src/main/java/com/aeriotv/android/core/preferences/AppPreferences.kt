@@ -15,6 +15,7 @@ import com.aeriotv.android.core.category.CategoryPaletteState
 import com.aeriotv.android.core.data.ChannelCollection
 import com.aeriotv.android.core.category.CustomCategoryEntry
 import com.aeriotv.android.core.category.ProgramCategory
+import com.aeriotv.android.core.profiles.ProfileScope
 import com.aeriotv.android.core.security.CredentialCipher
 import com.aeriotv.android.core.sync.SyncCategory
 import com.aeriotv.android.ui.theme.AppTheme
@@ -24,6 +25,7 @@ import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.map
 import kotlinx.serialization.json.Json
 
@@ -118,6 +120,48 @@ class AppPreferences @Inject constructor(
     private val cipher: CredentialCipher,
 ) {
     private val store get() = context.appDataStore
+
+    /**
+     * Profiles (2026-10-16): per-profile keys. The bare key IS the default
+     * profile, so nothing moves at migration; a non-default active profile
+     * reads and writes "<key>@prof:<profileId>" (ProfileScope.keyName).
+     * Flows read through [scopedData] so they re-key when the profile changes.
+     * The Drive snapshot below reads the bare keys only (default profile).
+     */
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    private val scopedData: Flow<Preferences> get() = ProfileScope.token.flatMapLatest { store.data }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun <T> Preferences.Key<T>.s(): Preferences.Key<T> {
+        val scoped = ProfileScope.keyName(name)
+        return if (scoped == name) this else stringPreferencesKey(scoped) as Preferences.Key<T>
+    }
+
+    /** A new profile starts with the default profile's view settings
+     *  (guide/list view, group selector style, sort mode, Radio Mode by
+     *  Default); its favorites, recents and the rest start empty. */
+    suspend fun seedProfileSettings(profileId: String) {
+        val bases = listOf(
+            KEY_DEFAULT_LIVE_TV_VIEW, KEY_LIVE_TV_LAYOUT, KEY_GUIDE_GROUP_SELECTOR,
+            KEY_PHONE_GROUP_SELECTOR, KEY_GROUP_SORT_MODE, KEY_GROUP_ORDER,
+        )
+        store.edit { prefs ->
+            bases.forEach { k ->
+                prefs[k]?.let { prefs[stringPreferencesKey(ProfileScope.keyName(k.name, profileId))] = it }
+            }
+            prefs[KEY_RADIO_MODE_BY_DEFAULT]?.let {
+                prefs[booleanPreferencesKey(ProfileScope.keyName(KEY_RADIO_MODE_BY_DEFAULT.name, profileId))] = it
+            }
+        }
+    }
+
+    /** Remove-profile cleanup: every key written under [profileId]'s suffix. */
+    suspend fun deleteProfileScope(profileId: String) {
+        val suffix = "@prof:$profileId"
+        store.edit { prefs ->
+            prefs.asMap().keys.filter { it.name.endsWith(suffix) }.forEach { prefs.remove(it) }
+        }
+    }
 
     val selectedTheme: Flow<AppTheme> = store.data.map { prefs ->
         val raw = prefs[KEY_SELECTED_THEME] ?: AppTheme.Aerio.name
@@ -421,21 +465,21 @@ class AppPreferences @Inject constructor(
      * `rememberSaveable` for view-mode state; Phase 8b moves it to DataStore
      * so the user's choice survives cold start.
      */
-    val defaultLiveTVView: Flow<String> = store.data.map { prefs ->
-        prefs[KEY_DEFAULT_LIVE_TV_VIEW] ?: ""
+    val defaultLiveTVView: Flow<String> = scopedData.map { prefs ->
+        prefs[KEY_DEFAULT_LIVE_TV_VIEW.s()] ?: ""
     }
 
     suspend fun setDefaultLiveTVView(value: String) {
-        store.edit { it[KEY_DEFAULT_LIVE_TV_VIEW] = value }
+        store.edit { it[KEY_DEFAULT_LIVE_TV_VIEW.s()] = value }
     }
 
     /** TV Live TV layout: "basic" (full details in every cell) or "preview"
      *  (Channel Preview banner above the guide, cells keep title and tags).
      *  Mirrors tvOS `@AppStorage("liveTVLayout")`; per device. */
-    val liveTvLayout: Flow<String> = store.data.map { prefs -> prefs[KEY_LIVE_TV_LAYOUT] ?: "basic" }
+    val liveTvLayout: Flow<String> = scopedData.map { prefs -> prefs[KEY_LIVE_TV_LAYOUT.s()] ?: "basic" }
 
     suspend fun setLiveTvLayout(value: String) {
-        store.edit { it[KEY_LIVE_TV_LAYOUT] = value }
+        store.edit { it[KEY_LIVE_TV_LAYOUT.s()] = value }
     }
 
     // ── App Behaviors ────────────────────────────────────────────────────
@@ -552,9 +596,9 @@ class AppPreferences @Inject constructor(
      * opts in with [syncRadioModeByDefault].
      */
     val radioModeByDefault: Flow<Boolean> =
-        store.data.map { it[KEY_RADIO_MODE_BY_DEFAULT] ?: false }
+        scopedData.map { it[KEY_RADIO_MODE_BY_DEFAULT.s()] ?: false }
     suspend fun setRadioModeByDefault(value: Boolean) {
-        store.edit { it[KEY_RADIO_MODE_BY_DEFAULT] = value }
+        store.edit { it[KEY_RADIO_MODE_BY_DEFAULT.s()] = value }
     }
 
     /**
@@ -587,9 +631,9 @@ class AppPreferences @Inject constructor(
      * exclusive - the pills row is hidden while sidebar mode is active.
      */
     val guideGroupSelector: Flow<String> =
-        store.data.map { it[KEY_GUIDE_GROUP_SELECTOR] ?: "pills" }
+        scopedData.map { it[KEY_GUIDE_GROUP_SELECTOR.s()] ?: "pills" }
     suspend fun setGuideGroupSelector(mode: String) {
-        store.edit { it[KEY_GUIDE_GROUP_SELECTOR] = mode }
+        store.edit { it[KEY_GUIDE_GROUP_SELECTOR.s()] = mode }
     }
 
     /**
@@ -600,7 +644,7 @@ class AppPreferences @Inject constructor(
      * above keeps "pills" as its fallback for the window before the seed runs.
      */
     suspend fun guideGroupSelectorRawOnce(): String? =
-        store.data.first()[KEY_GUIDE_GROUP_SELECTOR]
+        store.data.first()[KEY_GUIDE_GROUP_SELECTOR.s()]
 
     /**
      * TV guide sidebar layout (Logan 2026-09-14), only meaningful while
@@ -622,9 +666,9 @@ class AppPreferences @Inject constructor(
      * device type keeps its own choice and its own default.
      */
     val phoneGroupSelector: Flow<String> =
-        store.data.map { it[KEY_PHONE_GROUP_SELECTOR] ?: "sidebar" }
+        scopedData.map { it[KEY_PHONE_GROUP_SELECTOR.s()] ?: "sidebar" }
     suspend fun setPhoneGroupSelector(mode: String) {
-        store.edit { it[KEY_PHONE_GROUP_SELECTOR] = mode }
+        store.edit { it[KEY_PHONE_GROUP_SELECTOR.s()] = mode }
     }
 
     /**
@@ -969,8 +1013,8 @@ class AppPreferences @Inject constructor(
      * Capped at [RECENT_CHANNELS_CAP]; the AddToMultiview sheet shows the
      * first few as its "Recent" section. PlayerScreen records on each flip.
      */
-    val recentChannelIds: Flow<List<String>> = store.data.map { prefs ->
-        val raw = prefs[KEY_RECENT_CHANNEL_IDS] ?: ""
+    val recentChannelIds: Flow<List<String>> = scopedData.map { prefs ->
+        val raw = prefs[KEY_RECENT_CHANNEL_IDS.s()] ?: ""
         if (raw.isBlank()) emptyList()
         else raw.split('\n').mapNotNull { it.trim().takeIf(String::isNotBlank) }
     }
@@ -983,11 +1027,11 @@ class AppPreferences @Inject constructor(
         val id = channelId.trim()
         if (id.isBlank()) return
         store.edit { prefs ->
-            val existing = (prefs[KEY_RECENT_CHANNEL_IDS] ?: "")
+            val existing = (prefs[KEY_RECENT_CHANNEL_IDS.s()] ?: "")
                 .split('\n')
                 .mapNotNull { it.trim().takeIf(String::isNotBlank) }
             val reordered = (listOf(id) + existing.filterNot { it == id }).take(RECENT_CHANNELS_CAP)
-            prefs[KEY_RECENT_CHANNEL_IDS] = reordered.joinToString("\n")
+            prefs[KEY_RECENT_CHANNEL_IDS.s()] = reordered.joinToString("\n")
         }
     }
 
@@ -997,18 +1041,18 @@ class AppPreferences @Inject constructor(
      */
     suspend fun removeRecentChannel(channelId: String) {
         store.edit { prefs ->
-            val existing = (prefs[KEY_RECENT_CHANNEL_IDS] ?: "")
+            val existing = (prefs[KEY_RECENT_CHANNEL_IDS.s()] ?: "")
                 .split('\n')
                 .mapNotNull { it.trim().takeIf(String::isNotBlank) }
             val kept = existing.filterNot { it == channelId }
-            prefs[KEY_RECENT_CHANNEL_IDS] = kept.joinToString("\n")
+            prefs[KEY_RECENT_CHANNEL_IDS.s()] = kept.joinToString("\n")
             android.util.Log.i("AerioRecents", "[RECENTS] removed one channel, ${kept.size} left")
         }
     }
 
     /** GH #130: Settings > Live TV > Clear Recently Watched (after a confirm). */
     suspend fun clearRecentChannels() {
-        store.edit { it.remove(KEY_RECENT_CHANNEL_IDS) }
+        store.edit { it.remove(KEY_RECENT_CHANNEL_IDS.s()) }
         android.util.Log.i("AerioRecents", "[RECENTS] cleared")
     }
 
@@ -1021,7 +1065,7 @@ class AppPreferences @Inject constructor(
     suspend fun renameRecentChannelIds(renames: Map<String, String>): Int {
         var changed = 0
         store.edit { prefs ->
-            val existing = (prefs[KEY_RECENT_CHANNEL_IDS] ?: "")
+            val existing = (prefs[KEY_RECENT_CHANNEL_IDS.s()] ?: "")
                 .split('\n')
                 .mapNotNull { it.trim().takeIf(String::isNotBlank) }
             if (existing.isEmpty()) return@edit
@@ -1029,7 +1073,7 @@ class AppPreferences @Inject constructor(
                 renames[id]?.also { changed++ } ?: id
             }.distinct()
             if (changed > 0) {
-                prefs[KEY_RECENT_CHANNEL_IDS] = rewritten.joinToString("\n")
+                prefs[KEY_RECENT_CHANNEL_IDS.s()] = rewritten.joinToString("\n")
             }
         }
         return changed
@@ -1041,15 +1085,15 @@ class AppPreferences @Inject constructor(
      * "no groups hidden", which is the default and matches iOS canon (all
      * groups visible at first launch).
      */
-    val hiddenGroups: Flow<Set<String>> = store.data.map { prefs ->
-        val raw = prefs[KEY_HIDDEN_GROUPS] ?: ""
+    val hiddenGroups: Flow<Set<String>> = scopedData.map { prefs ->
+        val raw = prefs[KEY_HIDDEN_GROUPS.s()] ?: ""
         if (raw.isBlank()) emptySet()
         else raw.split('\n').mapNotNull { it.trim().takeIf(String::isNotBlank) }.toSet()
     }
     suspend fun setHiddenGroups(groups: Set<String>) {
         store.edit { prefs ->
-            if (groups.isEmpty()) prefs.remove(KEY_HIDDEN_GROUPS)
-            else prefs[KEY_HIDDEN_GROUPS] = groups.joinToString("\n")
+            if (groups.isEmpty()) prefs.remove(KEY_HIDDEN_GROUPS.s())
+            else prefs[KEY_HIDDEN_GROUPS.s()] = groups.joinToString("\n")
         }
     }
 
@@ -1063,22 +1107,22 @@ class AppPreferences @Inject constructor(
      * always reconciled against the live group list at display time, so renamed
      * or removed groups drop out and brand-new groups append.
      */
-    val groupOrder: Flow<List<String>> = store.data.map { prefs ->
-        val raw = prefs[KEY_GROUP_ORDER] ?: ""
+    val groupOrder: Flow<List<String>> = scopedData.map { prefs ->
+        val raw = prefs[KEY_GROUP_ORDER.s()] ?: ""
         if (raw.isBlank()) emptyList()
         else raw.split('\n').mapNotNull { it.trim().takeIf(String::isNotBlank) }
     }
     suspend fun setGroupOrder(order: List<String>) {
         store.edit { prefs ->
-            if (order.isEmpty()) prefs.remove(KEY_GROUP_ORDER)
-            else prefs[KEY_GROUP_ORDER] = order.joinToString("\n")
+            if (order.isEmpty()) prefs.remove(KEY_GROUP_ORDER.s())
+            else prefs[KEY_GROUP_ORDER.s()] = order.joinToString("\n")
         }
     }
-    val groupSortMode: Flow<String> = store.data.map { prefs ->
-        prefs[KEY_GROUP_SORT_MODE] ?: "Default"
+    val groupSortMode: Flow<String> = scopedData.map { prefs ->
+        prefs[KEY_GROUP_SORT_MODE.s()] ?: "Default"
     }
     suspend fun setGroupSortMode(mode: String) {
-        store.edit { prefs -> prefs[KEY_GROUP_SORT_MODE] = mode }
+        store.edit { prefs -> prefs[KEY_GROUP_SORT_MODE.s()] = mode }
     }
 
     /**
@@ -1096,7 +1140,7 @@ class AppPreferences @Inject constructor(
      * Empty string = nothing saved yet (open on All).
      */
     fun liveGroupToken(playlistId: String): Flow<String> =
-        store.data.map { it[keyLiveGroupToken(playlistId)] ?: "" }
+        scopedData.map { it[keyLiveGroupToken(playlistId)] ?: "" }
 
     suspend fun liveGroupTokenOnce(playlistId: String): String =
         if (playlistId.isBlank()) "" else store.data.first()[keyLiveGroupToken(playlistId)] ?: ""
@@ -1118,7 +1162,7 @@ class AppPreferences @Inject constructor(
      * are playlist-specific (per-playlist media rule).
      */
     fun defaultGroupToken(playlistId: String): Flow<String> =
-        store.data.map { it[keyDefaultGroupToken(playlistId)] ?: "" }
+        scopedData.map { it[keyDefaultGroupToken(playlistId)] ?: "" }
 
     suspend fun defaultGroupTokenOnce(playlistId: String): String =
         if (playlistId.isBlank()) "" else store.data.first()[keyDefaultGroupToken(playlistId)] ?: ""
@@ -1138,7 +1182,7 @@ class AppPreferences @Inject constructor(
      * too. Scoped per playlist alongside [defaultGroupToken].
      */
     fun recentGroupVisible(playlistId: String): Flow<Boolean> =
-        store.data.map { it[keyRecentGroupVisible(playlistId)] ?: false }
+        scopedData.map { it[keyRecentGroupVisible(playlistId)] ?: false }
 
     suspend fun setRecentGroupVisible(playlistId: String, visible: Boolean) {
         if (playlistId.isBlank()) return
@@ -1417,8 +1461,8 @@ class AppPreferences @Inject constructor(
      * deliberately NOT Drive-synced, matching iOS's not-in-KVS v1. A corrupt
      * blob decodes to an empty list rather than crashing the filter row.
      */
-    val channelCollections: Flow<List<ChannelCollection>> = store.data.map { prefs ->
-        val raw = prefs[KEY_CHANNEL_COLLECTIONS]
+    val channelCollections: Flow<List<ChannelCollection>> = scopedData.map { prefs ->
+        val raw = prefs[KEY_CHANNEL_COLLECTIONS.s()]
         if (raw.isNullOrBlank()) {
             emptyList()
         } else {
@@ -1441,7 +1485,7 @@ class AppPreferences @Inject constructor(
         transform: (List<ChannelCollection>) -> List<ChannelCollection>,
     ) {
         store.edit { prefs ->
-            val raw = prefs[KEY_CHANNEL_COLLECTIONS]
+            val raw = prefs[KEY_CHANNEL_COLLECTIONS.s()]
             val current: List<ChannelCollection> = when {
                 raw.isNullOrBlank() -> emptyList()
                 else -> {
@@ -1456,9 +1500,9 @@ class AppPreferences @Inject constructor(
             }
             val next = transform(current)
             if (next.isEmpty()) {
-                prefs.remove(KEY_CHANNEL_COLLECTIONS)
+                prefs.remove(KEY_CHANNEL_COLLECTIONS.s())
             } else {
-                prefs[KEY_CHANNEL_COLLECTIONS] = collectionsJson.encodeToString(next)
+                prefs[KEY_CHANNEL_COLLECTIONS.s()] = collectionsJson.encodeToString(next)
             }
         }
     }
@@ -2175,17 +2219,17 @@ class AppPreferences @Inject constructor(
      * the set means "show the tab optimistically".
      */
     suspend fun dvrTabHintOnce(playlistId: String): Boolean =
-        decodeDvrTabHint(store.data.first()[KEY_DVR_TAB_HINT]).contains(playlistId)
+        decodeDvrTabHint(store.data.first()[KEY_DVR_TAB_HINT.s()]).contains(playlistId)
 
     /** No-op when the stored verdict already matches, so the 30s DVR refresh
      *  loop doesn't churn the DataStore. */
     suspend fun setDvrTabHint(playlistId: String, hasRecordings: Boolean) {
         if (playlistId.isBlank()) return
         store.edit { prefs ->
-            val current = decodeDvrTabHint(prefs[KEY_DVR_TAB_HINT])
+            val current = decodeDvrTabHint(prefs[KEY_DVR_TAB_HINT.s()])
             val updated = if (hasRecordings) current + playlistId else current - playlistId
             if (updated == current) return@edit
-            prefs[KEY_DVR_TAB_HINT] = Json.encodeToString(updated.toList())
+            prefs[KEY_DVR_TAB_HINT.s()] = Json.encodeToString(updated.toList())
         }
     }
 
@@ -2306,7 +2350,7 @@ class AppPreferences @Inject constructor(
      * Wire format: "username" then the profile names, all separated by U+001F.
      */
     fun dispatcharrAccountFacts(playlistId: String): Flow<DispatcharrAccountFacts> =
-        store.data.map { decodeAccountFacts(it[keyAccountFacts(playlistId)]) }
+        scopedData.map { decodeAccountFacts(it[keyAccountFacts(playlistId)]) }
 
     suspend fun dispatcharrAccountFactsOnce(playlistId: String): DispatcharrAccountFacts =
         decodeAccountFacts(store.data.first()[keyAccountFacts(playlistId)])
@@ -2340,19 +2384,19 @@ class AppPreferences @Inject constructor(
         /** Separator for the packed account-facts string (never in a name). */
         const val FACTS_SEPARATOR = ""
         private fun keyAccountFacts(playlistId: String) =
-            stringPreferencesKey("dispatcharr_account_facts_$playlistId")
+            stringPreferencesKey(ProfileScope.keyName("dispatcharr_account_facts_$playlistId"))
         private fun keyEpgIdentityHash(playlistId: String) = stringPreferencesKey("epg_identity_hash_$playlistId")
         private fun keyCatchupTimeOffset(playlistId: String) =
             androidx.datastore.preferences.core.intPreferencesKey("catchupTimeOffsetMinutes.$playlistId")
 
         /** GH #81: per-playlist Live TV group token (see [liveGroupToken]). */
-        private fun keyLiveGroupToken(playlistId: String) = stringPreferencesKey("live_group_token_$playlistId")
+        private fun keyLiveGroupToken(playlistId: String) = stringPreferencesKey(ProfileScope.keyName("live_group_token_$playlistId"))
 
         /** GH #81: per-playlist Default Group setting (see [defaultGroupToken]). */
-        private fun keyDefaultGroupToken(playlistId: String) = stringPreferencesKey("default_group_token_$playlistId")
+        private fun keyDefaultGroupToken(playlistId: String) = stringPreferencesKey(ProfileScope.keyName("default_group_token_$playlistId"))
 
         /** Per-playlist "Recently Watched" group visibility (see [recentGroupVisible]). */
-        private fun keyRecentGroupVisible(playlistId: String) = booleanPreferencesKey("recent_group_visible_$playlistId")
+        private fun keyRecentGroupVisible(playlistId: String) = booleanPreferencesKey(ProfileScope.keyName("recent_group_visible_$playlistId"))
         private fun keyFeedValidators(url: String): androidx.datastore.preferences.core.Preferences.Key<String> {
             val d = java.security.MessageDigest.getInstance("SHA-1").digest(url.toByteArray())
             return stringPreferencesKey("feed_validators_" + d.joinToString("") { "%02x".format(it) })

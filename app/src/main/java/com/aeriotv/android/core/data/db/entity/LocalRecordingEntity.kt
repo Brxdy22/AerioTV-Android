@@ -1,6 +1,8 @@
 package com.aeriotv.android.core.data.db.entity
 
+import androidx.room.ColumnInfo
 import androidx.room.Entity
+import com.aeriotv.android.core.profiles.ProfileScope
 import androidx.room.ForeignKey
 import androidx.room.Index
 import androidx.room.PrimaryKey
@@ -41,4 +43,7 @@ data class LocalRecordingEntity(
     val byteSize: Long,
     val status: String, // "completed" | "stopped" | "failed"
     val playlistId: String? = null,
+    /** Profiles (DB v37): "" = default profile (every pre-v37 row). */
+    @ColumnInfo(defaultValue = "")
+    val profileScope: String = ProfileScope.current(),
 )

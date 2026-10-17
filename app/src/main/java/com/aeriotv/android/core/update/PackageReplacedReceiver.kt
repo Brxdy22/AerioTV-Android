@@ -56,7 +56,7 @@ class PackageReplacedReceiver : BroadcastReceiver() {
 
     private suspend fun rescheduleReminders(context: Context) {
         val now = System.currentTimeMillis()
-        val future = reminderDao.allOnce().filter { it.startMillis > now }
+        val future = reminderDao.allScopesOnce().filter { it.startMillis > now }
         if (future.isEmpty()) return
         val mgr = context.getSystemService(AlarmManager::class.java) ?: return
         future.forEach { entity ->

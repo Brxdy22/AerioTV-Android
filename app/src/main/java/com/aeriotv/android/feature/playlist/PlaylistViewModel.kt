@@ -68,6 +68,7 @@ class PlaylistViewModel @Inject constructor(
     // other sections' CACHED restores can start right behind it instead of
     // waiting out the 20 s settle delay (see AppSettleGate.awaitGuidePainted).
     private val settleGate: com.aeriotv.android.core.app.AppSettleGate,
+    private val profileManager: com.aeriotv.android.core.profiles.ProfileManager,
 ) : ViewModel() {
 
     enum class Phase { Bootstrapping, NeedsUrl, ChannelsReady }
@@ -425,6 +426,18 @@ class PlaylistViewModel @Inject constructor(
 
     init {
         bootstrap()
+        // Profiles: a profile switch reloads the channel list, groups and VOD
+        // for the new Dispatcharr user through the same path as a playlist
+        // switch (stops playback, refetches, restores the scoped group).
+        viewModelScope.launch {
+            profileManager.reloadRequests.collect { r ->
+                // The switch already re-read permissions; skip the second probe.
+                switchToPlaylist(r.playlistId, probe = false) { profileManager.finishSwitch(r.gen) }
+            }
+        }
+        viewModelScope.launch {
+            profileManager.manageRequests.collect { requestSettingsPage("playlist-detail") }
+        }
         observeMemoryPressure()
         observeUpstreamLayering()
         // Server-declared radio channels of the ACTIVE playlist, for the
@@ -2365,8 +2378,9 @@ class PlaylistViewModel @Inject constructor(
     /** Make [playlistId] active and load its channels. Mirrors the bootstrap
      * load-and-render flow, but skipping the JWT exchange the first-load does
      * for User+Pass since the apiKey is already cached on the row. */
-    fun switchToPlaylist(playlistId: String) {
+    fun switchToPlaylist(playlistId: String, probe: Boolean = true, onDone: (() -> Unit)? = null) {
         viewModelScope.launch {
+          try {
             // GH #22: stop whatever the OLD source is still playing (phone
             // mini-player / background audio keeps rolling across a switch;
             // TV already stops on leave). Besides being the right product
@@ -2378,7 +2392,7 @@ class PlaylistViewModel @Inject constructor(
             runCatching { exoWindowState.hide() }
             runCatching { exoHolder.stop() }
             _state.update { it.copy(isLoading = true, error = null) }
-            repository.switchActive(playlistId).fold(
+            repository.switchActive(playlistId, probe).fold(
                 onSuccess = { (entity, channels) ->
                     _state.update {
                         it.copy(
@@ -2425,6 +2439,9 @@ class PlaylistViewModel @Inject constructor(
                     }
                 },
             )
+          } finally {
+            onDone?.invoke()
+          }
         }
     }
 

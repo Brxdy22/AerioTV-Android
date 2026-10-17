@@ -190,6 +190,8 @@ fun GuideScreen(
     val isTv = rememberLiveTvFormFactor().isTv
     val context = LocalContext.current
     val canRecordToServer = LocalCanRecordToServer.current
+    // Profiles: no Record anywhere unless dvr_access == manage.
+    val dvrCanRecord = com.aeriotv.android.ui.LocalDvrAccess.current == "manage"
 
     val guideScale by settingsVm.guideScale.collectAsStateWithLifecycle()
     val categoryPalette by settingsVm.categoryPalette.collectAsStateWithLifecycle(initialValue = com.aeriotv.android.core.category.CategoryPaletteState.Default)
@@ -1007,7 +1009,7 @@ fun GuideScreen(
             com.aeriotv.android.core.remote.GuideRemoteAction.RECORD -> {
                 val row = grid.focusRow; val cell = grid.focusedCell()
                 // Same gate as the program menu's Record item.
-                if (row >= 0 && cell != null && !cell.isPlaceholder && cell.endMillis > nowMs &&
+                if (dvrCanRecord && row >= 0 && cell != null && !cell.isPlaceholder && cell.endMillis > nowMs &&
                     (nowMs in cell.startMillis until cell.endMillis || canRecordToServer)
                 ) {
                     val ch = grid.rows.channel(row)
@@ -1773,7 +1775,7 @@ fun GuideScreen(
         } else 4
         val atCap = stagedMultiview.size >= mvCap
         val canAddToMultiview = channel.url.isNotBlank() && (!atCap || inMultiview) && !mvPlayingHere
-        val canRecord = notEnded && (isLive || canRecordToServer)
+        val canRecord = dvrCanRecord && notEnded && (isLive || canRecordToServer)
         val replayable = !cell.isPlaceholder && channel.canReplay(cell, nowMs)
         // Apple TV order (Logan 2026-09-02): Favorites, Multiview, Collection,
         // Program Info, Record from Now, then the Android-only extras.

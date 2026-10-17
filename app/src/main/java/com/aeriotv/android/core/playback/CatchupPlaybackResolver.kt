@@ -1,5 +1,7 @@
 package com.aeriotv.android.core.playback
 
+import com.aeriotv.android.core.data.db.entity.dispatcharrCanUseCatchup
+import com.aeriotv.android.core.data.db.entity.isDispatcharrDirectConnect
 import com.aeriotv.android.core.data.M3UChannel
 import com.aeriotv.android.core.data.SourceType
 import com.aeriotv.android.core.data.db.entity.PlaylistEntity
@@ -101,6 +103,11 @@ class CatchupPlaybackResolver @Inject constructor(
         startMillis: Long,
         endMillis: Long,
     ): Result<Playback> = runCatching {
+        // Profiles backstop: a Dispatcharr user with catchup_enabled=false
+        // never reaches the timeshift endpoint, whatever surface asked.
+        if (playlist.isDispatcharrDirectConnect() &&
+            !playlist.dispatcharrCanUseCatchup()
+        ) throw Failure.NotCatchup()
         val streamId = channel.catchupStreamId
             ?.takeIf { channel.catchupDays > 0 }
             ?: throw Failure.NotCatchup()
