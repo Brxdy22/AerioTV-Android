@@ -1,7 +1,16 @@
 package com.aeriotv.android.feature.onboarding
 
 import com.aeriotv.android.ui.scale.subtext
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.size
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -42,9 +51,9 @@ import com.aeriotv.android.ui.settings.dpadFocusRing
 import com.aeriotv.android.ui.settings.rememberIsTvDevice
 
 /**
- * Mirrors iOS App Store screenshot IMG_1077: "Add Playlist" back stack frame
- * with "Choose Source Type" header and three rounded cards (Dispatcharr,
- * Xtream Codes, M3U + EPG). Tapping a card pushes to the Configure form.
+ * "Add Playlist" / onboarding source picker: Dispatcharr Direct Connect is
+ * the headline card; "Other playlist types" reveals Xtream Codes and
+ * M3U + EPG. Tapping a card pushes to the Configure form.
  *
  * Per the no-bundled-media rule, this surface ships zero hardcoded URLs - the
  * cards only describe types, the user picks one and supplies their own URL on
@@ -128,27 +137,91 @@ fun ChooseSourceTypeScreen(
 
                 Spacer(Modifier.height(4.dp))
 
-                SourceTypeCard(
-                    icon = Icons.Filled.Key,
-                    title = "Dispatcharr Direct Connect",
-                    subtitle = "Connect to Dispatcharr with your admin login or a personal API key " +
-                            "(*AerioTV is not officially affiliated with the Dispatcharr project)",
-                    modifier = Modifier.tappable { onChoose(SourceType.DispatcharrUserPass) },
+                // Dispatcharr Direct Connect is the headline: one large
+                // primary card. Xtream Codes and M3U + EPG sit behind a
+                // single secondary "Other playlist types" button.
+                DirectConnectHeroCard(
+                    onClick = { onChoose(SourceType.DispatcharrUserPass) },
                 )
-                SourceTypeCard(
-                    icon = Icons.Filled.Tv,
-                    title = "Xtream Codes",
-                    subtitle = "Xtream Codes API. Live TV, VOD movies & series.",
-                    modifier = Modifier.tappable { onChoose(SourceType.XtreamCodes) },
+                Text(
+                    text = "*AerioTV is not officially affiliated with the Dispatcharr project",
+                    style = MaterialTheme.typography.bodySmall.subtext(),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
                 )
-                SourceTypeCard(
-                    icon = Icons.Filled.Description,
-                    title = "M3U + EPG",
-                    subtitle = "Any M3U playlist URL. Works with Dispatcharr, any IPTV provider.",
-                    modifier = Modifier.tappable { onChoose(SourceType.M3uUrl) },
-                )
+
+                var showOthers by rememberSaveable { mutableStateOf(false) }
+                if (!showOthers) {
+                    OutlinedButton(
+                        onClick = { showOthers = true },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(min = 50.dp)
+                            .dpadFocusRing(RoundedCornerShape(50)),
+                    ) {
+                        Text("Other playlist types", style = MaterialTheme.typography.titleMedium)
+                    }
+                } else {
+                    SourceTypeCard(
+                        icon = Icons.Filled.Tv,
+                        title = "Xtream Codes",
+                        subtitle = "Xtream Codes API. Live TV, VOD movies & series.",
+                        modifier = Modifier.tappable { onChoose(SourceType.XtreamCodes) },
+                    )
+                    SourceTypeCard(
+                        icon = Icons.Filled.Description,
+                        title = "M3U + EPG",
+                        subtitle = "Any M3U playlist URL. Works with Dispatcharr, any IPTV provider.",
+                        modifier = Modifier.tappable { onChoose(SourceType.M3uUrl) },
+                    )
+                }
             }
         }
+    }
+}
+
+@Composable
+private fun DirectConnectHeroCard(onClick: () -> Unit) {
+    val shape = RoundedCornerShape(20.dp)
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .dpadFocusRing(shape, washTint = MaterialTheme.colorScheme.primary)
+            .clickable(onClick = onClick)
+            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.16f))
+            .border(1.5.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.55f), shape)
+            .padding(horizontal = 20.dp, vertical = 24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .size(56.dp)
+                .clip(RoundedCornerShape(14.dp))
+                .background(MaterialTheme.colorScheme.primary),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = Icons.Filled.Key,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onPrimary,
+                modifier = Modifier.size(30.dp),
+            )
+        }
+        Text(
+            text = "Dispatcharr Direct Connect",
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.onBackground,
+            textAlign = TextAlign.Center,
+        )
+        Text(
+            text = "Connect to your Dispatcharr server. Profiles, DVR, catch-up, and server sync.",
+            style = MaterialTheme.typography.bodyMedium.subtext(),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = TextAlign.Center,
+        )
     }
 }
 

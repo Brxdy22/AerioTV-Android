@@ -70,6 +70,7 @@ class ProfileManager @Inject constructor(
     private val watchlistStore: com.aeriotv.android.core.preferences.WatchlistStore,
     private val hiddenTitlesStore: com.aeriotv.android.core.preferences.HiddenTitlesStore,
     @dagger.hilt.android.qualifiers.ApplicationContext private val context: android.content.Context,
+    private val pinStore: ProfilePinStore,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mutex = Mutex()
@@ -77,7 +78,7 @@ class ProfileManager @Inject constructor(
 
     /** Playlist ids whose channel list / groups / VOD must reload after a
      *  profile switch. A Channel so exactly one PlaylistViewModel handles it. */
-    data class Reload(val playlistId: String, val gen: Long)
+    data class Reload(val playlistId: String, val gen: Long, val fromSwitch: Boolean = true)
     private val reloads = Channel<Reload>(Channel.BUFFERED)
     val reloadRequests: Flow<Reload> = reloads.receiveAsFlow()
 
@@ -128,6 +129,146 @@ class ProfileManager @Inject constructor(
         if (active != null && !active.isDefault && active.playlistId == pid) {
             ProfileScope.activate(active.toOverlay())
             Log.i(TAG, "[PROFILE] restored ${active.displayName} on ${pid.take(8)}")
+        }
+        // PIN: a locked restored profile (the default one included) shows the
+        // PIN gate before any content, and nothing may start playback under it.
+        val restored = active?.takeIf { it.playlistId == pid }
+            ?: store.forPlaylist(pid).firstOrNull { it.isDefault }
+        if (restored != null && pinStore.hasPin(restored.id)) {
+            _launchGate.value = restored
+            Log.i(TAG, "[PROFILE] launch gate armed for ${restored.username}")
+        }
+    }
+
+    // ---- PIN (phase 2a) ----
+
+    sealed interface PinCheck {
+        data object Ok : PinCheck
+        data object Wrong : PinCheck
+        data class Locked(val seconds: Int) : PinCheck
+    }
+
+    private val _launchGate = kotlinx.coroutines.flow.MutableStateFlow<DispatcharrProfile?>(null)
+    /** The locked profile whose PIN must be entered before any content shows. */
+    val launchGate: kotlinx.coroutines.flow.StateFlow<DispatcharrProfile?> = _launchGate
+
+    /** True while the launch gate is up: no playback may start (media service). */
+    fun isPinGated(): Boolean = _launchGate.value != null
+
+    /** One-shot tickets: a verified PIN lets exactly one switch through. */
+    private val switchTickets = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    fun hasPin(profileId: String): Boolean = pinStore.hasPin(profileId)
+    fun pinType(profileId: String): PinType? = pinStore.type(profileId)
+    fun pinLockSeconds(profileId: String): Int = pinStore.backoff(profileId).remainingSeconds(System.currentTimeMillis())
+
+    /** Check [entries] against [profileId]'s PIN, with the wrong-PIN backoff. */
+    @Synchronized
+    fun verifyPin(profileId: String, entries: List<String>): PinCheck {
+        val p = store.byId(profileId)
+        val now = System.currentTimeMillis()
+        val b = pinStore.backoff(profileId)
+        b.remainingSeconds(now).takeIf { it > 0 }?.let { return PinCheck.Locked(it) }
+        return if (pinStore.check(profileId, entries)) {
+            pinStore.saveBackoff(profileId, b.onOk())
+            switchTickets.add(profileId)
+            Log.i(TAG, "[PROFILE] pin ok for ${p?.username}")
+            PinCheck.Ok
+        } else {
+            val next = b.onWrong(now)
+            pinStore.saveBackoff(profileId, next)
+            Log.i(TAG, "[PROFILE] pin wrong for ${p?.username}")
+            next.remainingSeconds(now).takeIf { it > 0 }?.let { PinCheck.Locked(it) } ?: PinCheck.Wrong
+        }
+    }
+
+    /** Launch gate: enter the restored profile's PIN. */
+    fun unlockLaunchGate(entries: List<String>): PinCheck {
+        val g = _launchGate.value ?: return PinCheck.Ok
+        val r = verifyPin(g.id, entries)
+        if (r == PinCheck.Ok) {
+            switchTickets.remove(g.id)
+            _launchGate.value = null
+        }
+        return r
+    }
+
+    /** Admin may manage any profile's PIN; anyone else only their own. */
+    suspend fun canManagePin(playlistId: String, profileId: String): Boolean =
+        activeIsAdmin(playlistId) || activeProfileIdNow(playlistId) == profileId
+
+    /** Admin manages without the old PIN; a non-admin must pass [current]. */
+    suspend fun needsCurrentPin(playlistId: String, profileId: String): Boolean =
+        !activeIsAdmin(playlistId) && pinStore.hasPin(profileId)
+
+    suspend fun setPin(
+        playlistId: String,
+        profileId: String,
+        type: PinType,
+        entries: List<String>,
+        current: List<String>?,
+    ): Result<Unit> = runCatching {
+        check(canManagePin(playlistId, profileId)) { "Only an Admin profile can change another profile's PIN." }
+        val had = pinStore.hasPin(profileId)
+        if (needsCurrentPin(playlistId, profileId)) {
+            check(verifyPin(profileId, current.orEmpty()) == PinCheck.Ok) { "Wrong PIN" }
+            switchTickets.remove(profileId)
+        }
+        check(pinStore.set(profileId, type, entries)) { "Enter 4 to 6" }
+        Log.i(TAG, "[PROFILE] pin ${if (had) "changed" else "set"} for ${store.byId(profileId)?.username}")
+    }
+
+    suspend fun removePin(playlistId: String, profileId: String, current: List<String>?): Result<Unit> = runCatching {
+        check(canManagePin(playlistId, profileId)) { "Only an Admin profile can remove another profile's PIN." }
+        if (needsCurrentPin(playlistId, profileId)) {
+            check(verifyPin(profileId, current.orEmpty()) == PinCheck.Ok) { "Wrong PIN" }
+            switchTickets.remove(profileId)
+        }
+        pinStore.remove(profileId)
+        Log.i(TAG, "[PROFILE] pin removed for ${store.byId(profileId)?.username}")
+    }
+
+    private fun activeProfileIdNow(playlistId: String): String? =
+        store.activeProfileId(playlistId)?.takeIf { store.byId(it) != null }
+            ?: store.forPlaylist(playlistId).firstOrNull { it.isDefault }?.id
+
+    // ---- Channel Profiles per user (phase 2a, Admin only) ----
+
+    data class ChannelProfileChoice(val id: Int, val name: String)
+    data class ChannelProfileAssignment(val userId: Int, val choices: List<ChannelProfileChoice>, val assigned: Set<Int>)
+
+    /** The server's channel profiles and [profileId]'s user's current list. */
+    suspend fun channelProfileAssignment(playlistId: String, profileId: String): Result<ChannelProfileAssignment> = runCatching {
+        check(activeIsAdmin(playlistId)) { "Only an Admin profile can assign channel profiles." }
+        val p = store.byId(profileId) ?: error("Profile not found")
+        val row = playlistDao.byId(playlistId) ?: error("Playlist not found")
+        val base = repository.effectiveBaseUrl(row)
+        val key = row.apiKey?.takeIf { it.isNotBlank() } ?: error("No API key for this playlist")
+        val user = client.listUsers(base, key).firstOrNull { it.username.equals(p.username, ignoreCase = true) }
+            ?: error("${p.username} was not found on the server.")
+        val choices = client.listProfiles(base, key).map { ChannelProfileChoice(it.id, it.name) }.sortedBy { it.name.lowercase() }
+        ChannelProfileAssignment(user.id, choices, user.channelProfiles.toSet())
+    }
+
+    /** PATCH the user's channel_profiles (empty = All). Reloads channels when
+     *  [profileId] is the active profile. */
+    suspend fun saveChannelProfiles(playlistId: String, profileId: String, userId: Int, ids: List<Int>): Result<Unit> = runCatching {
+        check(activeIsAdmin(playlistId)) { "Only an Admin profile can assign channel profiles." }
+        val p = store.byId(profileId) ?: error("Profile not found")
+        val row = playlistDao.byId(playlistId) ?: error("Playlist not found")
+        val base = repository.effectiveBaseUrl(row)
+        val key = row.apiKey?.takeIf { it.isNotBlank() } ?: error("No API key for this playlist")
+        client.patchUserChannelProfiles(base, key, userId, ids)
+        val joined = ids.sorted().joinToString(",")
+        if (!p.isDefault) store.update(profileId) { it.copy(accountProfileIds = joined) }
+        Log.i(TAG, "[PROFILE] channel profiles for ${p.username} set to ${if (ids.isEmpty()) "All" else joined}")
+        if (activeProfileIdNow(playlistId) == profileId) {
+            if (p.isDefault) {
+                playlistDao.rawById(playlistId)?.let { playlistDao.update(it.copy(dispatcharrAccountProfileIds = joined)) }
+            } else {
+                ProfileScope.updateOverlay { it.copy(accountProfileIds = joined) }
+            }
+            reloads.send(Reload(playlistId, switchGen.get(), fromSwitch = false))
         }
     }
 
@@ -231,9 +372,9 @@ class ProfileManager @Inject constructor(
         // to a typed password or key when the server has none.
         val listedKey = user.apiKey?.takeIf { it.isNotBlank() }
         val key = if (password.isNullOrBlank() && apiKey.isNullOrBlank() && listedKey != null) {
-            authenticate(playlistId, id, base, user.username, null, listedKey)
+            authenticate(playlistId, id, base, user.username, null, listedKey).key
         } else {
-            authenticate(playlistId, id, base, user.username, password, apiKey)
+            authenticate(playlistId, id, base, user.username, password, apiKey).key
         }
         val me = client.fetchMe(base, key) ?: error("Could not read ${user.username} from the server.")
         if (!me.username.equals(user.username, ignoreCase = true)) {
@@ -252,6 +393,55 @@ class ProfileManager @Inject constructor(
         profile
     }
 
+    // ---- Dispatcharr Sync `profiles` key (admin only, schema 4.12 and 5) ----
+
+    /** Local profile id of [username] on [playlistId], or null. */
+    fun profileIdFor(playlistId: String, username: String): String? =
+        store.forPlaylist(playlistId).firstOrNull { it.username.equals(username, ignoreCase = true) }?.id
+
+    /**
+     * Merge a pulled `profiles` list on a device signed in as the admin: a
+     * missing profile is added with the api_key from the admin user list (no
+     * typing), display names and PINs follow the list. Local profiles are
+     * never removed. Returns how many profiles were added.
+     */
+    suspend fun mergeSyncedProfiles(
+        playlistId: String,
+        rows: List<com.aeriotv.android.core.sync.dsync.ProfileRow>,
+        users: List<DispatcharrUserSummary>,
+    ): Int {
+        if (!activeIsAdmin(playlistId)) return 0
+        var added = 0
+        rows.forEach { r ->
+            var local = store.forPlaylist(playlistId).firstOrNull { it.username.equals(r.username, ignoreCase = true) }
+            if (local == null) {
+                val user = users.firstOrNull { it.id == r.userId }
+                    ?: users.firstOrNull { it.username.equals(r.username, ignoreCase = true) }
+                if (user == null || user.apiKey.isNullOrBlank()) {
+                    Log.i(TAG, "[DSYNC] profiles: ${r.username} has no listed api key; not added")
+                    return@forEach
+                }
+                local = addProfile(playlistId, user, null, null)
+                    .onFailure { Log.w(TAG, "[DSYNC] profiles: add ${r.username} failed: ${it.message}") }
+                    .getOrNull() ?: return@forEach
+                added++
+            }
+            val id = local.id
+            if (r.displayName.isNotBlank() && r.displayName != local.displayName) {
+                store.update(id) { it.copy(displayName = r.displayName) }
+            }
+            val type = PinRules.typeFromWire(r.pinType)
+            if (type == null) {
+                // A v1 PIN set on this device before sync stays until re-entered.
+                if (pinStore.hasPin(id) && !pinStore.isLegacy(id)) pinStore.remove(id)
+            } else if (r.pinHash.length == 64 && r.pinSalt.length == 32) {
+                pinStore.importSynced(id, type, r.pinHash, r.pinSalt)
+            }
+        }
+        if (added > 0) Log.i(TAG, "[DSYNC] profiles: added $added from the synced list")
+        return added
+    }
+
     fun rename(profileId: String, name: String) {
         val clean = name.trim()
         if (clean.isEmpty()) return
@@ -266,7 +456,8 @@ class ProfileManager @Inject constructor(
         check(activeIsAdmin(p.playlistId)) { "Only an Admin profile can remove profiles." }
         if (store.activeProfileId(p.playlistId) == profileId) {
             val def = store.forPlaylist(p.playlistId).first { it.isDefault }
-            switchTo(p.playlistId, def.id).getOrThrow()
+            // The Admin removing the active profile: internal, no PIN prompt.
+            switchTo(p.playlistId, def.id, bypassPin = true).getOrThrow()
         }
         runCatching { favoriteDao.deleteScope(profileId) }
         runCatching { watchProgressDao.deleteScope(profileId) }
@@ -293,6 +484,7 @@ class ProfileManager @Inject constructor(
         }
         runCatching { channelSnapshotDao.deleteForPlaylistKey("${p.playlistId}@$profileId") }
         runCatching { appPreferences.deleteProfileScope(profileId) }
+        runCatching { pinStore.remove(profileId) }
         runCatching { vodCatalogStore.deleteForPlaylistUser(p.playlistId, p.username) }
         store.remove(profileId)
         Log.i(TAG, "[PROFILE] removed ${p.username} on ${p.playlistId.take(8)}; local state deleted")
@@ -305,7 +497,10 @@ class ProfileManager @Inject constructor(
      * profile, 429 honored), re-reads permissions, swaps the scope, and asks
      * for a channel / group / VOD reload.
      */
-    suspend fun switchTo(playlistId: String, profileId: String): Result<Unit> = runCatching {
+    suspend fun switchTo(playlistId: String, profileId: String, bypassPin: Boolean = false): Result<Unit> = runCatching {
+        if (!bypassPin && pinStore.hasPin(profileId)) {
+            check(switchTickets.remove(profileId)) { "Enter PIN" }
+        }
         val gen = switchGen.incrementAndGet()
         watchdog?.cancel()
         watchdog = null
@@ -324,14 +519,26 @@ class ProfileManager @Inject constructor(
             ?: store.forPlaylist(playlistId).firstOrNull { it.isDefault }
         val row = playlistDao.rawById(playlistId) ?: error("Playlist not found")
         val base = repository.effectiveBaseUrl(row)
+        val t0 = System.currentTimeMillis()
+        var tAuth = t0
+        var tMe = t0
+        var path = "key"
         mutex.withLock {
             if (target.isDefault) {
-                authenticate(playlistId, target.id, base, row.username.orEmpty(), row.password, row.apiKey)
+                val a = authenticate(playlistId, target.id, base, row.username.orEmpty(), row.password, row.apiKey)
+                path = a.path
+                tAuth = System.currentTimeMillis(); tMe = tAuth
                 ProfileScope.activate(null)
                 store.setActiveProfileId(playlistId, null)
             } else {
-                val key = authenticate(playlistId, target.id, base, target.username, target.password, target.apiKey)
-                val me = client.fetchMe(base, key) ?: error("Could not read ${target.username} from the server.")
+                val a = authenticate(playlistId, target.id, base, target.username, target.password, target.apiKey)
+                path = a.path
+                val key = a.key
+                tAuth = System.currentTimeMillis()
+                // The stored-key path already read /me/; only a fresh login
+                // needs the extra read.
+                val me = a.me ?: client.fetchMe(base, key) ?: error("Could not read ${target.username} from the server.")
+                tMe = System.currentTimeMillis()
                 val updated = target.applyMe(me, key)
                 store.upsert(updated)
                 ProfileScope.activate(updated.toOverlay())
@@ -345,6 +552,12 @@ class ProfileManager @Inject constructor(
         // Re-evaluate permissions with the existing capability probe; its
         // write lands in the profile record through the DAO overlay.
         runCatching { repository.probeCapabilities(playlistId, force = true, trigger = "profile switch") }
+        val tProbe = System.currentTimeMillis()
+        Log.i(
+            TAG,
+            "[SWITCH] profile auth=${tAuth - t0}ms me=${tMe - tAuth}ms probe=${tProbe - tMe}ms " +
+                "path=$path total=${tProbe - t0}ms",
+        )
         // Safety: never leave the scrim up if no PlaylistViewModel answers.
         watchdog = scope.launch {
             kotlinx.coroutines.delay(SWITCH_TIMEOUT_MS)
@@ -368,8 +581,36 @@ class ProfileManager @Inject constructor(
         )
     }
 
-    /** Sign in as one user; returns that user's API key. */
+    private data class Auth(val key: String, val me: MeResponse?, val path: String)
+
+    /**
+     * Sign in as one user; returns that user's API key. Fast switch: a stored
+     * API key is tried first with ONE GET /me/ (which also answers who the
+     * key belongs to); the password login (POST token + GET me) runs only
+     * when that key is missing, rejected, or belongs to someone else.
+     */
     private suspend fun authenticate(
+        playlistId: String,
+        profileId: String,
+        base: String,
+        username: String,
+        password: String?,
+        apiKey: String?,
+    ): Auth {
+        val stored = apiKey?.takeIf { it.isNotBlank() }
+        if (stored != null) {
+            val me = runCatching { client.fetchMe(base, stored) }.getOrNull()
+            if (me != null && (username.isBlank() || me.username.equals(username, ignoreCase = true))) {
+                return Auth(stored, me, "key")
+            }
+            if (password.isNullOrBlank()) {
+                throw DispatcharrError.InvalidCredentials("The API key for $username was rejected.")
+            }
+        }
+        return Auth(loginForKey(playlistId, profileId, base, username, password, apiKey), null, "login")
+    }
+
+    private suspend fun loginForKey(
         playlistId: String,
         profileId: String,
         base: String,

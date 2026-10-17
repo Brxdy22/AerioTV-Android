@@ -134,6 +134,34 @@ class WatchlistStore @Inject constructor(
 
     private fun Entry.stamp(): Long = maxOf(addedAt, removedAt ?: 0L)
 
+    /**
+     * Dispatcharr Sync pull (full replace for one playlist scope): rows of
+     * [playlistId] become exactly [live]; a live row absent from it gets a
+     * removedAt tombstone, a missing or removed one is added or revived.
+     * Title and art stay from the local row when one exists. Other scopes
+     * are untouched.
+     */
+    suspend fun replaceScope(playlistId: String?, live: List<Entry>) {
+        val k = skey()
+        store.edit { prefs ->
+            val now = System.currentTimeMillis()
+            val current = decode(prefs[k]).toMutableList()
+            val wanted = live.associateBy { it.key }
+            for (i in current.indices) {
+                val c = current[i]
+                if (c.playlistId != playlistId) continue
+                if (c.isLive && c.key !in wanted) current[i] = c.copy(removedAt = now)
+            }
+            wanted.values.forEach { w ->
+                val i = current.indexOfFirst { it.key == w.key && it.playlistId == playlistId }
+                if (i < 0) current += w.copy(playlistId = playlistId, removedAt = null)
+                else if (!current[i].isLive) current[i] = current[i].copy(addedAt = w.addedAt, removedAt = null)
+            }
+            prefs[k] = json.encodeToString(current)
+        }
+    }
+
+
     /** Remove Profile cleanup. */
     suspend fun deleteScope(profileId: String) {
         store.edit { it.remove(stringPreferencesKey(com.aeriotv.android.core.profiles.ProfileScope.keyName("entries", profileId))) }

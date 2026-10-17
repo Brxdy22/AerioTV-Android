@@ -431,6 +431,12 @@ class PlaylistViewModel @Inject constructor(
         // switch (stops playback, refetches, restores the scoped group).
         viewModelScope.launch {
             profileManager.reloadRequests.collect { r ->
+                // Admin changed the ACTIVE profile's Channel Profiles: refresh
+                // in place, no scrim, no stop.
+                if (!r.fromSwitch) { refreshPlaylist(); return@collect }
+                // Fast switch: paint this profile's cached snapshot and drop
+                // the scrim now; the first-ever switch still waits for the fetch.
+                if (fastProfileSwitchFromCache(r)) return@collect
                 // The switch already re-read permissions; skip the second probe.
                 switchToPlaylist(r.playlistId, probe = false) { profileManager.finishSwitch(r.gen) }
             }
@@ -2443,6 +2449,56 @@ class PlaylistViewModel @Inject constructor(
             onDone?.invoke()
           }
         }
+    }
+
+    /**
+     * Profiles fast switch (phase 2a): when the new profile has a channel
+     * snapshot (ChannelSnapshotDao under playlistId@profileId), paint it,
+     * release the scrim, then refresh channels in the background the way a
+     * Dispatcharr cold launch does (always refreshed behind the cache). The
+     * background write is bound to the profile it started under, so a later
+     * switch can never receive this profile's rows. False = no snapshot.
+     */
+    private suspend fun fastProfileSwitchFromCache(r: com.aeriotv.android.core.profiles.ProfileManager.Reload): Boolean {
+        val t0 = System.currentTimeMillis()
+        val cached = runCatching { repository.loadCachedChannels(r.playlistId) }.getOrDefault(emptyList())
+        if (cached.isEmpty()) {
+            Log.i(TAG, "[SWITCH] profile has no channel snapshot; waiting for the fetch")
+            return false
+        }
+        val entity = repository.activePlaylist()?.takeIf { it.id == r.playlistId } ?: return false
+        runCatching { miniPlayerSession.dismiss() }
+        runCatching { exoWindowState.hide() }
+        runCatching { exoHolder.stop() }
+        _state.update {
+            it.copy(
+                phase = Phase.ChannelsReady,
+                playlist = entity,
+                channels = cached,
+                isLoading = false,
+                error = null,
+            )
+        }
+        restoreSelectedGroup(
+            entity.id,
+            cached.asSequence().map { ch -> ch.groupTitle }.filter { g -> g.isNotBlank() }.distinct().toList(),
+        )
+        epgWriteMutex.withLock { _state.update { st -> st.copy(epgByChannel = emptyMap()) } }
+        loadEpgIfConfigured(entity)
+        profileManager.finishSwitch(r.gen)
+        Log.i(TAG, "[SWITCH] profile scrim released from cache after ${System.currentTimeMillis() - t0}ms (${cached.size} cached channels); background refresh started")
+        val token = com.aeriotv.android.core.profiles.ProfileScope.token.value
+        viewModelScope.launch {
+            repository.switchActive(r.playlistId, probe = false, expectedScopeToken = token).fold(
+                onSuccess = { (fresh, channels) ->
+                    if (com.aeriotv.android.core.profiles.ProfileScope.token.value != token) return@fold
+                    _state.update { it.copy(playlist = fresh, channels = channels, error = if (channels.isEmpty()) "No channels found." else null) }
+                    Log.i(TAG, "[SWITCH] profile background refresh landed (${channels.size} channels)")
+                },
+                onFailure = { t -> Log.w(TAG, "[SWITCH] profile background refresh failed; cached list kept: ${LogSanitizer.redact(t.message ?: "")}") },
+            )
+        }
+        return true
     }
 
     /**

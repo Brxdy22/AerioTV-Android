@@ -59,6 +59,7 @@ class AerioMediaPlaybackService : MediaLibraryService() {
 
     @Inject lateinit var exoHolder: AerioExoPlayerHolder
     @Inject lateinit var browseTree: AutoBrowseTree
+    @Inject lateinit var profileManager: com.aeriotv.android.core.profiles.ProfileManager
     @Inject lateinit var castReceiver: com.aeriotv.android.core.cast.AerioCastReceiverController
     @Inject lateinit var castSender: com.aeriotv.android.core.cast.AerioCastSender
 
@@ -303,6 +304,8 @@ class AerioMediaPlaybackService : MediaLibraryService() {
             mediaSession: MediaSession,
             controller: MediaSession.ControllerInfo,
         ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> = future {
+            // PIN: never resume (Kept Live, Radio Mode, car) into a locked profile.
+            if (profileManager.isPinGated()) throw UnsupportedOperationException("profile locked")
             val lastId = exoHolder.currentChannelId
                 ?: throw UnsupportedOperationException("no previous channel to resume")
             val info = browseTree.resolveForPlayback(lastId)
@@ -319,6 +322,7 @@ class AerioMediaPlaybackService : MediaLibraryService() {
             startIndex: Int,
             startPositionMs: Long,
         ): ListenableFuture<MediaSession.MediaItemsWithStartPosition> = future {
+            if (profileManager.isPinGated()) throw UnsupportedOperationException("profile locked")
             val pickedId = mediaItems.getOrNull(startIndex)?.mediaId
                 ?: mediaItems.firstOrNull()?.mediaId
             val info = pickedId?.let { browseTree.resolveForPlayback(it) }
@@ -336,6 +340,7 @@ class AerioMediaPlaybackService : MediaLibraryService() {
             controller: MediaSession.ControllerInfo,
             mediaItems: MutableList<MediaItem>,
         ): ListenableFuture<MutableList<MediaItem>> = future {
+            if (profileManager.isPinGated()) throw UnsupportedOperationException("profile locked")
             val resolved = mediaItems.mapNotNull { item ->
                 val info = browseTree.resolveForPlayback(item.mediaId) ?: return@mapNotNull null
                 exoHolder.httpHeaders = info.headers

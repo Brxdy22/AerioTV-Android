@@ -68,6 +68,7 @@ class AerioTVApplication : Application(), Configuration.Provider, SingletonImage
     @Inject lateinit var playlistRepository: PlaylistRepository
     @Inject lateinit var playlistDao: PlaylistDao
     @Inject lateinit var profileManager: com.aeriotv.android.core.profiles.ProfileManager
+    @Inject lateinit var dispatcharrSync: com.aeriotv.android.core.sync.dsync.DispatcharrSyncManager
     @Inject lateinit var aerioDatabase: AerioDatabase
     @Inject lateinit var timeshiftStore: com.aeriotv.android.core.timeshift.TimeshiftBufferStore
 
@@ -145,6 +146,8 @@ class AerioTVApplication : Application(), Configuration.Provider, SingletonImage
         // one-time default-profile migration and active-playlist tracking.
         profileManager.restoreSync()
         profileManager.start()
+        // Dispatcharr Sync: idle unless Settings > Sync uses Dispatcharr.
+        dispatcharrSync.start()
         // Crash capture FIRST, and independent of the Debug Logging toggle: a
         // user whose app dies seconds after launch cannot turn logging on in
         // time, so the report has to be collected without being asked for.

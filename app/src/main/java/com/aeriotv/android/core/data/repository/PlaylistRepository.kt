@@ -3274,6 +3274,9 @@ class PlaylistRepository @Inject constructor(
     suspend fun switchActive(
         playlistId: String,
         probe: Boolean = true,
+        /** Profiles fast switch: the ProfileScope token this fetch belongs
+         *  to; a different token at write time drops the result. */
+        expectedScopeToken: String? = null,
     ): Result<Pair<PlaylistEntity, List<M3UChannel>>> = runCatching {
         val t0 = System.currentTimeMillis()
         dao.switchActive(playlistId)
@@ -3317,6 +3320,9 @@ class PlaylistRepository @Inject constructor(
                 entity.dispatcharrProfileId, emptyList(),
                 entity.username, entity.password,
             )
+        }
+        if (expectedScopeToken != null && com.aeriotv.android.core.profiles.ProfileScope.token.value != expectedScopeToken) {
+            throw IllegalStateException("profile changed during the background refresh")
         }
         val updated = entity.copy(channelCount = channels.size, lastRefreshedAt = System.currentTimeMillis())
         dao.update(updated)

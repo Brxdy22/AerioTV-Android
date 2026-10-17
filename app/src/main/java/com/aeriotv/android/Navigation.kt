@@ -894,19 +894,39 @@ fun AerioTVNavHost(
                 val resolvedType = runCatching { SourceType.valueOf(typeName) }
                     .getOrElse { SourceType.M3uUrl }
 
+                // Dispatcharr only: "Add profiles for other users?" step
+                // between a successful connect and the advance to MAIN.
+                var profileStepFor by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf<String?>(null) }
                 LaunchedEffect(Unit) {
                     // Navigate on a one-shot "configured" EVENT, not on
                     // phase == ChannelsReady: when adding a second playlist the
                     // phase is already ChannelsReady, so a phase-watcher never
                     // re-fires and the add silently succeeds with no advance.
                     vm.sourceConfigured.collect {
+                        val pid = vm.state.value.playlist?.id
+                        if ((resolvedType == SourceType.DispatcharrApiKey || resolvedType == SourceType.DispatcharrUserPass) && pid != null) {
+                            profileStepFor = pid
+                            return@collect
+                        }
                         navController.navigate(Routes.MAIN) {
                             popUpTo(Routes.PLAYLIST_GRAPH) { inclusive = false }
                         }
                     }
                 }
 
-                ConfigureSourceScreen(
+                val stepPid = profileStepFor
+                if (stepPid != null) {
+                    com.aeriotv.android.feature.onboarding.AddProfilesStepScreen(
+                        playlistId = stepPid,
+                        onDone = {
+                            if (profileStepFor == null) return@AddProfilesStepScreen
+                            profileStepFor = null
+                            navController.navigate(Routes.MAIN) {
+                                popUpTo(Routes.PLAYLIST_GRAPH) { inclusive = false }
+                            }
+                        },
+                    )
+                } else ConfigureSourceScreen(
                     sourceType = resolvedType,
                     onBack = { navController.popBackStack() },
                     viewModel = vm,

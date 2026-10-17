@@ -2,6 +2,7 @@ package com.aeriotv.android.feature.settings
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -117,10 +118,27 @@ class ProfilesViewModel @Inject constructor(
     fun rename(profileId: String, name: String) = manager.rename(profileId, name)
     suspend fun remove(profileId: String) = manager.remove(profileId)
     fun manageProfiles() = manager.requestManageProfiles()
+
+    // PIN (phase 2a)
+    fun hasPin(profileId: String) = manager.hasPin(profileId)
+    fun pinType(profileId: String) = manager.pinType(profileId)
+    fun verifyPin(profileId: String, entries: List<String>) = manager.verifyPin(profileId, entries)
+    suspend fun canManagePin(playlistId: String, profileId: String) = manager.canManagePin(playlistId, profileId)
+    suspend fun needsCurrentPin(playlistId: String, profileId: String) = manager.needsCurrentPin(playlistId, profileId)
+    suspend fun setPin(playlistId: String, profileId: String, type: com.aeriotv.android.core.profiles.PinType, entries: List<String>, current: List<String>?) =
+        manager.setPin(playlistId, profileId, type, entries, current)
+    suspend fun removePin(playlistId: String, profileId: String, current: List<String>?) =
+        manager.removePin(playlistId, profileId, current)
+
+    // Channel Profiles per user (Admin only)
+    suspend fun channelProfileAssignment(playlistId: String, profileId: String) =
+        manager.channelProfileAssignment(playlistId, profileId)
+    suspend fun saveChannelProfiles(playlistId: String, profileId: String, userId: Int, ids: List<Int>) =
+        manager.saveChannelProfiles(playlistId, profileId, userId, ids)
 }
 
 /** Phone / tablet Live TV header: avatar circle, only with 2+ profiles. */
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 fun ProfileSwitcherButton(modifier: Modifier = Modifier) {
     val vm: ProfilesViewModel = hiltViewModel()
@@ -134,6 +152,7 @@ fun ProfileSwitcherButton(modifier: Modifier = Modifier) {
     var confirm by remember { mutableStateOf<DispatcharrProfile?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
+    var pinFor by remember { mutableStateOf<DispatcharrProfile?>(null) }
 
     ProfileAvatar(
         name = active.displayName,
@@ -160,7 +179,8 @@ fun ProfileSwitcherButton(modifier: Modifier = Modifier) {
                         isActive = p.id == active.id,
                         onClick = {
                             if (p.id == active.id || busy) return@ProfileRow
-                            if (vm.isPlaying()) confirm = p else doSwitch(p)
+                            if (vm.hasPin(p.id)) pinFor = p
+                            else if (vm.isPlaying()) confirm = p else doSwitch(p)
                         },
                     )
                 }
@@ -198,6 +218,26 @@ fun ProfileSwitcherButton(modifier: Modifier = Modifier) {
             doSwitch(p)
         }
     }
+    pinFor?.let { p ->
+        SwitchPinDialog(p, vm, onDismiss = { pinFor = null }) {
+            pinFor = null
+            if (vm.isPlaying()) confirm = p else doSwitch(p)
+        }
+    }
+}
+
+/** "Enter PIN for {name}" before switching to a locked profile. */
+@Composable
+private fun SwitchPinDialog(p: DispatcharrProfile, vm: ProfilesViewModel, onDismiss: () -> Unit, onOk: () -> Unit) {
+    PinEntryDialog(
+        title = "Enter PIN for ${p.displayName}",
+        type = vm.pinType(p.id) ?: com.aeriotv.android.core.profiles.PinType.Numbers,
+        onDismiss = onDismiss,
+        onEntered = { seq ->
+            val r = vm.verifyPin(p.id, seq)
+            if (r == com.aeriotv.android.core.profiles.ProfileManager.PinCheck.Ok) { onOk(); null } else pinCheckMessage(r)
+        },
+    )
 }
 
 @Composable
@@ -229,12 +269,14 @@ fun ProfileAvatar(name: String, size: Int, modifier: Modifier = Modifier) {
     }
 }
 
+@OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
 private fun ProfileRow(
     profile: DispatcharrProfile,
     isActive: Boolean,
     onClick: () -> Unit,
     trailing: (@Composable () -> Unit)? = null,
+    onLongClick: (() -> Unit)? = null,
 ) {
     var focused by remember { mutableStateOf(false) }
     Row(
@@ -242,7 +284,7 @@ private fun ProfileRow(
             .fillMaxWidth()
             .onFocusChanged { focused = it.isFocused }
             .settingsRowCard(focused)
-            .clickable(onClick = onClick)
+            .combinedClickable(onClick = onClick, onLongClick = onLongClick)
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -308,6 +350,10 @@ fun ProfilesSection(playlistId: String) {
     var adding by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
+    var pinFor by remember { mutableStateOf<DispatcharrProfile?>(null) }
+    var settingPin by remember { mutableStateOf<DispatcharrProfile?>(null) }
+    var removingPin by remember { mutableStateOf<DispatcharrProfile?>(null) }
+    var channelProfilesFor by remember { mutableStateOf<DispatcharrProfile?>(null) }
     val scope = rememberCoroutineScope()
 
     fun doSwitch(p: DispatcharrProfile) {
@@ -326,16 +372,19 @@ fun ProfilesSection(playlistId: String) {
                         if (busy) return@ProfileRow
                         // Tap a profile to switch to it; tap the active one
                         // for Rename / Remove.
+                        // Long press (TV too) opens the actions for any row.
                         if (p.id == activeId) actionsFor = p
+                        else if (vm.hasPin(p.id)) pinFor = p
                         else if (vm.isPlaying()) confirmSwitch = p
                         else doSwitch(p)
                     },
+                    onLongClick = { if (!busy) actionsFor = p },
                     trailing = if (isTv) null else {
                         {
                             Spacer(Modifier.size(4.dp))
                             Icon(
                                 Icons.Outlined.Edit,
-                                contentDescription = "Rename or remove",
+                                contentDescription = "Profile options",
                                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier
                                     .clip(CircleShape)
@@ -381,22 +430,42 @@ fun ProfilesSection(playlistId: String) {
         }
     }
     actionsFor?.let { p ->
+        var canPin by remember(p.id) { mutableStateOf(false) }
+        LaunchedEffect(p.id, activeId) { canPin = vm.canManagePin(playlistId, p.id) }
+        val hasPin = vm.hasPin(p.id)
         AlertDialog(
             onDismissRequest = { actionsFor = null },
             title = { Text(p.displayName) },
-            text = { Text(p.username) },
-            confirmButton = {
-                SettingsDialogTextButton(label = "Rename", onClick = { actionsFor = null; renaming = p })
-            },
-            dismissButton = {
-                if (isAdmin && !p.isDefault) {
-                    SettingsDialogTextButton(label = "Remove", destructive = true, onClick = { actionsFor = null; removing = p })
-                } else {
-                    SettingsDialogTextButton(label = "Cancel", onClick = { actionsFor = null })
+            text = {
+                Column {
+                    Text(p.username, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.size(8.dp))
+                    ChoiceRow(label = "Rename", onClick = { actionsFor = null; renaming = p })
+                    if (canPin) {
+                        ChoiceRow(label = if (hasPin) "Change PIN" else "Set PIN", onClick = { actionsFor = null; settingPin = p })
+                        if (hasPin) ChoiceRow(label = "Remove PIN", onClick = { actionsFor = null; removingPin = p })
+                    }
+                    if (isAdmin) {
+                        ChoiceRow(label = "Channel Profiles", onClick = { actionsFor = null; channelProfilesFor = p })
+                    }
+                    if (isAdmin && !p.isDefault) {
+                        ChoiceRow(label = "Remove", destructive = true, onClick = { actionsFor = null; removing = p })
+                    }
                 }
             },
+            confirmButton = {},
+            dismissButton = { SettingsDialogTextButton(label = "Cancel", onClick = { actionsFor = null }) },
         )
     }
+    pinFor?.let { p ->
+        SwitchPinDialog(p, vm, onDismiss = { pinFor = null }) {
+            pinFor = null
+            if (vm.isPlaying()) confirmSwitch = p else doSwitch(p)
+        }
+    }
+    settingPin?.let { p -> SetPinFlow(playlistId, p, vm) { err -> settingPin = null; status = err } }
+    removingPin?.let { p -> RemovePinFlow(playlistId, p, vm) { err -> removingPin = null; status = err } }
+    channelProfilesFor?.let { p -> ChannelProfilesDialog(playlistId, p, vm) { err -> channelProfilesFor = null; status = err } }
     renaming?.let { p ->
         var name by remember(p.id) { mutableStateOf(p.displayName) }
         AlertDialog(

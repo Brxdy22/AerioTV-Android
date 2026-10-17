@@ -1935,6 +1935,114 @@ class AppPreferences @Inject constructor(
         }
     }
 
+    // ── Dispatcharr Sync (docs/DispatcharrSyncSchema.md) ───────────────────
+
+    /**
+     * Settings > Sync > Sync with: "off", "drive", or "dispatcharr". Unset
+     * follows the Drive master toggle so existing Drive users stay on Drive.
+     * Device-local, never synced.
+     */
+    val syncProvider: Flow<String> = store.data.map { p ->
+        p[KEY_SYNC_PROVIDER] ?: if (p[KEY_SYNC_MASTER] == true) "drive" else "off"
+    }
+    suspend fun syncProviderOnce(): String = syncProvider.first()
+    suspend fun setSyncProvider(value: String) {
+        store.edit { it[KEY_SYNC_PROVIDER] = value }
+    }
+
+    /** Category toggle read for Dispatcharr Sync (same toggles and defaults as Drive). */
+    suspend fun syncCategoryEnabledOnce(category: SyncCategory): Boolean = syncCategoryEnabled(category).first()
+    suspend fun syncRemoteControlMapOnce(): Boolean = syncRemoteControlMap.first()
+    suspend fun syncRadioModeByDefaultOnce(): Boolean = syncRadioModeByDefault.first()
+
+    /** Schema 4.9 names this platform owns (Android column of the allowlist). */
+    private fun dsyncSettingsOf(p: Preferences): Map<String, kotlinx.serialization.json.JsonPrimitive> {
+        val out = LinkedHashMap<String, kotlinx.serialization.json.JsonPrimitive>()
+        fun put(name: String, v: Any?) {
+            when (v) {
+                is String -> out[name] = kotlinx.serialization.json.JsonPrimitive(v)
+                is Boolean -> out[name] = kotlinx.serialization.json.JsonPrimitive(v)
+                is Number -> out[name] = kotlinx.serialization.json.JsonPrimitive(v)
+            }
+        }
+        put("selectedTheme", p[KEY_SELECTED_THEME])
+        put("appearanceMode", p[KEY_APPEARANCE_MODE])
+        put("trueBlack", p[KEY_APPEARANCE_TRUE_BLACK])
+        put("defaultTab", p[KEY_DEFAULT_TAB])
+        put("timeFormat", p[KEY_TIME_FORMAT])
+        put("textScale", p[KEY_TEXT_SCALE])
+        put("subtextScale", p[KEY_SUBTEXT_SCALE])
+        put("textContrast", p[KEY_TEXT_CONTRAST])
+        put("guideProgramInfoButton", p[KEY_GUIDE_PROGRAM_INFO_BUTTON])
+        put("programInfoButtonGuide", p[KEY_PROGRAM_INFO_BUTTON_GUIDE])
+        put("programInfoButtonList", p[KEY_PROGRAM_INFO_BUTTON_LIST])
+        put("showEpgBadgesTv", p[KEY_SHOW_EPG_BADGES_TV])
+        put("showRemoteHints", p[KEY_SHOW_REMOTE_HINTS])
+        put("guideGroupSelector", p[KEY_GUIDE_GROUP_SELECTOR.s()])
+        put("guideSidebarLayout", p[KEY_GUIDE_SIDEBAR_LAYOUT])
+        put("guideTuneInMini", p[KEY_GUIDE_TUNE_IN_MINI])
+        put("playerInfoCard.showOnChannelChange", p[KEY_PLAYER_SHOW_CHANNEL_INFO_CARD])
+        put("phoneGroupSelector", p[KEY_PHONE_GROUP_SELECTOR.s()])
+        put("liveTvEdgeSwipeOpensSidebar", p[KEY_LIVE_TV_EDGE_SWIPE_OPENS_SIDEBAR])
+        put("skipLoadingScreen", p[KEY_SKIP_LOADING_SCREEN])
+        put("appleTVChannelFlip", p[KEY_APPLE_TV_CHANNEL_FLIP])
+        return out
+    }
+
+    /** Current values of [DSYNC_SETTINGS_NAMES] in the active profile's scope. */
+    val dsyncSettings: Flow<Map<String, kotlinx.serialization.json.JsonPrimitive>> = scopedData.map { dsyncSettingsOf(it) }
+    suspend fun dsyncSettingsOnce(): Map<String, kotlinx.serialization.json.JsonPrimitive> = dsyncSettingsOf(store.data.first())
+
+    /** Apply a pulled `settings.v`. Names this platform does not own, and values of the wrong type, are ignored. */
+    suspend fun applyDsyncSettings(v: Map<String, kotlinx.serialization.json.JsonPrimitive>) {
+        fun str(n: String) = v[n]?.takeIf { it.isString }?.content
+        fun bool(n: String) = v[n]?.takeIf { !it.isString }?.content?.toBooleanStrictOrNull()
+            ?: v[n]?.takeIf { it.isString }?.content?.toBooleanStrictOrNull()
+        fun dbl(n: String) = v[n]?.takeIf { !it.isString }?.content?.toDoubleOrNull()
+        val guideSel = KEY_GUIDE_GROUP_SELECTOR.s()
+        val phoneSel = KEY_PHONE_GROUP_SELECTOR.s()
+        store.edit { p ->
+            str("selectedTheme")?.takeIf { t -> AppTheme.entries.any { it.name == t } }?.let { p[KEY_SELECTED_THEME] = it }
+            str("appearanceMode")?.let { p[KEY_APPEARANCE_MODE] = it }
+            bool("trueBlack")?.let { p[KEY_APPEARANCE_TRUE_BLACK] = it }
+            str("defaultTab")?.let { p[KEY_DEFAULT_TAB] = it }
+            str("timeFormat")?.let { p[KEY_TIME_FORMAT] = it }
+            dbl("textScale")?.let { p[KEY_TEXT_SCALE] = snapTextScale(it.toFloat()).toDouble() }
+            dbl("subtextScale")?.let { p[KEY_SUBTEXT_SCALE] = snapTextScale(it.toFloat()).toDouble() }
+            dbl("textContrast")?.let { p[KEY_TEXT_CONTRAST] = snapTextContrast(it.toFloat()).toDouble() }
+            str("guideProgramInfoButton")?.takeIf { it in GuideProgramInfoButton.VALUES }?.let { p[KEY_GUIDE_PROGRAM_INFO_BUTTON] = it }
+            bool("programInfoButtonGuide")?.let { p[KEY_PROGRAM_INFO_BUTTON_GUIDE] = it }
+            bool("programInfoButtonList")?.let { p[KEY_PROGRAM_INFO_BUTTON_LIST] = it }
+            bool("showEpgBadgesTv")?.let { p[KEY_SHOW_EPG_BADGES_TV] = it }
+            bool("showRemoteHints")?.let { p[KEY_SHOW_REMOTE_HINTS] = it }
+            str("guideGroupSelector")?.let { p[guideSel] = it }
+            str("guideSidebarLayout")?.let { p[KEY_GUIDE_SIDEBAR_LAYOUT] = it }
+            bool("guideTuneInMini")?.let { p[KEY_GUIDE_TUNE_IN_MINI] = it }
+            bool("playerInfoCard.showOnChannelChange")?.let { p[KEY_PLAYER_SHOW_CHANNEL_INFO_CARD] = it }
+            str("phoneGroupSelector")?.let { p[phoneSel] = it }
+            bool("liveTvEdgeSwipeOpensSidebar")?.let { p[KEY_LIVE_TV_EDGE_SWIPE_OPENS_SIDEBAR] = it }
+            bool("skipLoadingScreen")?.let { p[KEY_SKIP_LOADING_SCREEN] = it }
+            bool("appleTVChannelFlip")?.let { p[KEY_APPLE_TV_CHANNEL_FLIP] = it }
+        }
+    }
+
+    /** Replace the recents list (Dispatcharr Sync pull), most recent first. */
+    suspend fun setRecentChannels(ids: List<String>) {
+        val k = KEY_RECENT_CHANNEL_IDS.s()
+        store.edit { prefs ->
+            val clean = ids.mapNotNull { it.trim().takeIf(String::isNotBlank) }.distinct().take(RECENT_CHANNELS_CAP)
+            if (clean.isEmpty()) prefs.remove(k) else prefs[k] = clean.joinToString("\n")
+        }
+    }
+
+    /** Replace the collections list (Dispatcharr Sync pull). */
+    suspend fun setChannelCollections(list: List<ChannelCollection>) {
+        val k = KEY_CHANNEL_COLLECTIONS.s()
+        store.edit { prefs ->
+            if (list.isEmpty()) prefs.remove(k) else prefs[k] = collectionsJson.encodeToString(list)
+        }
+    }
+
     // ── In-app updater (github flavor) ───────────────────────────────────
     // Device-local bookkeeping for the GitHub-releases self-updater. NONE of
     // these belong in snapshotSyncablePreferences (per-device state).
@@ -2558,6 +2666,7 @@ class AppPreferences @Inject constructor(
         val KEY_CATEGORY_MASTER_ENABLE = booleanPreferencesKey(CategoryPaletteState.MASTER_ENABLED_KEY)
         val KEY_CATEGORY_CUSTOM_JSON = stringPreferencesKey(CategoryPaletteState.CUSTOM_KEY)
         val KEY_SYNC_MASTER = booleanPreferencesKey("sync_master_enabled")
+        val KEY_SYNC_PROVIDER = stringPreferencesKey("sync_provider")
         val KEY_SYNC_ACCOUNT_EMAIL = stringPreferencesKey("sync_account_email")
         val KEY_SYNC_LAST_PUSH = longPreferencesKey("sync_last_push_at")
         val KEY_SYNC_LAST_PULL = longPreferencesKey("sync_last_pull_at")

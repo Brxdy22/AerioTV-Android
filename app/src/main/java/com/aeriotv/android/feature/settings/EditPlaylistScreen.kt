@@ -156,8 +156,13 @@ fun EditPlaylistScreen(
     // Pull the server's channel profiles once the Dispatcharr row is loaded so
     // the picker can list them. Re-runs if the user navigates to a different
     // playlist while this screen is alive.
-    LaunchedEffect(playlist?.id, isDispatcharr) {
-        if (isDispatcharr) viewModel.loadDispatcharrProfiles(playlist?.id)
+    // Profiles phase 2a: only an Admin profile ever sees (or loads) the
+    // Channel Profile picker; Standard and Limited users get what the Admin
+    // assigned them on the server.
+    val channelProfilePickerAllowed = isDispatcharr && playlist != null &&
+        (playlist.dispatcharrUserLevel >= 10 || playlist.dispatcharrIsSuperuser || playlist.dispatcharrIsStaff)
+    LaunchedEffect(playlist?.id, channelProfilePickerAllowed) {
+        if (channelProfilePickerAllowed) viewModel.loadDispatcharrProfiles(playlist?.id)
     }
 
     // Save is now AWAITED (Logan 2026-09-18: changed credentials, saved, the
@@ -678,7 +683,7 @@ fun EditPlaylistScreen(
                 }
             }
 
-            if (isDispatcharr) {
+            if (channelProfilePickerAllowed) {
                 item("channel-profile") {
                     SettingsSection(
                         header = "Channel Profile",

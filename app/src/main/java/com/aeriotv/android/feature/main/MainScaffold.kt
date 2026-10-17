@@ -2840,6 +2840,8 @@ private fun SettingsTabContent(
         is SettingsRoute.AddPlaylist -> when (val st = r.step) {
             is AddPlaylistWizardStep.ChooseType -> AddPlaylistStep.ChooseType
             is AddPlaylistWizardStep.Configure -> AddPlaylistStep.Configure(st.sourceType)
+            // Past the connect: the id-flip watcher below must not pop it.
+            is AddPlaylistWizardStep.AddProfiles -> AddPlaylistStep.None
         }
         else -> AddPlaylistStep.None
     }
@@ -2894,7 +2896,16 @@ private fun SettingsTabContent(
             startId != null &&
             playlistState.playlist?.id != startId
         ) {
-            nav.pop()
+            val step = addPlaylistStep
+            val newId = playlistState.playlist?.id
+            if (step is AddPlaylistStep.Configure && newId != null &&
+                (step.sourceType == com.aeriotv.android.core.data.SourceType.DispatcharrApiKey ||
+                    step.sourceType == com.aeriotv.android.core.data.SourceType.DispatcharrUserPass)
+            ) {
+                nav.replaceTop(SettingsRoute.AddPlaylist(AddPlaylistWizardStep.AddProfiles(newId)))
+            } else {
+                nav.pop()
+            }
         }
     }
     val traceBackTv = rememberLiveTvFormFactor().isTv
@@ -2997,6 +3008,13 @@ private fun SettingsTabContent(
                 },
                 viewModel = playlistVm,
             )
+            is AddPlaylistWizardStep.AddProfiles ->
+                com.aeriotv.android.feature.onboarding.AddProfilesStepScreen(
+                    playlistId = st.playlistId,
+                    onDone = {
+                        if (nav.current == r) nav.pop()
+                    },
+                )
             is AddPlaylistWizardStep.ChooseType -> ChooseSourceTypeScreen(
                 onBack = { nav.pop() },
                 onChoose = { type ->

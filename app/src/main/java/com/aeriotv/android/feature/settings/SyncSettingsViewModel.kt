@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Context
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.aeriotv.android.core.data.db.entity.isDispatcharrDirectConnect
 import com.aeriotv.android.core.preferences.AppPreferences
 import com.aeriotv.android.core.sync.DriveSyncManager
 import com.aeriotv.android.core.sync.DriveSyncWorker
@@ -17,6 +18,7 @@ import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 /**
@@ -29,7 +31,37 @@ class SyncSettingsViewModel @Inject constructor(
     @ApplicationContext private val context: Context,
     private val prefs: AppPreferences,
     private val sync: DriveSyncManager,
+    private val dsync: com.aeriotv.android.core.sync.dsync.DispatcharrSyncManager,
+    playlistDao: com.aeriotv.android.core.data.db.dao.PlaylistDao,
 ) : ViewModel() {
+
+    /** Settings > Sync > Sync with: "off", "drive", or "dispatcharr". */
+    val syncProvider: Flow<String> = prefs.syncProvider
+
+    /** Dispatcharr is offered only while the active playlist is Dispatcharr Direct Connect. */
+    val dispatcharrAvailable: Flow<Boolean> = playlistDao.observeActive().map { rows ->
+        rows.firstOrNull()?.isDispatcharrDirectConnect() == true
+    }
+
+    /** Picking a provider turns the other one off; Drive keeps its own toggle and worker. */
+    fun setSyncProvider(value: String) {
+        viewModelScope.launch {
+            prefs.setSyncProvider(value)
+            when (value) {
+                "drive" -> {
+                    prefs.setSyncMasterEnabled(true)
+                    DriveSyncWorker.enqueuePeriodic(context)
+                }
+                else -> {
+                    prefs.setSyncMasterEnabled(false)
+                    DriveSyncWorker.cancel(context)
+                }
+            }
+        }
+    }
+
+    val dispatcharrUi: StateFlow<com.aeriotv.android.core.sync.dsync.DispatcharrSyncManager.Ui> = dsync.ui
+    fun dispatcharrSyncNow() = dsync.syncNow()
 
     val masterEnabled: Flow<Boolean> = prefs.syncMasterEnabled
     fun setMasterEnabled(value: Boolean) {

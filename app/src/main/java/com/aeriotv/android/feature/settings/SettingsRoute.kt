@@ -179,6 +179,8 @@ fun settingsDeepLinkPageNeedsPlaylist(page: String): Boolean =
 sealed interface AddPlaylistWizardStep {
     data object ChooseType : AddPlaylistWizardStep
     data class Configure(val sourceType: SourceType) : AddPlaylistWizardStep
+    /** Dispatcharr only: "Add profiles for other users?" after the connect succeeds. */
+    data class AddProfiles(val playlistId: String) : AddPlaylistWizardStep
 }
 
 /**
@@ -252,6 +254,7 @@ class SettingsNavState(initial: List<SettingsRoute> = emptyList()) {
             is SettingsRoute.AddPlaylist -> when (r.step) {
                 is AddPlaylistWizardStep.ChooseType -> "choosetype"
                 is AddPlaylistWizardStep.Configure -> "configure"
+                is AddPlaylistWizardStep.AddProfiles -> "addprofiles"
             }
             is SettingsRoute.LogViewer -> "log"
             is SettingsRoute.AddMoreCategories -> "addmore"
@@ -276,6 +279,7 @@ internal fun encodeSettingsRoute(route: SettingsRoute): String = when (route) {
     is SettingsRoute.AddPlaylist -> when (val s = route.step) {
         is AddPlaylistWizardStep.ChooseType -> "add:choose"
         is AddPlaylistWizardStep.Configure -> "add:configure:${s.sourceType.name}"
+        is AddPlaylistWizardStep.AddProfiles -> "add:profiles:${s.playlistId}"
     }
     is SettingsRoute.LogViewer -> "log"
     is SettingsRoute.AddMoreCategories -> "addmore"
@@ -300,6 +304,8 @@ internal fun decodeSettingsRoute(raw: String): SettingsRoute? = when {
             ?.let { SettingsRoute.Section(it) }
     raw.startsWith("detail:") -> SettingsRoute.PlaylistDetail(raw.removePrefix("detail:"))
     raw.startsWith("edit:") -> SettingsRoute.EditPlaylist(raw.removePrefix("edit:"))
+    raw.startsWith("add:profiles:") ->
+        SettingsRoute.AddPlaylist(AddPlaylistWizardStep.AddProfiles(raw.removePrefix("add:profiles:")))
     raw.startsWith("add:configure:") ->
         SourceType.entries.firstOrNull { it.name == raw.removePrefix("add:configure:") }
             ?.let { SettingsRoute.AddPlaylist(AddPlaylistWizardStep.Configure(it)) }

@@ -27,6 +27,7 @@ import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.patch
 import io.ktor.client.request.post
+import io.ktor.client.request.put
 import io.ktor.client.request.setBody
 import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsText
@@ -400,6 +401,64 @@ class DispatcharrClient @Inject constructor() {
         }
         val lenient = Json { ignoreUnknownKeys = true; isLenient = true }
         return rows.mapNotNull { runCatching { lenient.decodeFromJsonElement(DispatcharrUserSummary.serializer(), it) }.getOrNull() }
+    }
+
+    // ---- Dispatcharr Sync: per-user App Data (Dispatcharr PR 1824) ----
+
+    /** One App Data response: HTTP status, the server's `code` on an error, and the body. */
+    data class AppDataResult(val status: Int, val code: String?, val body: String?) {
+        val ok: Boolean get() = status in 200..299
+    }
+
+    private suspend fun appDataResult(r: HttpResponse): AppDataResult {
+        val text = runCatching { r.bodyAsText() }.getOrNull()
+        val code = if (r.status.isSuccess()) null else runCatching {
+            (json.parseToJsonElement(text.orEmpty()) as? JsonObject)?.get("code")?.let { (it as? JsonPrimitive)?.contentOrNull }
+        }.getOrNull()
+        return AppDataResult(r.status.value, code, text)
+    }
+
+    private fun appDataUrl(baseUrl: String, key: String?): String =
+        "${baseUrl.trimEnd('/')}/api/accounts/users/me/app-data/" + (key?.let { "$it/" } ?: "")
+
+    /** GET /api/accounts/users/me/app-data/ (keys and sizes). */
+    suspend fun appDataList(baseUrl: String, apiKey: String): AppDataResult =
+        appDataResult(client.get(appDataUrl(baseUrl, null)) { applyAuth(apiKey) })
+
+    /** GET /api/accounts/users/me/app-data/<key>/. */
+    suspend fun appDataGet(baseUrl: String, apiKey: String, key: String): AppDataResult =
+        appDataResult(client.get(appDataUrl(baseUrl, key)) { applyAuth(apiKey) })
+
+    /** PUT /api/accounts/users/me/app-data/<key>/ with the compact JSON [body] (full replace). */
+    suspend fun appDataPut(baseUrl: String, apiKey: String, key: String, body: String): AppDataResult =
+        appDataResult(
+            client.put(appDataUrl(baseUrl, key)) {
+                applyAuth(apiKey)
+                setBody(io.ktor.http.content.TextContent(body, ContentType.Application.Json))
+            },
+        )
+
+    /** DELETE /api/accounts/users/me/app-data/<key>/. */
+    suspend fun appDataDelete(baseUrl: String, apiKey: String, key: String): AppDataResult =
+        appDataResult(client.delete(appDataUrl(baseUrl, key)) { applyAuth(apiKey) })
+
+    /**
+     * Profiles > Channel Profiles (Admin only): PATCH /api/accounts/users/<id>/
+     * with `{"channel_profiles": [ids]}`. An empty list means All channels.
+     * Throws [DispatcharrError.Transport] with the HTTP code and the server's
+     * reason on a non-2xx.
+     */
+    suspend fun patchUserChannelProfiles(baseUrl: String, apiKey: String, userId: Int, ids: List<Int>) {
+        val url = "${baseUrl.trimEnd('/')}/api/accounts/users/$userId/"
+        val response: HttpResponse = client.patch(url) {
+            applyAuth(apiKey)
+            contentType(ContentType.Application.Json)
+            setBody(JsonObject(mapOf("channel_profiles" to JsonArray(ids.map { JsonPrimitive(it) }))))
+        }
+        if (!response.status.isSuccess()) {
+            val reason = dispatcharrErrorReason(runCatching { response.bodyAsText() }.getOrNull())
+            throw DispatcharrError.Transport("Channel Profiles: HTTP ${response.status.value}" + (reason?.let { " ($it)" } ?: ""))
+        }
     }
 
     data class AccountPermissions(
@@ -2539,6 +2598,8 @@ data class DispatcharrUserSummary(
     @SerialName("is_superuser") val isSuperuser: Boolean = false,
     @SerialName("is_staff") val isStaff: Boolean = false,
     @SerialName("custom_properties") val customProperties: JsonObject? = null,
+    /** Assigned Channel Profile ids; empty = All channels. */
+    @SerialName("channel_profiles") val channelProfiles: List<Int> = emptyList(),
 )
 
 @Serializable

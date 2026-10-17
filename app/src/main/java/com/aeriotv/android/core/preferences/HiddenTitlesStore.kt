@@ -156,6 +156,25 @@ class HiddenTitlesStore @Inject constructor(
         }
     }
 
+    /** Dispatcharr Sync pull: the hidden rows of [playlistId] become exactly [hidden] (key to hiddenAt). */
+    suspend fun replaceScope(playlistId: String?, hidden: Map<String, Long>) {
+        val k = skey()
+        store.edit { prefs ->
+            val now = System.currentTimeMillis()
+            val current = decode(prefs[k]).toMutableList()
+            for (i in current.indices) {
+                val c = current[i]
+                if (c.playlistId == playlistId && c.isLive && c.key !in hidden) current[i] = c.copy(unhiddenAt = now)
+            }
+            hidden.forEach { (key, at) ->
+                val i = current.indexOfFirst { it.key == key && it.playlistId == playlistId }
+                if (i < 0) current += Entry(key = key, playlistId = playlistId, hiddenAt = at)
+                else if (!current[i].isLive) current[i] = current[i].copy(hiddenAt = at, unhiddenAt = null)
+            }
+            prefs[k] = json.encodeToString(current)
+        }
+    }
+
     /** Remove Profile cleanup. */
     suspend fun deleteScope(profileId: String) {
         store.edit { it.remove(stringPreferencesKey(com.aeriotv.android.core.profiles.ProfileScope.keyName("entries", profileId))) }
