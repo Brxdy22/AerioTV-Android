@@ -2835,8 +2835,8 @@ private fun SettingsTabContent(
         .isEnabled
     // Sidebar / rail Sync row reads On or Off rather than a description.
     val syncEnabled by hiltViewModel<com.aeriotv.android.feature.settings.SettingsViewModel>()
-        .syncMasterEnabled
-        .collectAsStateWithLifecycle(initialValue = false)
+        .syncProviderLabel
+        .collectAsStateWithLifecycle(initialValue = "Off")
     val addPlaylistStep: AddPlaylistStep = when (val r = route) {
         is SettingsRoute.AddPlaylist -> when (val st = r.step) {
             is AddPlaylistWizardStep.ChooseType -> AddPlaylistStep.ChooseType

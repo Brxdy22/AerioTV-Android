@@ -718,13 +718,6 @@ fun GuideScreen(
     }
 
     val gridFocus = remember { FocusRequester() }
-    // Profiles (TV launch picker): once the switch scrim drops, focus lands in
-    // the grid (its current cell), never on a tab pill.
-    val profileScrimReleased by com.aeriotv.android.core.profiles.ProfileSwitchFocus.released.collectAsState()
-    LaunchedEffect(profileScrimReleased) {
-        if (!com.aeriotv.android.core.profiles.ProfileSwitchFocus.consume(com.aeriotv.android.core.profiles.ProfileSwitchFocus.Target.Guide)) return@LaunchedEffect
-        com.aeriotv.android.feature.settings.restoreFocus(gridFocus, "guide grid")
-    }
     val pillsFocus = remember { FocusRequester() }
     val bannerFocus = remember { FocusRequester() }
     val stagingPlayFocus = remember { FocusRequester() }
@@ -762,6 +755,30 @@ fun GuideScreen(
     // only because the old guide composed first), so keep asking for about a
     // second until the grid actually holds focus.
     var gridHasFocus by remember { mutableStateOf(false) }
+    // Profiles (TV launch picker / launch PIN gate): once the scrim or gate
+    // drops, focus lands in the grid, never on a tab pill. The tab bar can
+    // claim focus a few frames later, so keep asking until the grid has held
+    // focus for 300 ms, or 1.5 s pass.
+    val profileScrimReleased by com.aeriotv.android.core.profiles.ProfileSwitchFocus.released.collectAsState()
+    LaunchedEffect(profileScrimReleased) {
+        if (!com.aeriotv.android.core.profiles.ProfileSwitchFocus.consume(com.aeriotv.android.core.profiles.ProfileSwitchFocus.Target.Guide)) return@LaunchedEffect
+        val t0 = android.os.SystemClock.uptimeMillis()
+        var heldSince = -1L
+        var tries = 0
+        while (android.os.SystemClock.uptimeMillis() - t0 < 1_500L) {
+            val now = android.os.SystemClock.uptimeMillis()
+            if (gridHasFocus) {
+                if (heldSince < 0) heldSince = now
+                if (now - heldSince >= 300L) break
+            } else {
+                heldSince = -1L
+                tries++
+                runCatching { gridFocus.requestFocus() }
+            }
+            kotlinx.coroutines.delay(50L)
+        }
+        android.util.Log.i("AerioProfiles", "[PROFILE] focus restored to guide grid=${gridHasFocus} after ${android.os.SystemClock.uptimeMillis() - t0}ms ($tries requests)")
+    }
     // Wall time of the last key pressed inside the guide (boundary refocus idle gate).
     val lastGuideKeyAt = remember { longArrayOf(0L) }
     // True while ANYTHING inside the guide holds focus (grid, pills, banner,

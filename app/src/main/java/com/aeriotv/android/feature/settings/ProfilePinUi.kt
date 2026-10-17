@@ -482,11 +482,25 @@ fun RemovePinFlow(
     )
 }
 
+/** Dialog initial focus: retried because the dialog window takes focus late. */
+internal suspend fun focusFirst(fr: FocusRequester) {
+    repeat(10) {
+        kotlinx.coroutines.delay(50L)
+        if (runCatching { fr.requestFocus() }.isSuccess) return
+    }
+}
+
 @Composable
-internal fun ChoiceRow(label: String, onClick: () -> Unit, checked: Boolean? = null, destructive: Boolean = false) {
+internal fun ChoiceRow(
+    label: String,
+    onClick: () -> Unit,
+    checked: Boolean? = null,
+    destructive: Boolean = false,
+    modifier: Modifier = Modifier,
+) {
     var focused by remember { mutableStateOf(false) }
     Row(
-        Modifier
+        modifier
             .fillMaxWidth()
             .onFocusChanged { focused = it.isFocused }
             .settingsRowCard(focused)
@@ -519,6 +533,8 @@ fun ChannelProfilesDialog(
     var error by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
     val picked = remember { mutableStateListOf<Int>() }
+    val firstRow = remember { FocusRequester() }
+    LaunchedEffect(data != null) { if (data != null) focusFirst(firstRow) }
     LaunchedEffect(profile.id) {
         vm.channelProfileAssignment(playlistId, profile.id).fold(
             { data = it; picked.clear(); picked.addAll(it.assigned) },
@@ -534,7 +550,7 @@ fun ChannelProfilesDialog(
                 when {
                     d == null && error == null -> CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
                     d != null -> LazyColumn(Modifier.heightIn(max = 360.dp)) {
-                        item("all") { ChoiceRow(label = "All", checked = picked.isEmpty(), onClick = { picked.clear() }) }
+                        item("all") { ChoiceRow(label = "All", checked = picked.isEmpty(), onClick = { picked.clear() }, modifier = Modifier.focusRequester(firstRow)) }
                         items(d.choices, key = { it.id }) { c ->
                             ChoiceRow(
                                 label = c.name,

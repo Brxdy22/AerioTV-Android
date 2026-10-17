@@ -12,6 +12,8 @@ import kotlinx.coroutines.flow.StateFlow
 object ProfileSwitchFocus {
     sealed interface Target {
         data object Guide : Target
+        /** The Settings rail's selected row (Manage Profiles -> Admin lands on Playlists). */
+        data object Rail : Target
         data class Row(val profileId: String) : Target
     }
 

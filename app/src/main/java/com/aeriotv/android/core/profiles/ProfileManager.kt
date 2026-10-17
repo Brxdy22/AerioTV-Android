@@ -200,6 +200,8 @@ class ProfileManager @Inject constructor(
         if (profileId == activeProfileIdNow(pk.playlistId)) {
             switchTickets.remove(profileId)
             _launchPicker.value = null
+            ProfileSwitchFocus.arm(ProfileSwitchFocus.Target.Guide)
+            ProfileSwitchFocus.onScrimReleased()
             Log.i(TAG, "[PROFILE] launch picker: kept ${store.byId(profileId)?.username}")
             return Result.success(Unit)
         }
@@ -368,6 +370,8 @@ class ProfileManager @Inject constructor(
         if (r == PinCheck.Ok) {
             switchTickets.remove(g.id)
             _launchGate.value = null
+            ProfileSwitchFocus.arm(ProfileSwitchFocus.Target.Guide)
+            ProfileSwitchFocus.onScrimReleased()
         }
         return r
     }
@@ -740,7 +744,8 @@ class ProfileManager @Inject constructor(
         watchdog = null
         _switching.value = true
         try {
-            switchToLocked(playlistId, profileId, gen)
+            // Off the main thread: prefs commits and the row write are disk I/O.
+            kotlinx.coroutines.withContext(Dispatchers.IO) { switchToLocked(playlistId, profileId, gen) }
         } catch (t: Throwable) {
             if (gen == switchGen.get()) _switching.value = false
             throw t
@@ -757,7 +762,9 @@ class ProfileManager @Inject constructor(
         var tAuth = t0
         var tMe = t0
         var path = "key"
+        var tLock = t0
         mutex.withLock {
+            tLock = System.currentTimeMillis()
             if (target.isDefault) {
                 val a = authenticate(playlistId, target.id, base, row.username.orEmpty(), row.password, row.apiKey)
                 path = a.path
@@ -796,8 +803,8 @@ class ProfileManager @Inject constructor(
         val tGate = System.currentTimeMillis()
         Log.i(
             TAG,
-            "[SWITCH] profile auth=${tAuth - t0}ms me=${tMe - tAuth}ms " +
-                "path=$path gate=${tGate - t0}ms (probe deferred)",
+            "[SWITCH] profile lock=${tLock - t0}ms auth=${tAuth - tLock}ms me=${tMe - tAuth}ms " +
+                "rest=${tGate - tMe}ms path=$path gate=${tGate - t0}ms (probe deferred)",
         )
         // Safety: never leave the scrim up if no PlaylistViewModel answers.
         watchdog = scope.launch {
@@ -913,8 +920,7 @@ class ProfileManager @Inject constructor(
         fun flag(name: String): Boolean = (props?.get(name) as? JsonPrimitive)?.booleanOrNull != false
         kotlinx.coroutines.withContext(ProfileScope.defaultOnly()) {
             val raw = playlistDao.rawById(playlistId) ?: return@withContext
-            playlistDao.update(
-                raw.copy(
+            val next = raw.copy(
                     // A legacy superuser can read as level 0 on /me/; the deferred
                     // probe's admin check settles it, so keep a known Admin until then.
                     dispatcharrUserLevel = when {
@@ -933,8 +939,16 @@ class ProfileManager @Inject constructor(
                     dispatcharrVodMoviesEnabled = flag("vod_movies_enabled"),
                     dispatcharrVodSeriesEnabled = flag("vod_series_enabled"),
                     dispatcharrAccountProfileIds = me.channelProfiles.joinToString(","),
-                ),
-            )
+                )
+            // Skip the write when /me/ changed nothing: a Room write here can
+            // queue behind a channel snapshot transaction and hold the scrim.
+            if (next.copy(dispatcharrCapabilitiesFetchedAt = raw.dispatcharrCapabilitiesFetchedAt) == raw) {
+                Log.i(TAG, "[SWITCH] default row unchanged by /me/; no write")
+            } else {
+                val tw = System.currentTimeMillis()
+                playlistDao.update(next)
+                Log.i(TAG, "[SWITCH] default row write=${System.currentTimeMillis() - tw}ms")
+            }
         }
         store.update(profileId) { it.copy(userId = me.id) }
     }

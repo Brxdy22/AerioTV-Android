@@ -2386,6 +2386,10 @@ class PlaylistViewModel @Inject constructor(
      * for User+Pass since the apiKey is already cached on the row. */
     fun switchToPlaylist(playlistId: String, probe: Boolean = true, onDone: (() -> Unit)? = null) {
         viewModelScope.launch {
+          // onDone fires once, as soon as the channels are on screen: a profile
+          // switch's scrim must not wait for the guide (EPG) load behind it.
+          var done = false
+          fun finish() { if (!done) { done = true; onDone?.invoke() } }
           try {
             // GH #22: stop whatever the OLD source is still playing (phone
             // mini-player / background audio keeps rolling across a switch;
@@ -2420,6 +2424,7 @@ class PlaylistViewModel @Inject constructor(
                         entity.id,
                         channels.asSequence().map { ch -> ch.groupTitle }.filter { g -> g.isNotBlank() }.distinct().toList(),
                     )
+                    finish()
                     // A SWITCH NO LONGER PURGES ANYTHING (Logan 2026-09-16).
                     // This used to auto-run refreshEverything(), which purged
                     // the now-active playlist's guide cache and signalled the
@@ -2446,7 +2451,7 @@ class PlaylistViewModel @Inject constructor(
                 },
             )
           } finally {
-            onDone?.invoke()
+            finish()
           }
         }
     }
@@ -2461,6 +2466,12 @@ class PlaylistViewModel @Inject constructor(
      */
     private suspend fun fastProfileSwitchFromCache(r: com.aeriotv.android.core.profiles.ProfileManager.Reload): Boolean {
         val t0 = System.currentTimeMillis()
+        // No stamp = no usable snapshot: skip the database read (it can queue
+        // behind a snapshot write) and go straight to the fetch.
+        if (repository.snapshotStamp(r.playlistId) == null) {
+            Log.i(TAG, "[SWITCH] snapshot stale (no stamp); waiting for the fetch")
+            return false
+        }
         val cached = runCatching { repository.loadCachedChannels(r.playlistId) }.getOrDefault(emptyList())
         if (cached.isEmpty()) {
             Log.i(TAG, "[SWITCH] profile has no channel snapshot; waiting for the fetch")

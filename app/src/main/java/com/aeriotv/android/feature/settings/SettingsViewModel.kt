@@ -363,6 +363,9 @@ class SettingsViewModel @Inject constructor(
      *  row value. Writing still belongs to SyncSettingsViewModel. */
     val syncMasterEnabled: kotlinx.coroutines.flow.Flow<Boolean> = prefs.syncMasterEnabled
 
+    /** Settings root / rail Sync subtitle: the provider, Off / Google Drive / Dispatcharr. */
+    val syncProviderLabel: kotlinx.coroutines.flow.Flow<String> = prefs.syncProvider.map { syncProviderLabel(it) }
+
     val guideGroupSelector: StateFlow<String> = prefs.guideGroupSelector
         .stateIn(viewModelScope, SharingStarted.Eagerly, "pills")
     fun setGuideGroupSelector(mode: String) {
@@ -773,4 +776,12 @@ class SettingsViewModel @Inject constructor(
     fun setCustomCategories(list: List<CustomCategoryEntry>) {
         viewModelScope.launch { prefs.setCustomCategories(list) }
     }
+}
+
+
+/** "off" | "drive" | "dispatcharr" -> the Sync row subtitle. */
+fun syncProviderLabel(provider: String): String = when (provider) {
+    "drive" -> "Google Drive"
+    "dispatcharr" -> "Dispatcharr"
+    else -> "Off"
 }

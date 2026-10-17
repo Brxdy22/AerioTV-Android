@@ -439,14 +439,23 @@ fun ProfilesSection(playlistId: String) {
         com.aeriotv.android.core.profiles.ProfileSwitchFocus.arm(com.aeriotv.android.core.profiles.ProfileSwitchFocus.Target.Row(p.id))
         vm.switchTo(playlistId, p.id) { err -> busy = false; status = err }
     }
+    val rowFocus = remember { mutableMapOf<String, androidx.compose.ui.focus.FocusRequester>() }
+    // After a removal, focus lands on the next row (or the previous one when
+    // the last row went), never on a tab pill.
+    suspend fun removeAndRefocus(p: DispatcharrProfile) {
+        val i = profiles.indexOfFirst { it.id == p.id }
+        val next = profiles.getOrNull(i + 1) ?: profiles.getOrNull(i - 1)
+        val err = vm.remove(p.id).exceptionOrNull()?.message
+        status = err
+        if (err == null && next != null) rowFocus[next.id]?.let { restoreFocus(it, "next profile row after remove") }
+    }
     // TV: when the scrim drops, focus returns to the row that started the switch.
     val released by com.aeriotv.android.core.profiles.ProfileSwitchFocus.released.collectAsStateWithLifecycle()
-    val rowFocus = remember { mutableMapOf<String, androidx.compose.ui.focus.FocusRequester>() }
     LaunchedEffect(released) {
         val id = profiles.firstOrNull {
             com.aeriotv.android.core.profiles.ProfileSwitchFocus.consume(com.aeriotv.android.core.profiles.ProfileSwitchFocus.Target.Row(it.id))
         }?.id ?: return@LaunchedEffect
-        restoreFocus(rowFocus[id] ?: return@LaunchedEffect, "profile row")
+        restoreFocus(rowFocus[id] ?: return@LaunchedEffect, "profile row after switch")
     }
 
     Column {
@@ -612,7 +621,7 @@ fun ProfilesSection(playlistId: String) {
                     if (vm.roleOf(p.id) == com.aeriotv.android.core.profiles.ProfileRole.Child) {
                         removeAdminPinFor = p
                     } else {
-                        scope.launch { status = vm.remove(p.id).exceptionOrNull()?.message }
+                        scope.launch { removeAndRefocus(p) }
                     }
                 })
             },
@@ -622,7 +631,7 @@ fun ProfilesSection(playlistId: String) {
     removeAdminPinFor?.let { p ->
         AdminPinDialog(playlistId, vm, title = "Enter an Admin PIN to remove ${p.displayName}", onDismiss = { removeAdminPinFor = null }) {
             removeAdminPinFor = null
-            scope.launch { status = vm.remove(p.id).exceptionOrNull()?.message }
+            scope.launch { removeAndRefocus(p) }
         }
     }
     if (adding) AddProfileDialog(playlistId, vm) { adding = false }
@@ -636,7 +645,7 @@ internal suspend fun restoreFocus(fr: androidx.compose.ui.focus.FocusRequester, 
     kotlinx.coroutines.delay(150L)
     repeat(20) { i ->
         if (runCatching { fr.requestFocus() }.isSuccess) {
-            android.util.Log.i("AerioProfiles", "[PROFILE] focus restored to $what after switch (try ${i + 1})")
+            android.util.Log.i("AerioProfiles", "[PROFILE] focus restored to $what (try ${i + 1})")
             return
         }
         kotlinx.coroutines.delay(50L)
@@ -669,6 +678,8 @@ private fun RoleFlow(playlistId: String, p: DispatcharrProfile, vm: ProfilesView
     var needCreate by remember(p.id) { mutableStateOf(false) }
     var needEntry by remember(p.id) { mutableStateOf(false) }
     val current = vm.roleOf(p.id)
+    val currentFocus = remember { androidx.compose.ui.focus.FocusRequester() }
+    LaunchedEffect(p.id, picked) { if (picked == null) focusFirst(currentFocus) }
     fun apply(to: com.aeriotv.android.core.profiles.ProfileRole) {
         onClose(vm.setRole(playlistId, p.id, to).exceptionOrNull()?.message)
     }
@@ -682,7 +693,7 @@ private fun RoleFlow(playlistId: String, p: DispatcharrProfile, vm: ProfilesView
                     Text(p.displayName, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Spacer(Modifier.size(8.dp))
                     com.aeriotv.android.core.profiles.ProfileRole.entries.forEach { r ->
-                        ChoiceRow(label = r.label, checked = r == current, onClick = {
+                        ChoiceRow(label = r.label, checked = r == current, modifier = if (r == current) Modifier.focusRequester(currentFocus) else Modifier, onClick = {
                             when (val g = vm.roleChangeGate(playlistId, p.id, r)) {
                                 is com.aeriotv.android.core.profiles.RoleRules.RoleChange.Denied -> onClose(g.reason)
                                 com.aeriotv.android.core.profiles.RoleRules.RoleChange.Allowed -> apply(r)
@@ -781,9 +792,11 @@ private fun AddProfileDialog(playlistId: String, vm: ProfilesViewModel, onClose:
     var error by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
+    val firstUser = remember { androidx.compose.ui.focus.FocusRequester() }
     LaunchedEffect(playlistId) {
         vm.listUsers(playlistId).fold({ users = it }, { error = it.message ?: "Could not load users" })
     }
+    LaunchedEffect(users?.isNotEmpty() == true) { if (users?.isNotEmpty() == true) focusFirst(firstUser) }
     AlertDialog(
         onDismissRequest = onClose,
         title = { Text("Add Profile") },
@@ -797,10 +810,14 @@ private fun AddProfileDialog(playlistId: String, vm: ProfilesViewModel, onClose:
                         busy -> CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
                         users != null -> LazyColumn(Modifier.heightIn(max = 320.dp)) {
                             items(users.orEmpty(), key = { it.id }) { user ->
+                                var rowFocused by remember { mutableStateOf(false) }
                                 Row(
                                     Modifier
                                         .fillMaxWidth()
-                                        .clip(RoundedCornerShape(8.dp))
+                                        .then(if (user.id == users.orEmpty().firstOrNull()?.id) Modifier.focusRequester(firstUser) else Modifier)
+                                        .onFocusChanged { rowFocused = it.isFocused }
+                                        // Same focus ring as the Profiles rows.
+                                        .settingsRowCard(rowFocused)
                                         .clickable {
                                             if (busy) return@clickable
                                             if (!user.apiKey.isNullOrBlank()) {

@@ -171,8 +171,8 @@ fun SettingsScreen(
     val updaterEnabled = updateVm.isEnabled
     // Root row values: Sync reads On/Off, About reads the installed version.
     val settingsVm: SettingsViewModel = hiltViewModel()
-    val syncEnabled by settingsVm.syncMasterEnabled
-        .collectAsStateWithLifecycle(initialValue = false)
+    val syncEnabled by settingsVm.syncProviderLabel
+        .collectAsStateWithLifecycle(initialValue = "Off")
     val state by viewModel.state.collectAsStateWithLifecycle()
     val storedPlaylists by viewModel.allPlaylists.collectAsStateWithLifecycle(initialValue = emptyList())
     // Presentation only (Logan 2026-09-18): name-sorted, stored order untouched.
@@ -734,7 +734,7 @@ private fun SettingsSectionGroup(
     onClick: (SettingsSection) -> Unit,
     footer: String? = null,
     subtitleOverride: (SettingsSection) -> String? = { null },
-    syncEnabled: Boolean = false,
+    syncEnabled: String = "Off",
 ) {
     Column {
         // A blank header means the group carries no label (the closing
@@ -764,7 +764,7 @@ private fun SectionNavRow(
     section: SettingsSection,
     onClick: () -> Unit,
     subtitleOverride: String? = null,
-    syncEnabled: Boolean = false,
+    syncEnabled: String = "Off",
 ) {
     // Phase B1: delegates to the shared row so the root gets the same
     // border+scale+wash focus treatment as every subpage (the old
@@ -1154,9 +1154,10 @@ enum class SettingsSection(
  * rail. Everything but Sync uses its static enum subtitle; Sync reports whether
  * Drive sync is currently on.
  */
-fun settingsSectionSubtitle(section: SettingsSection, syncEnabled: Boolean): String? =
+fun settingsSectionSubtitle(section: SettingsSection, syncEnabled: String): String? =
     when (section) {
-        SettingsSection.Sync -> if (syncEnabled) "On" else "Off"
+        // The provider label: Off, Google Drive, or Dispatcharr.
+        SettingsSection.Sync -> syncEnabled
         // Apple shows AboutInfo.version, "1.8.40 (123)", under About on every
         // platform; same shape here so the rails read identically.
         SettingsSection.About ->

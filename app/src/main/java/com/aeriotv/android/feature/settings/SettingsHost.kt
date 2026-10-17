@@ -34,7 +34,9 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.ui.focus.FocusRequester
+import kotlinx.coroutines.launch
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -175,7 +177,7 @@ fun SettingsTwoPaneHost(
     sections: List<SettingsSectionGroupSpec>,
     activePlaylistName: String?,
     /** Drives the Sync row's On / Off subtitle; see settingsSectionSubtitle. */
-    syncEnabled: Boolean,
+    syncEnabled: String,
     takeover: (SettingsRoute) -> Boolean,
     /**
      * How to divide the window. On a foldable the boundary sits ON the crease,
@@ -245,7 +247,7 @@ private fun SettingsSidebar(
     onSelect: (SettingsRoute) -> Unit,
     sections: List<SettingsSectionGroupSpec>,
     activePlaylistName: String?,
-    syncEnabled: Boolean,
+    syncEnabled: String,
     modifier: Modifier = Modifier,
 ) {
     val sidebarRole by com.aeriotv.android.core.profiles.ProfileRoles.active.collectAsState()
@@ -374,6 +376,7 @@ private const val RailSelectDebounceMs = 150L
  *  - Back with focus on the rail falls through to the tab bar, unchanged
  */
 @Composable
+@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 fun SettingsTvRailHost(
     /**
      * Bumped by the screenshot deep link when it changes [selection] without a
@@ -388,7 +391,7 @@ fun SettingsTvRailHost(
     sections: List<SettingsSectionGroupSpec>,
     activePlaylistName: String?,
     /** Drives the Sync row's On / Off subtitle; see settingsSectionSubtitle. */
-    syncEnabled: Boolean,
+    syncEnabled: String,
     takeover: (SettingsRoute) -> Boolean,
     detail: @Composable (SettingsRoute) -> Unit,
 ) {
@@ -410,8 +413,22 @@ fun SettingsTvRailHost(
     }
 
     val railFocus = remember { FocusRequester() }
+    // Profiles: Manage Profiles -> Admin moves the rail to Playlists; once the
+    // switch scrim drops, focus lands on that rail row (never a tab pill).
+    val profileScrimReleased by com.aeriotv.android.core.profiles.ProfileSwitchFocus.released.collectAsState()
+    androidx.compose.runtime.LaunchedEffect(profileScrimReleased) {
+        if (!com.aeriotv.android.core.profiles.ProfileSwitchFocus.consume(com.aeriotv.android.core.profiles.ProfileSwitchFocus.Target.Rail)) return@LaunchedEffect
+        kotlinx.coroutines.delay(150L)
+        repeat(8) {
+            runCatching { railFocus.requestFocus() }
+            kotlinx.coroutines.delay(100L)
+        }
+        android.util.Log.i("AerioProfiles", "[PROFILE] focus restored to settings rail row ${encodeSettingsRoute(selection)}")
+    }
     val detailFocus = remember { FocusRequester() }
     var railHasFocus by remember { mutableStateOf(false) }
+    var detailHasFocus by remember { mutableStateOf(false) }
+    val railRightScope = androidx.compose.runtime.rememberCoroutineScope()
     var hostHasFocus by remember { mutableStateOf(false) }
     var pending by remember { mutableStateOf<SettingsRoute?>(null) }
     // Bumped on EVERY rail focus. Keying the commit on the route alone missed
@@ -523,8 +540,24 @@ fun SettingsTvRailHost(
                         // Apply the pending selection BEFORE crossing the
                         // boundary, or the pane the user just entered would
                         // still be showing the previously committed route.
+                        val changed = pending != null && pending != selection
                         flushPending()
-                        com.aeriotv.android.ui.tv.TvFocusTrace.settingsRequest("detailFocus", "rail right", detailFocus)
+                        if (!changed) {
+                            com.aeriotv.android.ui.tv.TvFocusTrace.settingsRequest("detailFocus", "rail right", detailFocus)
+                        } else {
+                            // The pane is about to recompose with the new page:
+                            // aiming now would land on the OLD page's row, which
+                            // is then disposed and focus falls to the tab pill.
+                            // Aim after the new page has composed, and retry
+                            // until focus is inside the pane.
+                            railRightScope.launch {
+                                repeat(10) { i ->
+                                    kotlinx.coroutines.delay(if (i == 0) 64L else 50L)
+                                    if (detailHasFocus) return@launch
+                                    com.aeriotv.android.ui.tv.TvFocusTrace.settingsRequest("detailFocus", "rail right (after select, try ${i + 1})", detailFocus)
+                                }
+                            }
+                        }
                         true
                     } else {
                         false
@@ -536,6 +569,20 @@ fun SettingsTvRailHost(
                 .weight(1f)
                 .fillMaxHeight()
                 .focusRequester(detailFocus)
+                .onFocusChanged { detailHasFocus = it.hasFocus }
+                // Left out of any page lands on the SELECTED rail row (the
+                // geometric search picked whichever row was level with the
+                // focused pane row, one row off).
+                .focusProperties {
+                    exit = { dir ->
+                        if (dir == androidx.compose.ui.focus.FocusDirection.Left) {
+                            android.util.Log.i("AerioFocus", "[SETTINGS] pane left -> rail row ${encodeSettingsRoute(selection)}")
+                            railFocus
+                        } else {
+                            FocusRequester.Default
+                        }
+                    }
+                }
                 .focusGroup(),
         ) {
             if (pushed != null) {
@@ -576,7 +623,7 @@ private fun SettingsTvRail(
     selection: SettingsRoute,
     sections: List<SettingsSectionGroupSpec>,
     activePlaylistName: String?,
-    syncEnabled: Boolean,
+    syncEnabled: String,
     onFocusRoute: (SettingsRoute) -> Unit,
     onClickRoute: (SettingsRoute) -> Unit,
     railFocus: FocusRequester,

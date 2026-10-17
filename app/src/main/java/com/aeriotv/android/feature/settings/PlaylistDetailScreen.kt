@@ -50,6 +50,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.focusProperties
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
@@ -817,6 +818,10 @@ private fun ActionRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
+            // A disabled row ("Active Playlist") is never a landing spot for
+            // initial or D-pad focus, but a row that is focused when it turns
+            // disabled keeps focus until the user moves on (no stranding).
+            .focusProperties { canFocus = enabled || focused }
             .onFocusChanged { focused = it.isFocused }
             // Shaped fill plus the 2 dp accent ring, as on every settings row
             // (it was a square wash with no ring on a rounded card).

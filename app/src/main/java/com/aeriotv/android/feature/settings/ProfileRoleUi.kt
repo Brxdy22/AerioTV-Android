@@ -112,6 +112,8 @@ fun ManageProfilesPage(onBack: () -> Unit) {
 
     fun doSwitch(p: DispatcharrProfile) {
         busy = true; status = null
+        // Leaving the Child moves the rail to Playlists: focus that row after.
+        com.aeriotv.android.core.profiles.ProfileSwitchFocus.arm(com.aeriotv.android.core.profiles.ProfileSwitchFocus.Target.Rail)
         vm.switchTo(pid, p.id) { err -> busy = false; status = err }
     }
 
