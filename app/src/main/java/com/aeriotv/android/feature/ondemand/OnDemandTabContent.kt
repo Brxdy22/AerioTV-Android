@@ -1004,7 +1004,9 @@ private fun VodHeaderRow(
             }
             Spacer(Modifier.width(if (isTv) 8.dp else 4.dp))
         }
-        if (isTv) {
+        // Profiles phase 2b: a Child has no Manage Groups.
+        if (com.aeriotv.android.feature.settings.rememberIsChildProfile()) {
+        } else if (isTv) {
             TvHeaderIconButton(
                 upTarget = upTarget,
                 icon = Icons.Filled.FilterList,

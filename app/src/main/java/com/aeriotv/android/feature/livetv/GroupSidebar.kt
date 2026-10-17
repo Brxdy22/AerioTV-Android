@@ -253,7 +253,7 @@ internal fun GroupSidebarPanel(
             // focus search looks within the focused row's own horizontal
             // band, and this button is above every row); Up from the top row
             // is what reaches it.
-            onManageGroups?.let { open ->
+            onManageGroups?.takeUnless { com.aeriotv.android.feature.settings.rememberIsChildProfile() }?.let { open ->
                 TvManageGroupsCircle(
                     hiddenGroupsCount = hiddenGroupCount,
                     onClick = open,
@@ -774,7 +774,7 @@ internal fun PhoneGroupDrawer(
                 color = MaterialTheme.colorScheme.tertiary,
                 modifier = Modifier.weight(1f),
             )
-            Box(
+            if (!com.aeriotv.android.feature.settings.rememberIsChildProfile()) Box(
                 modifier = Modifier
                     .size(34.dp)
                     .clip(CircleShape)

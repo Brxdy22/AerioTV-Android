@@ -414,7 +414,10 @@ fun PlaylistEntity.canSwitchStream(): Boolean =
     // FAIL CLOSED: admin-only, so an unknown level (never probed, identity
     // reset, probe not landed yet) hides the option instead of offering a
     // picker that would 403. Only a measured admin level shows it.
-    isDispatcharrDirectConnect() && capabilities().isKnownAllowed(Capability.CanSwitchStream)
+    // Profiles phase 2b: a Child profile never edits the server (this gate
+    // also covers Mark/Unmark as Radio Channel).
+    isDispatcharrDirectConnect() && capabilities().isKnownAllowed(Capability.CanSwitchStream) &&
+        !com.aeriotv.android.core.profiles.ProfileRoles.isChild()
 
 /** Whether the server is at least [minimum] ("0.30.0"); false when unknown. */
 fun PlaylistEntity.dispatcharrVersionAtLeast(minimum: String): Boolean {

@@ -145,6 +145,7 @@ import com.aeriotv.android.feature.settings.isPaneBaseline
 import com.aeriotv.android.feature.settings.settingsDeepLinkPageNeedsPlaylist
 import com.aeriotv.android.feature.settings.settingsRouteForDeepLinkPage
 import com.aeriotv.android.feature.settings.visibleSettingsSections
+import com.aeriotv.android.feature.settings.allowedFor
 import com.aeriotv.android.ui.tv.tvFocusScale
 
 /**
@@ -2865,7 +2866,7 @@ private fun SettingsTabContent(
         val activeId = playlistState.playlist?.id
         // No playlist yet: leave the request pending and retry when one lands.
         if (activeId == null && settingsDeepLinkPageNeedsPlaylist(page)) return@LaunchedEffect
-        val target = settingsRouteForDeepLinkPage(page, activeId)
+        val target = settingsRouteForDeepLinkPage(page, activeId, com.aeriotv.android.core.profiles.ProfileRoles.active.value)
         nav.popToRoot()
         if (twoPane) {
             when {
@@ -2967,7 +2968,26 @@ private fun SettingsTabContent(
     }
     // Phase B3: one renderer for a route, used by BOTH the stacked phone layout
     // and the tablet host's detail pane, so the two can never diverge.
-    val renderRoute: @Composable (SettingsRoute?) -> Unit = { r ->
+    // Profiles phase 2b: a Child renders only its allowed routes; anything
+    // else (a stale selection, a push, a deep link) falls back to the root.
+    val activeRole by com.aeriotv.android.core.profiles.ProfileRoles.active.collectAsStateWithLifecycle()
+    LaunchedEffect(activeRole) {
+        if (activeRole == com.aeriotv.android.core.profiles.ProfileRole.Child) {
+            if (nav.stack.any { !it.allowedFor(activeRole) }) nav.popToRoot()
+            if (!selection.allowedFor(activeRole)) {
+                selection = SettingsRoute.Section(SettingsSection.LiveTV)
+            }
+        } else if (selection is SettingsRoute.ManageProfiles) {
+            // Left the Child (Manage Profiles -> Admin): that page has no row
+            // outside Child mode, so land on the canon default instead.
+            nav.popToRoot()
+            selection = if (tvRail) SettingsRoute.Playlists else DefaultSettingsPaneSelection
+        } else if (nav.stack.any { it is SettingsRoute.ManageProfiles }) {
+            nav.popToRoot()
+        }
+    }
+    val renderRoute: @Composable (SettingsRoute?) -> Unit = { r0 ->
+    val r = if (r0.allowedFor(activeRole)) r0 else null
     when (r) {
         null -> SettingsScreen(
             listState = settingsRootListState,
@@ -2979,6 +2999,7 @@ private fun SettingsTabContent(
                 nav.push(SettingsRoute.AddPlaylist(AddPlaylistWizardStep.ChooseType))
             },
             onOpenLicenses = { nav.push(SettingsRoute.Licenses) },
+            onOpenManageProfiles = { nav.push(SettingsRoute.ManageProfiles) },
             viewModel = playlistVm,
         )
         is SettingsRoute.About -> SettingsScreen(
@@ -2998,6 +3019,7 @@ private fun SettingsTabContent(
                 nav.push(SettingsRoute.AddPlaylist(AddPlaylistWizardStep.ChooseType))
             },
             onOpenLicenses = { nav.push(SettingsRoute.Licenses) },
+            onOpenManageProfiles = { nav.push(SettingsRoute.ManageProfiles) },
             viewModel = playlistVm,
         )
         is SettingsRoute.AddPlaylist -> when (val st = r.step) {
@@ -3072,6 +3094,8 @@ private fun SettingsTabContent(
                 viewModel = playlistVm,
             )
         is SettingsRoute.AddMoreCategories -> AddMoreCategoriesScreen(onBack = { nav.pop() })
+        is SettingsRoute.ManageProfiles ->
+            com.aeriotv.android.feature.settings.ManageProfilesPage(onBack = { nav.pop() })
         is SettingsRoute.SyncCategories ->
             com.aeriotv.android.feature.settings.SyncCategoriesScreen(onBack = { nav.pop() })
         is SettingsRoute.LogViewer -> com.aeriotv.android.feature.settings.LogViewerScreen(
@@ -3161,6 +3185,7 @@ private fun SettingsTabContent(
                 sections = visibleSettingsSections(
                     isTv = true,
                     updaterEnabled = updaterEnabled,
+                    role = activeRole,
                 ),
                 activePlaylistName = playlistState.playlist?.name,
                 syncEnabled = syncEnabled,
@@ -3184,6 +3209,7 @@ private fun SettingsTabContent(
                 sections = visibleSettingsSections(
                     isTv = isTvDevice,
                     updaterEnabled = updaterEnabled,
+                    role = activeRole,
                 ),
                 activePlaylistName = playlistState.playlist?.name,
                 syncEnabled = syncEnabled,

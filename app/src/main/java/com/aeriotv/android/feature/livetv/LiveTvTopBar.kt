@@ -272,7 +272,7 @@ fun LiveTvPillsRow(
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        item {
+        if (!com.aeriotv.android.core.profiles.ProfileRoles.isChild()) item {
             Box(
                 modifier = Modifier
                     .size(36.dp)
@@ -483,7 +483,7 @@ fun LiveTvPhoneHeaderRow(
                 )
             }
         } else {
-            LiveTvPhoneCircle(
+            if (!com.aeriotv.android.feature.settings.rememberIsChildProfile()) LiveTvPhoneCircle(
                 icon = Icons.Outlined.Tune,
                 contentDescription = if (hiddenGroupsCount == 0) "Manage groups"
                 else "Manage groups ($hiddenGroupsCount hidden)",

@@ -233,6 +233,8 @@ data class ProfileRow(
     val pinType: String,
     val pinHash: String,
     val pinSalt: String,
+    /** "admin" | "user" | "child"; "" = absent (older writer), reader keeps its own. */
+    val role: String = "",
     val tail: Tail = Tail(),
 )
 
@@ -427,6 +429,7 @@ object DsyncPayloads {
 
     // profiles
     val PIN_TYPES = setOf("none", "numbers", "directions")
+    val ROLES = setOf("admin", "user", "child")
     fun decodeProfiles(data: JsonObject): List<ProfileRow>? = rows(data)?.map { el ->
         val r = el as? JsonArray ?: return null
         ProfileRow(
@@ -436,7 +439,8 @@ object DsyncPayloads {
             pinType = r.getOrNull(3).asStr()?.takeIf { it in PIN_TYPES } ?: "none",
             pinHash = r.getOrNull(4).asStr() ?: "",
             pinSalt = r.getOrNull(5).asStr() ?: "",
-            tail = tailOf(r, 6),
+            role = r.getOrNull(6).asStr()?.takeIf { it in ROLES } ?: "",
+            tail = tailOf(r, 7),
         )
     }
     fun encodeProfiles(base: JsonObject?, rows: List<ProfileRow>): JsonObject =
@@ -449,6 +453,7 @@ object DsyncPayloads {
                     JsonPrimitive(it.pinType),
                     JsonPrimitive(if (none) "" else it.pinHash),
                     JsonPrimitive(if (none) "" else it.pinSalt),
+                    JsonPrimitive(it.role.takeIf { r -> r in ROLES } ?: "user"),
                 ),
             ).plusTail(it.tail)
         }))

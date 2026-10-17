@@ -1487,6 +1487,8 @@ class MainActivity : ComponentActivity() {
                             // Profiles PIN: a locked restored profile covers
                             // everything until its PIN is entered.
                             com.aeriotv.android.feature.settings.ProfileLaunchGate(profileManager)
+                            // Profiles phase 2b: Android TV "Who is watching?" picker.
+                            com.aeriotv.android.feature.settings.TvLaunchProfilePicker(profileManager)
                             // Exit AerioTV? confirm (Logan 2026-10-14): raised by the
                             // root Back fallback registered in onCreate (any Back no
                             // screen consumed, every form factor) and by a held Back

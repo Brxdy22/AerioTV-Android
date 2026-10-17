@@ -63,6 +63,7 @@ import androidx.compose.material3.Text
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
@@ -717,6 +718,13 @@ fun GuideScreen(
     }
 
     val gridFocus = remember { FocusRequester() }
+    // Profiles (TV launch picker): once the switch scrim drops, focus lands in
+    // the grid (its current cell), never on a tab pill.
+    val profileScrimReleased by com.aeriotv.android.core.profiles.ProfileSwitchFocus.released.collectAsState()
+    LaunchedEffect(profileScrimReleased) {
+        if (!com.aeriotv.android.core.profiles.ProfileSwitchFocus.consume(com.aeriotv.android.core.profiles.ProfileSwitchFocus.Target.Guide)) return@LaunchedEffect
+        com.aeriotv.android.feature.settings.restoreFocus(gridFocus, "guide grid")
+    }
     val pillsFocus = remember { FocusRequester() }
     val bannerFocus = remember { FocusRequester() }
     val stagingPlayFocus = remember { FocusRequester() }
@@ -1928,7 +1936,7 @@ private fun GroupPills(
         // button sits to the LEFT of the first group pill on every pill row.
         // Entry focus still goes to the SELECTED pill (selectedPillFocus);
         // Left from the first pill lands here.
-        item(key = "__manage__") {
+        if (!com.aeriotv.android.core.profiles.ProfileRoles.isChild()) item(key = "__manage__") {
             com.aeriotv.android.feature.livetv.TvManageGroupsCircle(
                 hiddenGroupsCount = hiddenGroupCount,
                 onClick = onManageGroups,

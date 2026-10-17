@@ -121,9 +121,13 @@ class DsyncSchemaTest {
         assertEquals(listOf(c), DsyncPayloads.decodeCollections(dc))
         val salt = "b81e" + "0".repeat(28)
         val hash = DsyncPinHash.hash(salt, "UULR")
-        val rows = listOf(ProfileRow(1, "admin", "Logan", "none", "", ""), ProfileRow(7, "test1", "Kids", "directions", hash, salt))
+        val rows = listOf(ProfileRow(1, "admin", "Logan", "none", "", "", role = "admin"), ProfileRow(7, "test1", "Kids", "directions", hash, salt, role = "child"))
         val dp = roundTrip(DsyncKey.Profiles, DsyncPayloads.encodeProfiles(null, rows))
         assertEquals(rows, DsyncPayloads.decodeProfiles(dp))
+        // An older writer without the role position: reader keeps its own ("").
+        val old = obj("""{"rows":[[3,"x","X","none","",""]]}""")
+        assertEquals("", DsyncPayloads.decodeProfiles(old)!![0].role)
+        assertEquals("", DsyncPayloads.decodeProfiles(obj("""{"rows":[[3,"x","X","none","","","boss"]]}"""))!![0].role)
     }
 
     @Test fun trailingPositionsAndUnknownMembersRoundTrip() {

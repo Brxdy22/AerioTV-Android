@@ -543,7 +543,7 @@ fun LiveTvSettingsScreen(
                 }
 
                 // MARK: Recently Watched (GH #130, Apple 5e34cf6)
-                item("recently-watched") {
+                if (com.aeriotv.android.core.profiles.ProfileRoles.active.value != com.aeriotv.android.core.profiles.ProfileRole.Child) item("recently-watched") {
                     SettingsSection(header = "Recently Watched") {
                         SettingsActionRow(
                             label = "Clear Recently Watched",

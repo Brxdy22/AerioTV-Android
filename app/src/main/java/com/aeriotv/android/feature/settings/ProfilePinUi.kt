@@ -94,18 +94,42 @@ fun PinEntryDialog(
     onDismiss: (() -> Unit)?,
     onEntered: (List<String>) -> String?,
     initialError: String? = null,
+    /** Seconds left on the wrong-PIN backoff; drives the ticking label. */
+    lockSeconds: (() -> Int)? = null,
+    /** Start focus on Clear instead of "1" (a step that follows another pad). */
+    focusClear: Boolean = false,
 ) {
     val isTv = rememberIsTvDevice()
     val entries = remember { mutableStateListOf<String>() }
+    // A key press that started on the previous dialog (OK on Enter PIN)
+    // must not land here: presses are ignored for 300 ms after opening.
+    val openedAt = remember { android.os.SystemClock.uptimeMillis() }
+    fun ready() = android.os.SystemClock.uptimeMillis() - openedAt >= INPUT_GUARD_MS
     var error by remember { mutableStateOf(initialError) }
+    var submits by remember { mutableStateOf(0) }
 
     fun submit() {
+        if (!ready()) return
         if (entries.size < PinRules.MIN_LENGTH) return
         val msg = onEntered(entries.toList())
         entries.clear()
         error = msg
+        submits++
+    }
+    // Phase 2b: "Try again in N seconds" ticks every second, then clears.
+    LaunchedEffect(submits) {
+        val left = lockSeconds ?: return@LaunchedEffect
+        var n = left()
+        if (n <= 0) return@LaunchedEffect
+        while (n > 0) {
+            error = "Try again in $n seconds"
+            kotlinx.coroutines.delay(1_000L)
+            n = left()
+        }
+        error = null
     }
     fun add(v: String) {
+        if (!ready()) return
         if (entries.size < PinRules.MAX_LENGTH) { entries.add(v); error = null }
     }
     fun back(): Boolean {
@@ -188,10 +212,11 @@ fun PinEntryDialog(
                     when {
                         type == PinType.Numbers -> NumberPad(
                             onDigit = { add(it) },
-                            onClear = { entries.clear() },
+                            onClear = { if (ready()) entries.clear() },
                             onOk = { submit() },
                             okEnabled = entries.size >= PinRules.MIN_LENGTH,
                             firstFocus = rootFocus,
+                            focusClear = focusClear,
                         )
                         isTv -> {
                             // Focus target for the raw D-pad capture.
@@ -211,10 +236,11 @@ fun PinEntryDialog(
                         }
                         else -> DirectionPad(
                             onDirection = { add(it.name) },
-                            onClear = { entries.clear() },
+                            onClear = { if (ready()) entries.clear() },
                             onOk = { submit() },
                             okEnabled = entries.size >= PinRules.MIN_LENGTH,
                             firstFocus = rootFocus,
+                            focusClear = focusClear,
                         )
                     }
                     if (onDismiss != null && !isTv) {
@@ -282,13 +308,14 @@ private fun NumberPad(
     onOk: () -> Unit,
     okEnabled: Boolean,
     firstFocus: FocusRequester,
+    focusClear: Boolean = false,
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         listOf(listOf("1", "2", "3"), listOf("4", "5", "6"), listOf("7", "8", "9")).forEach { row ->
             Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                 row.forEach { d ->
                     PadKey(
-                        modifier = if (d == "1") Modifier.focusRequester(firstFocus) else Modifier,
+                        modifier = if (d == "1" && !focusClear) Modifier.focusRequester(firstFocus) else Modifier,
                         label = d,
                         onClick = { onDigit(d) },
                     )
@@ -296,7 +323,11 @@ private fun NumberPad(
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-            PadKey(label = "Clear", onClick = onClear)
+            PadKey(
+                modifier = if (focusClear) Modifier.focusRequester(firstFocus) else Modifier,
+                label = "Clear",
+                onClick = onClear,
+            )
             PadKey(label = "0", onClick = { onDigit("0") })
             PadKey(label = "OK", enabled = okEnabled, onClick = onOk)
         }
@@ -310,10 +341,11 @@ private fun DirectionPad(
     onOk: () -> Unit,
     okEnabled: Boolean,
     firstFocus: FocusRequester,
+    focusClear: Boolean = false,
 ) {
     Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp)) {
         PadKey(
-            modifier = Modifier.focusRequester(firstFocus),
+            modifier = if (focusClear) Modifier else Modifier.focusRequester(firstFocus),
             icon = Icons.Filled.KeyboardArrowUp,
             contentDescription = "Up",
             onClick = { onDirection(PinDirection.Up) },
@@ -325,9 +357,13 @@ private fun DirectionPad(
         }
         PadKey(icon = Icons.Filled.KeyboardArrowDown, contentDescription = "Down", onClick = { onDirection(PinDirection.Down) })
         Spacer(Modifier.height(2.dp))
-        SettingsDialogTextButton(label = "Clear", onClick = onClear)
+        Box(if (focusClear) Modifier.focusRequester(firstFocus) else Modifier) {
+            SettingsDialogTextButton(label = "Clear", onClick = onClear)
+        }
     }
 }
+
+private const val INPUT_GUARD_MS = 300L
 
 /**
  * Set PIN / Change PIN: (current PIN when a non-admin changes their own),
@@ -359,6 +395,7 @@ fun SetPinFlow(
                 val r = vm.verifyPin(profile.id, seq)
                 if (r == ProfileManager.PinCheck.Ok) { current = seq; null } else pinCheckMessage(r)
             },
+            lockSeconds = { vm.pinLockSeconds(profile.id) },
         )
         type == null -> AlertDialog(
             onDismissRequest = { onClose(null) },
@@ -378,11 +415,13 @@ fun SetPinFlow(
             type = type!!,
             onDismiss = { onClose(null) },
             initialError = mismatch,
+            focusClear = true,
             onEntered = { seq -> first = seq; mismatch = null; null },
         )
         else -> PinEntryDialog(
             title = "Confirm PIN",
             type = type!!,
+            focusClear = true,
             onDismiss = { onClose(null) },
             onEntered = { seq ->
                 if (seq != first) {
@@ -410,6 +449,15 @@ fun RemovePinFlow(
     onClose: (String?) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
+    vm.pinRemovalBlock(playlistId, profile.id)?.let { reason ->
+        AlertDialog(
+            onDismissRequest = { onClose(null) },
+            title = { Text("Remove PIN") },
+            text = { Text(reason) },
+            confirmButton = { SettingsDialogTextButton(label = "OK", onClick = { onClose(null) }) },
+        )
+        return
+    }
     var needsCurrent by remember { mutableStateOf<Boolean?>(null) }
     LaunchedEffect(profile.id) {
         val n = vm.needsCurrentPin(playlistId, profile.id)
@@ -430,6 +478,7 @@ fun RemovePinFlow(
                 null
             }
         },
+        lockSeconds = { vm.pinLockSeconds(profile.id) },
     )
 }
 
@@ -527,5 +576,6 @@ fun ProfileLaunchGate(manager: ProfileManager) {
         type = manager.pinType(p.id) ?: PinType.Numbers,
         onDismiss = null,
         onEntered = { seq -> pinCheckMessage(manager.unlockLaunchGate(seq)) },
+        lockSeconds = { manager.pinLockSeconds(p.id) },
     )
 }

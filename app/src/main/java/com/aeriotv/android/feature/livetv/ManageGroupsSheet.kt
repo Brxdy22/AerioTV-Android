@@ -163,6 +163,11 @@ fun ManageGroupsSheet(
     onSortModeChange: (GroupSortMode) -> Unit = {},
     onReorder: (List<String>) -> Unit = {},
 ) {
+    // Profiles phase 2b: never opens for a Child profile.
+    if (com.aeriotv.android.feature.settings.rememberIsChildProfile()) {
+        androidx.compose.runtime.LaunchedEffect(Unit) { onDismiss() }
+        return
+    }
     var working by remember(hiddenGroups) { mutableStateOf(hiddenGroups.toMutableSet()) }
     val manualReorder = reorderEnabled && sortMode == GroupSortMode.Manual
 

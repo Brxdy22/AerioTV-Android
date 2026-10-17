@@ -75,6 +75,27 @@ sealed interface SettingsRoute {
      * where SettingsSubPageHost does not push.
      */
     data object SyncCategories : SettingsRoute
+
+    /**
+     * Profiles phase 2b: a Child profile's only way out. The page asks for an
+     * Admin profile's PIN before it shows the profile list.
+     */
+    data object ManageProfiles : SettingsRoute
+}
+
+/**
+ * Child gating (phase 2b): the routes a Child profile may render. Everything
+ * else (Playlists, DVR, Remote Control, Sync, General, Movies & TV Shows,
+ * Developer, App Updates, playlist pages, the log) falls back to the root.
+ */
+fun SettingsRoute?.allowedFor(role: com.aeriotv.android.core.profiles.ProfileRole?): Boolean {
+    if (role != com.aeriotv.android.core.profiles.ProfileRole.Child) return true
+    return when (this) {
+        null, SettingsRoute.Root, SettingsRoute.About, SettingsRoute.Licenses,
+        SettingsRoute.ManageProfiles, SettingsRoute.AddMoreCategories -> true
+        is SettingsRoute.Section -> com.aeriotv.android.core.profiles.RoleRules.sectionVisible(role, section.name)
+        else -> false
+    }
 }
 
 /**
@@ -84,7 +105,8 @@ sealed interface SettingsRoute {
 val SettingsRoute.isPaneBaseline: Boolean
     get() = this is SettingsRoute.Playlists ||
         this is SettingsRoute.Section ||
-        this is SettingsRoute.About
+        this is SettingsRoute.About ||
+        this is SettingsRoute.ManageProfiles
 
 // MARK: - Frozen section canon
 //
@@ -107,6 +129,14 @@ data class SettingsSectionGroupSpec(
  * factor gates: Remote Control is TV-only and App Updates is sideload-only.
  */
 fun visibleSettingsSections(
+    isTv: Boolean,
+    updaterEnabled: Boolean,
+    role: com.aeriotv.android.core.profiles.ProfileRole? = null,
+): List<SettingsSectionGroupSpec> = allSettingsSections(isTv, updaterEnabled)
+    .map { g -> g.copy(sections = g.sections.filter { com.aeriotv.android.core.profiles.RoleRules.sectionVisible(role, it.name) }) }
+    .filter { it.sections.isNotEmpty() }
+
+private fun allSettingsSections(
     isTv: Boolean,
     updaterEnabled: Boolean,
 ): List<SettingsSectionGroupSpec> = listOf(
@@ -152,7 +182,8 @@ fun visibleSettingsSections(
 fun settingsRouteForDeepLinkPage(
     page: String,
     activePlaylistId: String?,
-): SettingsRoute? = when (page.trim().lowercase()) {
+    role: com.aeriotv.android.core.profiles.ProfileRole? = null,
+): SettingsRoute? = if (!com.aeriotv.android.core.profiles.RoleRules.deepLinkAllowed(role, page)) null else when (page.trim().lowercase()) {
     "root" -> null
     "playlists" -> SettingsRoute.Playlists
     "livetv" -> SettingsRoute.Section(SettingsSection.LiveTV)
@@ -166,6 +197,7 @@ fun settingsRouteForDeepLinkPage(
     "updates" -> SettingsRoute.Section(SettingsSection.AppUpdates)
     "developer" -> SettingsRoute.Section(SettingsSection.Developer)
     "about" -> SettingsRoute.About
+    "manage-profiles" -> SettingsRoute.ManageProfiles
     "playlist-detail" -> activePlaylistId?.let { SettingsRoute.PlaylistDetail(it) }
     "edit-playlist" -> activePlaylistId?.let { SettingsRoute.EditPlaylist(it) }
     else -> null
@@ -261,6 +293,7 @@ class SettingsNavState(initial: List<SettingsRoute> = emptyList()) {
             is SettingsRoute.About -> "about"
             is SettingsRoute.Licenses -> "licenses"
             is SettingsRoute.SyncCategories -> "synccategories"
+            is SettingsRoute.ManageProfiles -> "manageprofiles"
         }
 }
 
@@ -286,6 +319,7 @@ internal fun encodeSettingsRoute(route: SettingsRoute): String = when (route) {
     is SettingsRoute.About -> "about"
     is SettingsRoute.Licenses -> "licenses"
     is SettingsRoute.SyncCategories -> "synccategories"
+    is SettingsRoute.ManageProfiles -> "manageprofiles"
 }
 
 internal fun decodeSettingsRoute(raw: String): SettingsRoute? = when {
@@ -293,6 +327,7 @@ internal fun decodeSettingsRoute(raw: String): SettingsRoute? = when {
     raw == "about" -> SettingsRoute.About
     raw == "licenses" -> SettingsRoute.Licenses
     raw == "synccategories" -> SettingsRoute.SyncCategories
+    raw == "manageprofiles" -> SettingsRoute.ManageProfiles
     raw == "playlists" -> SettingsRoute.Playlists
     raw == "log" -> SettingsRoute.LogViewer
     raw == "addmore" -> SettingsRoute.AddMoreCategories

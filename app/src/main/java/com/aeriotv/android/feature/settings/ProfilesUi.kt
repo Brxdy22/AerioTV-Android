@@ -19,6 +19,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Edit
@@ -43,6 +44,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.type
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -58,6 +63,7 @@ import com.aeriotv.android.core.network.DispatcharrUserSummary
 import com.aeriotv.android.core.profiles.DispatcharrProfile
 import com.aeriotv.android.core.profiles.ProfileLevel
 import com.aeriotv.android.core.profiles.ProfileManager
+import com.aeriotv.android.core.profiles.effectiveRole
 import com.aeriotv.android.ui.settings.SettingsCard
 import com.aeriotv.android.ui.settings.SettingsDialogTextButton
 import com.aeriotv.android.ui.settings.SettingsSectionFooter
@@ -96,7 +102,30 @@ class ProfilesViewModel @Inject constructor(
 
     fun profiles(playlistId: String) = manager.profiles(playlistId)
     fun activeProfileId(playlistId: String) = manager.activeProfileId(playlistId)
-    suspend fun isAdmin(playlistId: String) = manager.activeIsAdmin(playlistId)
+    /** Server Admin AND app-local Admin role: add, remove, roles, channel profiles. */
+    suspend fun isAdmin(playlistId: String) =
+        manager.activeIsAdmin(playlistId) && manager.activeRole(playlistId) == com.aeriotv.android.core.profiles.ProfileRole.Admin
+    fun isRoleAdmin(playlistId: String) = manager.activeRole(playlistId) == com.aeriotv.android.core.profiles.ProfileRole.Admin
+    val activeRole = com.aeriotv.android.core.profiles.ProfileRoles.active
+
+    // Roles (phase 2b)
+    fun roleOf(profileId: String) = manager.roleOf(profileId)
+    fun roleChangeGate(playlistId: String, profileId: String, to: com.aeriotv.android.core.profiles.ProfileRole) =
+        manager.roleChangeGate(playlistId, profileId, to)
+    fun setRole(playlistId: String, profileId: String, to: com.aeriotv.android.core.profiles.ProfileRole) =
+        manager.setRole(playlistId, profileId, to)
+    fun verifyAnyAdminPin(playlistId: String, entries: List<String>) = manager.verifyAnyAdminPin(playlistId, entries)
+    fun adminPinType(playlistId: String) = manager.adminPinHolders(playlistId).firstOrNull()?.let { manager.pinType(it.id) }
+    fun adminHasPin(playlistId: String) = manager.adminHasPin(playlistId)
+    fun lastAdminUnlock() = manager.lastAdminUnlock
+    fun anyChild(playlistId: String) = manager.anyChild(playlistId)
+    fun activeProfile(playlistId: String) = manager.activeProfile(playlistId)
+    fun pinRemovalBlock(playlistId: String, profileId: String) = manager.pinRemovalBlock(playlistId, profileId)
+    fun resetGate(playlistId: String) = manager.resetGate(playlistId)
+    suspend fun resetPin(playlistId: String, profileId: String, adminEntries: List<String>?) =
+        manager.resetPin(playlistId, profileId, adminEntries)
+    fun askAtLaunch(playlistId: String) = manager.askAtLaunch(playlistId)
+    fun setAskAtLaunch(playlistId: String, on: Boolean) = manager.setAskAtLaunch(playlistId, on)
 
     /** True while anything is playing (main player, mini player, background audio). */
     fun isPlaying(): Boolean {
@@ -121,8 +150,12 @@ class ProfilesViewModel @Inject constructor(
 
     // PIN (phase 2a)
     fun hasPin(profileId: String) = manager.hasPin(profileId)
+    fun hasSwitchTicket(profileId: String) = manager.hasSwitchTicket(profileId)
     fun pinType(profileId: String) = manager.pinType(profileId)
     fun verifyPin(profileId: String, entries: List<String>) = manager.verifyPin(profileId, entries)
+    fun pinLockSeconds(profileId: String) = manager.pinLockSeconds(profileId)
+    fun adminPinLockSeconds(playlistId: String) =
+        manager.adminPinHolders(playlistId).minOfOrNull { manager.pinLockSeconds(it.id) } ?: 0
     suspend fun canManagePin(playlistId: String, profileId: String) = manager.canManagePin(playlistId, profileId)
     suspend fun needsCurrentPin(playlistId: String, profileId: String) = manager.needsCurrentPin(playlistId, profileId)
     suspend fun setPin(playlistId: String, profileId: String, type: com.aeriotv.android.core.profiles.PinType, entries: List<String>, current: List<String>?) =
@@ -146,6 +179,9 @@ fun ProfileSwitcherButton(modifier: Modifier = Modifier) {
     val profiles by vm.activePlaylistProfiles.collectAsStateWithLifecycle(initialValue = emptyList())
     val pid = playlistId ?: return
     if (profiles.size < 2) return
+    // Phase 2b: a Child never sees the switcher (or any other profile name).
+    val role by vm.activeRole.collectAsStateWithLifecycle()
+    if (!com.aeriotv.android.core.profiles.RoleRules.canSeeSwitcher(role)) return
     val activeId by vm.activeProfileId(pid).collectAsStateWithLifecycle(initialValue = null)
     val active = profiles.firstOrNull { it.id == activeId } ?: profiles.first()
     var open by remember { mutableStateOf(false) }
@@ -176,6 +212,7 @@ fun ProfileSwitcherButton(modifier: Modifier = Modifier) {
                 profiles.forEach { p ->
                     ProfileRow(
                         profile = p,
+                        locked = vm.hasPin(p.id),
                         isActive = p.id == active.id,
                         onClick = {
                             if (p.id == active.id || busy) return@ProfileRow
@@ -228,7 +265,7 @@ fun ProfileSwitcherButton(modifier: Modifier = Modifier) {
 
 /** "Enter PIN for {name}" before switching to a locked profile. */
 @Composable
-private fun SwitchPinDialog(p: DispatcharrProfile, vm: ProfilesViewModel, onDismiss: () -> Unit, onOk: () -> Unit) {
+internal fun SwitchPinDialog(p: DispatcharrProfile, vm: ProfilesViewModel, onDismiss: () -> Unit, onOk: () -> Unit) {
     PinEntryDialog(
         title = "Enter PIN for ${p.displayName}",
         type = vm.pinType(p.id) ?: com.aeriotv.android.core.profiles.PinType.Numbers,
@@ -237,11 +274,12 @@ private fun SwitchPinDialog(p: DispatcharrProfile, vm: ProfilesViewModel, onDism
             val r = vm.verifyPin(p.id, seq)
             if (r == com.aeriotv.android.core.profiles.ProfileManager.PinCheck.Ok) { onOk(); null } else pinCheckMessage(r)
         },
+        lockSeconds = { vm.pinLockSeconds(p.id) },
     )
 }
 
 @Composable
-private fun StopPlaybackDialog(name: String, onDismiss: () -> Unit, onConfirm: () -> Unit) {
+internal fun StopPlaybackDialog(name: String, onDismiss: () -> Unit, onConfirm: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("Switch Profile") },
@@ -271,16 +309,19 @@ fun ProfileAvatar(name: String, size: Int, modifier: Modifier = Modifier) {
 
 @OptIn(androidx.compose.foundation.ExperimentalFoundationApi::class)
 @Composable
-private fun ProfileRow(
+internal fun ProfileRow(
     profile: DispatcharrProfile,
     isActive: Boolean,
     onClick: () -> Unit,
     trailing: (@Composable () -> Unit)? = null,
-    onLongClick: (() -> Unit)? = null,
+    // Never null: a TV long press must never fall through to onClick (switch).
+    onLongClick: () -> Unit = {},
+    locked: Boolean = false,
+    modifier: Modifier = Modifier,
 ) {
     var focused by remember { mutableStateOf(false) }
     Row(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .onFocusChanged { focused = it.isFocused }
             .settingsRowCard(focused)
@@ -299,6 +340,13 @@ private fun ProfileRow(
             )
             val sub = buildList {
                 add(profile.username)
+                add(
+                    when (ProfileLevel.of(profile.userLevel)) {
+                        ProfileLevel.Admin -> "Dispatcharr admin"
+                        ProfileLevel.Standard -> "Standard"
+                        ProfileLevel.Limited -> "Limited"
+                    },
+                )
                 if (profile.streamLimit > 0) add("Streams: ${profile.streamLimit}")
             }.joinToString("  ")
             Text(
@@ -309,13 +357,36 @@ private fun ProfileRow(
                 overflow = TextOverflow.Ellipsis,
             )
         }
-        LevelBadge(ProfileLevel.of(profile.userLevel))
+        if (locked) {
+            Icon(
+                androidx.compose.material.icons.Icons.Filled.Lock,
+                contentDescription = "PIN",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(16.dp),
+            )
+            Spacer(Modifier.size(6.dp))
+        }
+        RoleBadge(profile)
         if (isActive) {
             Spacer(Modifier.size(8.dp))
             Icon(Icons.Filled.Check, contentDescription = "Active", tint = MaterialTheme.colorScheme.primary)
         }
         trailing?.invoke()
     }
+}
+
+@Composable
+private fun RoleBadge(profile: DispatcharrProfile) {
+    val role = profile.effectiveRole()
+    Text(
+        text = role.label,
+        style = MaterialTheme.typography.labelSmall,
+        color = MaterialTheme.colorScheme.onTertiaryContainer,
+        modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .background(MaterialTheme.colorScheme.tertiaryContainer)
+            .padding(horizontal = 8.dp, vertical = 2.dp),
+    )
 }
 
 @Composable
@@ -340,6 +411,10 @@ fun ProfilesSection(playlistId: String) {
     var isAdmin by remember { mutableStateOf(false) }
     LaunchedEffect(playlistId, activeId) { isAdmin = vm.isAdmin(playlistId) }
     val isTv = rememberIsTvDevice()
+    val role by vm.activeRole.collectAsStateWithLifecycle()
+    // Phase 2b: a Child has no Profiles section (Manage Profiles at the
+    // bottom of Settings is its only way out).
+    if (!com.aeriotv.android.core.profiles.RoleRules.canSeeSwitcher(role)) return
     // Nothing new for a single-profile non-admin; an Admin sees Add Profile.
     if (profiles.size < 2 && !isAdmin) return
 
@@ -354,11 +429,24 @@ fun ProfilesSection(playlistId: String) {
     var settingPin by remember { mutableStateOf<DispatcharrProfile?>(null) }
     var removingPin by remember { mutableStateOf<DispatcharrProfile?>(null) }
     var channelProfilesFor by remember { mutableStateOf<DispatcharrProfile?>(null) }
+    var roleFor by remember { mutableStateOf<DispatcharrProfile?>(null) }
+    var resettingPin by remember { mutableStateOf<DispatcharrProfile?>(null) }
+    var removeAdminPinFor by remember { mutableStateOf<DispatcharrProfile?>(null) }
     val scope = rememberCoroutineScope()
 
     fun doSwitch(p: DispatcharrProfile) {
         busy = true; status = null
+        com.aeriotv.android.core.profiles.ProfileSwitchFocus.arm(com.aeriotv.android.core.profiles.ProfileSwitchFocus.Target.Row(p.id))
         vm.switchTo(playlistId, p.id) { err -> busy = false; status = err }
+    }
+    // TV: when the scrim drops, focus returns to the row that started the switch.
+    val released by com.aeriotv.android.core.profiles.ProfileSwitchFocus.released.collectAsStateWithLifecycle()
+    val rowFocus = remember { mutableMapOf<String, androidx.compose.ui.focus.FocusRequester>() }
+    LaunchedEffect(released) {
+        val id = profiles.firstOrNull {
+            com.aeriotv.android.core.profiles.ProfileSwitchFocus.consume(com.aeriotv.android.core.profiles.ProfileSwitchFocus.Target.Row(it.id))
+        }?.id ?: return@LaunchedEffect
+        restoreFocus(rowFocus[id] ?: return@LaunchedEffect, "profile row")
     }
 
     Column {
@@ -367,6 +455,8 @@ fun ProfilesSection(playlistId: String) {
             profiles.forEach { p ->
                 ProfileRow(
                     profile = p,
+                    locked = vm.hasPin(p.id),
+                    modifier = Modifier.focusRequester(rowFocus.getOrPut(p.id) { androidx.compose.ui.focus.FocusRequester() }),
                     isActive = p.id == activeId,
                     onClick = {
                         if (busy) return@ProfileRow
@@ -444,6 +534,13 @@ fun ProfilesSection(playlistId: String) {
                     if (canPin) {
                         ChoiceRow(label = if (hasPin) "Change PIN" else "Set PIN", onClick = { actionsFor = null; settingPin = p })
                         if (hasPin) ChoiceRow(label = "Remove PIN", onClick = { actionsFor = null; removingPin = p })
+                        // An Admin resets another profile's forgotten PIN.
+                        if (hasPin && vm.isRoleAdmin(playlistId) && p.id != activeId) {
+                            ChoiceRow(label = "Reset PIN", onClick = { actionsFor = null; resettingPin = p })
+                        }
+                    }
+                    if (vm.isRoleAdmin(playlistId)) {
+                        ChoiceRow(label = "Role", onClick = { actionsFor = null; roleFor = p })
                     }
                     if (isAdmin) {
                         ChoiceRow(label = "Channel Profiles", onClick = { actionsFor = null; channelProfilesFor = p })
@@ -465,17 +562,39 @@ fun ProfilesSection(playlistId: String) {
     }
     settingPin?.let { p -> SetPinFlow(playlistId, p, vm) { err -> settingPin = null; status = err } }
     removingPin?.let { p -> RemovePinFlow(playlistId, p, vm) { err -> removingPin = null; status = err } }
+    roleFor?.let { p -> RoleFlow(playlistId, p, vm) { err -> roleFor = null; status = err } }
+    resettingPin?.let { p -> ResetPinFlow(playlistId, p, vm) { err -> resettingPin = null; status = err } }
     channelProfilesFor?.let { p -> ChannelProfilesDialog(playlistId, p, vm) { err -> channelProfilesFor = null; status = err } }
     renaming?.let { p ->
         var name by remember(p.id) { mutableStateOf(p.displayName) }
+        val saveFocus = remember { androidx.compose.ui.focus.FocusRequester() }
         AlertDialog(
             onDismissRequest = { renaming = null },
             title = { Text("Rename") },
-            text = { OutlinedTextField(value = name, onValueChange = { name = it }, singleLine = true) },
+            text = {
+                // TV: Down (or Done) leaves the field for the buttons.
+                OutlinedTextField(
+                    value = name, onValueChange = { name = it }, singleLine = true,
+                    keyboardOptions = KeyboardOptions(imeAction = androidx.compose.ui.text.input.ImeAction.Done),
+                    keyboardActions = androidx.compose.foundation.text.KeyboardActions(onDone = {
+                        runCatching { saveFocus.requestFocus() }
+                    }),
+                    modifier = Modifier.onPreviewKeyEvent { e ->
+                        val k = e.key
+                        if (e.type == androidx.compose.ui.input.key.KeyEventType.KeyDown &&
+                            k == androidx.compose.ui.input.key.Key.DirectionDown
+                        ) {
+                            runCatching { saveFocus.requestFocus() }.isSuccess
+                        } else false
+                    },
+                )
+            },
             confirmButton = {
-                SettingsDialogTextButton(label = "Save", enabled = name.isNotBlank(), onClick = {
-                    vm.rename(p.id, name); renaming = null
-                })
+                Box(Modifier.focusRequester(saveFocus)) {
+                    SettingsDialogTextButton(label = "Save", enabled = name.isNotBlank(), onClick = {
+                        vm.rename(p.id, name); renaming = null
+                    })
+                }
             },
             dismissButton = { SettingsDialogTextButton(label = "Cancel", onClick = { renaming = null }) },
         )
@@ -490,13 +609,167 @@ fun ProfilesSection(playlistId: String) {
             confirmButton = {
                 SettingsDialogTextButton(label = "Remove", destructive = true, onClick = {
                     removing = null
-                    scope.launch { status = vm.remove(p.id).exceptionOrNull()?.message }
+                    if (vm.roleOf(p.id) == com.aeriotv.android.core.profiles.ProfileRole.Child) {
+                        removeAdminPinFor = p
+                    } else {
+                        scope.launch { status = vm.remove(p.id).exceptionOrNull()?.message }
+                    }
                 })
             },
             dismissButton = { SettingsDialogTextButton(label = "Cancel", onClick = { removing = null }) },
         )
     }
+    removeAdminPinFor?.let { p ->
+        AdminPinDialog(playlistId, vm, title = "Enter an Admin PIN to remove ${p.displayName}", onDismiss = { removeAdminPinFor = null }) {
+            removeAdminPinFor = null
+            scope.launch { status = vm.remove(p.id).exceptionOrNull()?.message }
+        }
+    }
     if (adding) AddProfileDialog(playlistId, vm) { adding = false }
+}
+
+/**
+ * Request [fr] after the scrim dialog has gone and the main window has its
+ * focus back; retried because the window regains focus a few frames later.
+ */
+internal suspend fun restoreFocus(fr: androidx.compose.ui.focus.FocusRequester, what: String) {
+    kotlinx.coroutines.delay(150L)
+    repeat(20) { i ->
+        if (runCatching { fr.requestFocus() }.isSuccess) {
+            android.util.Log.i("AerioProfiles", "[PROFILE] focus restored to $what after switch (try ${i + 1})")
+            return
+        }
+        kotlinx.coroutines.delay(50L)
+    }
+}
+
+/** "Enter an Admin PIN": any Admin profile's PIN passes. */
+@Composable
+fun AdminPinDialog(playlistId: String, vm: ProfilesViewModel, title: String, onDismiss: () -> Unit, onOk: () -> Unit) {
+    PinEntryDialog(
+        title = title,
+        type = vm.adminPinType(playlistId) ?: com.aeriotv.android.core.profiles.PinType.Numbers,
+        onDismiss = onDismiss,
+        onEntered = { seq ->
+            val r = vm.verifyAnyAdminPin(playlistId, seq)
+            if (r == ProfileManager.PinCheck.Ok) { onOk(); null } else pinCheckMessage(r)
+        },
+        lockSeconds = { vm.adminPinLockSeconds(playlistId) },
+    )
+}
+
+/**
+ * Row menu "Role" (Admin only): Admin, User, Child. Setting Child with no
+ * Admin PIN asks the acting Admin to create one first (cancel = no change);
+ * leaving Child asks for an Admin PIN.
+ */
+@Composable
+private fun RoleFlow(playlistId: String, p: DispatcharrProfile, vm: ProfilesViewModel, onClose: (String?) -> Unit) {
+    var picked by remember(p.id) { mutableStateOf<com.aeriotv.android.core.profiles.ProfileRole?>(null) }
+    var needCreate by remember(p.id) { mutableStateOf(false) }
+    var needEntry by remember(p.id) { mutableStateOf(false) }
+    val current = vm.roleOf(p.id)
+    fun apply(to: com.aeriotv.android.core.profiles.ProfileRole) {
+        onClose(vm.setRole(playlistId, p.id, to).exceptionOrNull()?.message)
+    }
+    val to = picked
+    when {
+        to == null -> AlertDialog(
+            onDismissRequest = { onClose(null) },
+            title = { Text("Role") },
+            text = {
+                Column {
+                    Text(p.displayName, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Spacer(Modifier.size(8.dp))
+                    com.aeriotv.android.core.profiles.ProfileRole.entries.forEach { r ->
+                        ChoiceRow(label = r.label, checked = r == current, onClick = {
+                            when (val g = vm.roleChangeGate(playlistId, p.id, r)) {
+                                is com.aeriotv.android.core.profiles.RoleRules.RoleChange.Denied -> onClose(g.reason)
+                                com.aeriotv.android.core.profiles.RoleRules.RoleChange.Allowed -> apply(r)
+                                com.aeriotv.android.core.profiles.RoleRules.RoleChange.NeedsAdminPinCreated -> { picked = r; needCreate = true }
+                                com.aeriotv.android.core.profiles.RoleRules.RoleChange.NeedsAdminPinEntry -> { picked = r; needEntry = true }
+                            }
+                        })
+                    }
+                    Spacer(Modifier.size(6.dp))
+                    Text(
+                        "A Child profile sees only its own content and basic settings. Leaving it needs an Admin PIN.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            },
+            confirmButton = {},
+            dismissButton = { SettingsDialogTextButton(label = "Cancel", onClick = { onClose(null) }) },
+        )
+        needCreate -> {
+            val admin = vm.activeProfile(playlistId)
+            if (admin == null) { onClose("Profile not found"); return }
+            var explained by remember(p.id) { mutableStateOf(false) }
+            if (!explained) {
+                AlertDialog(
+                    onDismissRequest = { onClose(null) },
+                    title = { Text("Admin PIN Required") },
+                    text = { Text("A Child profile needs an Admin PIN to leave it. Set a PIN for ${admin.displayName} first.") },
+                    confirmButton = { SettingsDialogTextButton(label = "Set PIN", onClick = { explained = true }) },
+                    dismissButton = { SettingsDialogTextButton(label = "Cancel", onClick = { onClose(null) }) },
+                )
+            } else {
+                SetPinFlow(playlistId, admin, vm) { err ->
+                    // Cancelling the PIN cancels the role change.
+                    if (err != null || !vm.hasPin(admin.id)) onClose(err) else apply(to)
+                }
+            }
+        }
+        needEntry -> AdminPinDialog(playlistId, vm, title = "Enter an Admin PIN", onDismiss = { onClose(null) }) { apply(to) }
+    }
+}
+
+/** Admin "Reset PIN" for another profile: the Admin's own PIN, or a confirm when it has none. */
+@Composable
+private fun ResetPinFlow(playlistId: String, p: DispatcharrProfile, vm: ProfilesViewModel, onClose: (String?) -> Unit) {
+    val scope = rememberCoroutineScope()
+    vm.pinRemovalBlock(playlistId, p.id)?.let { reason ->
+        AlertDialog(
+            onDismissRequest = { onClose(null) },
+            title = { Text("Reset PIN") },
+            text = { Text(reason) },
+            confirmButton = { SettingsDialogTextButton(label = "OK", onClick = { onClose(null) }) },
+        )
+        return
+    }
+    when (val g = vm.resetGate(playlistId)) {
+        is com.aeriotv.android.core.profiles.RoleRules.ResetGate.Denied -> LaunchedEffect(p.id) { onClose(g.reason) }
+        com.aeriotv.android.core.profiles.RoleRules.ResetGate.ConfirmOnly -> AlertDialog(
+            onDismissRequest = { onClose(null) },
+            title = { Text("Reset PIN") },
+            text = { Text("Remove the PIN for ${p.displayName}? ${p.displayName} can set a new one.") },
+            confirmButton = {
+                SettingsDialogTextButton(label = "Reset", destructive = true, onClick = {
+                    scope.launch { onClose(vm.resetPin(playlistId, p.id, null).exceptionOrNull()?.message) }
+                })
+            },
+            dismissButton = { SettingsDialogTextButton(label = "Cancel", onClick = { onClose(null) }) },
+        )
+        com.aeriotv.android.core.profiles.RoleRules.ResetGate.EnterOwnPin -> {
+            val admin = vm.activeProfile(playlistId) ?: return
+            PinEntryDialog(
+                title = "Enter your PIN to reset the PIN for ${p.displayName}",
+                type = vm.pinType(admin.id) ?: com.aeriotv.android.core.profiles.PinType.Numbers,
+                onDismiss = { onClose(null) },
+                onEntered = { seq ->
+                    val r = vm.verifyPin(admin.id, seq)
+                    if (r != ProfileManager.PinCheck.Ok) {
+                        pinCheckMessage(r)
+                    } else {
+                        scope.launch { onClose(vm.resetPin(playlistId, p.id, seq).exceptionOrNull()?.message) }
+                        null
+                    }
+                },
+                lockSeconds = { vm.pinLockSeconds(admin.id) },
+            )
+        }
+    }
 }
 
 @Composable

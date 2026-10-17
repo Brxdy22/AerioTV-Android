@@ -137,6 +137,9 @@ fun PlayerSettingsScreen(
     val multiviewPickerShowDescriptions by viewModel.multiviewPickerShowDescriptions.collectAsStateWithLifecycle(initialValue = false)
 
     SettingsSubPageHost {
+    // Profiles phase 2b: a Child sees only the basics (info card, skip lengths).
+    val childRole = com.aeriotv.android.core.profiles.ProfileRoles.active.collectAsStateWithLifecycle().value ==
+        com.aeriotv.android.core.profiles.ProfileRole.Child
     Column(modifier = Modifier.fillMaxSize()) {
         SettingsDetailTopBar(title = "Player", onBack = onBack)
 
@@ -227,7 +230,7 @@ fun PlayerSettingsScreen(
                 // Radio Mode by Default (Discord request, Apple parity): every
                 // live channel pick opens Radio Mode; the long-press Watch
                 // still plays video. Default off.
-                SettingsSection(
+                if (!childRole) SettingsSection(
                     header = "Radio Mode",
                     footer = RADIO_MODE_BY_DEFAULT_FOOTER,
                 ) {
@@ -248,7 +251,7 @@ fun PlayerSettingsScreen(
                 // renders inline with no master row, as tvOS does
                 // (showsMasterRow: false). The depth estimate moved onto the
                 // Rewind Up To footer, where Apple prints it.
-                SettingsSection(
+                if (!childRole) SettingsSection(
                     header = "Live Rewind",
                     // Apple TV prints this directly under the toggle instead.
                     footer = if (isTv) null else LIVE_REWIND_FOOTER,
@@ -379,7 +382,7 @@ fun PlayerSettingsScreen(
                     if (isTv) {
                         SettingsSectionFooter("How far the skip buttons and a single left or right press move in live rewind, catch-up, recordings, movies, and TV shows. Holding left or right still scrubs faster the longer you hold.")
                     }
-                    SettingsPickerRow(
+                    if (!childRole) SettingsPickerRow(
                         title = "Buffer Size",
                         tvChoiceSheet = true,
                         inlineTitle = true,
@@ -392,7 +395,7 @@ fun PlayerSettingsScreen(
                         onSelect = viewModel::setStreamBufferSize,
                         footer = "Buffer Size controls how much stream data is pre-loaded. Larger buffers reduce stuttering on poor connections but add startup delay.",
                     )
-                    SettingsToggleRow(
+                    if (!childRole) SettingsToggleRow(
                         title = "Auto-Recover Frozen Streams",
                         subtitle = if (isTv) {
                             "If a live stream stops sending video, the player reloads it to recover. Turn this off if live channels restart or stutter during commercial breaks; a brief freeze may show instead."
@@ -405,7 +408,7 @@ fun PlayerSettingsScreen(
                     )
                 }
 
-                SettingsSection(
+                if (!childRole) SettingsSection(
                     header = "Audio",
                     footer = "Turn this on only if your audio gear supports surround formats. " +
                         "Leave it off for TV speakers, headphones or Bluetooth, or if a " +
@@ -421,7 +424,7 @@ fun PlayerSettingsScreen(
                 }
 
                 // MARK: Gestures
-                SettingsSection(
+                if (!childRole) SettingsSection(
                     header = "Gestures",
                     // tvOS / Android TV flip channels with D-pad up/down, not a
                     // swipe, so the "accidental swipes" caution is meaningless on
@@ -481,7 +484,7 @@ fun PlayerSettingsScreen(
                 // Apple has no section footer here: each picker carries its
                 // own copy (pushed page on touch, inline under the options on
                 // TV).
-                SettingsSection(header = "Multiview") {
+                if (!childRole) SettingsSection(header = "Multiview") {
                     SettingsPickerRow(
                         title = "Audio Focus Indicator",
                         tvChoiceSheet = true,
@@ -569,7 +572,7 @@ fun PlayerSettingsScreen(
                 //
                 // GH #38 + #40: each switch is a real HDMI mode change (brief
                 // black screen), deliberate and user-opted.
-                if (isTv) {
+                if (isTv && !childRole) {
                     SettingsSection(
                         header = "Display",
                         footer = "Startup Refresh Rate switches the display once at app launch so it is already on your main content rate before the first channel (changes apply on next launch). Match Frame Rate switches the refresh rate to the stream's frame rate and keeps the current resolution. Match Content Resolution outputs at the stream's resolution so your TV does the upscaling. The screen blinks briefly on each switch.",

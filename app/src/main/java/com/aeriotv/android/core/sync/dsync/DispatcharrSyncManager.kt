@@ -29,6 +29,7 @@ import com.aeriotv.android.core.preferences.HiddenTitlesStore
 import com.aeriotv.android.core.preferences.WatchlistStore
 import com.aeriotv.android.core.profiles.PinRules
 import com.aeriotv.android.core.profiles.ProfileManager
+import com.aeriotv.android.core.profiles.effectiveRole
 import com.aeriotv.android.core.profiles.ProfilePinStore
 import com.aeriotv.android.core.profiles.ProfileScope
 import com.aeriotv.android.core.profiles.ProfileStore
@@ -51,6 +52,7 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.isActive
@@ -117,6 +119,7 @@ class DispatcharrSyncManager @Inject constructor(
     // ---- session ----
 
     private data class Target(val playlistId: String, val profileToken: String)
+    private val HOLD = Target("\u0000hold", "")
 
     private inner class Session(val playlistId: String, val profileKey: String) {
         val mutex = Mutex()
@@ -164,7 +167,13 @@ class DispatcharrSyncManager @Inject constructor(
                 prefs.syncProvider,
                 playlistDao.observeActive().map { rows -> rows.firstOrNull()?.takeIf { it.isDispatcharrDirectConnect() }?.id },
                 ProfileScope.token,
-            ) { provider, pid, token -> if (provider == PROVIDER && pid != null) Target(pid, token) else null }
+                kotlinx.coroutines.flow.combine(profileManager.get().switching, profileManager.get().launchPicker) { sw, pk -> sw || pk != null },
+            ) { provider, pid, token, switching ->
+                // A profile switch (or the TV launch picker) is in flight: hold until its sign-in and
+                // permissions are in place (the scrim drops), then start.
+                if (switching) HOLD else if (provider == PROVIDER && pid != null) Target(pid, token) else null
+            }
+                .filter { it !== HOLD }
                 .distinctUntilChanged()
                 .collectLatest { t ->
                     session?.let { old -> old.pending.values.forEach { it.cancel() } }
@@ -173,18 +182,36 @@ class DispatcharrSyncManager @Inject constructor(
                         _ui.value = Ui()
                         return@collectLatest
                     }
-                    runSession(t)
+                    val prev = lastTarget
+                    lastTarget = t
+                    val why = if (prev != null && prev.playlistId == t.playlistId && prev.profileToken != t.profileToken) "profile" else "launch"
+                    runSession(t, why)
                 }
         }
     }
 
-    private suspend fun runSession(t: Target) {
+    @Volatile private var lastTarget: Target? = null
+
+    private suspend fun runSession(t: Target, trigger: String) {
         val profileKey = currentProfileId(t.playlistId) ?: t.profileToken.ifEmpty { "default" }
         val s = Session(t.playlistId, profileKey)
         session = s
         _ui.value = Ui(active = true, lastSyncAt = state.getLong(k("last", s), 0L))
-        Log.i(TAG, "[DSYNC] session start playlist=${t.playlistId.take(8)} profile=${profileKey.take(8)}")
-        pullAll(s, if (t.profileToken.isEmpty()) "launch" else "profile")
+        var who = profileStore.byId(profileKey)
+        if (who != null && who.userId <= 0) {
+            // Not read yet (a default profile never switched to): ask /me/ once.
+            conn(s)?.let { c ->
+                runCatching { client.fetchMe(c.base, c.apiKey) }.getOrNull()
+                    ?.takeIf { it.username.equals(who?.username, ignoreCase = true) }
+                    ?.let { me -> profileStore.update(profileKey) { it.copy(userId = me.id) }; who = profileStore.byId(profileKey) }
+            }
+        }
+        Log.i(
+            TAG,
+            "[DSYNC] session start playlist=${t.playlistId.take(8)} user=${who?.username ?: "?"} " +
+                "userId=${who?.userId?.takeIf { it > 0 } ?: "?"}",
+        )
+        pullAll(s, trigger)
         kotlinx.coroutines.coroutineScope {
             DsyncKey.entries.forEach { key ->
                 launch {
@@ -753,7 +780,11 @@ class DispatcharrSyncManager @Inject constructor(
                 pinStore.isLegacy(p.id) && prev != null -> Triple(prev.pinType, prev.pinHash, prev.pinSalt)
                 else -> Triple("none", "", "")
             }
-            ProfileRow(user.id, user.username, p.displayName, type, hash, salt, prev?.tail ?: Tail())
+            ProfileRow(
+                user.id, user.username, p.displayName, type, hash, salt,
+                role = p.effectiveRole().wire,
+                tail = prev?.tail ?: Tail(),
+            )
         }
         // Rows for users this device has no profile for stay (never removed by a device that lacks them).
         val mine = rows.map { it.userId }.toSet()
@@ -867,7 +898,10 @@ class DispatcharrSyncManager @Inject constructor(
             }
             DsyncKey.Settings -> {
                 val v = DsyncPayloads.decodeSettings(d) ?: return ApplyResult.Malformed
-                prefs.applyDsyncSettings(v)
+                // Only owned names are validated; foreign names round-trip untouched.
+                val r = DsyncSettingsValidator.filter(v.filterKeys { it in SETTINGS_OWNED })
+                r.ignored.forEach { Log.i(TAG, "[DSYNC] settings: ignored $it") }
+                prefs.applyDsyncSettings(r.accepted)
             }
             DsyncKey.RemoteMap -> {
                 val tv = DsyncPayloads.decodeRemoteMap(d) ?: return ApplyResult.Malformed

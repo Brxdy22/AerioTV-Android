@@ -471,7 +471,10 @@ fun PlaylistDetailScreen(
             // only once the playlist has 2+ profiles, or to an Admin who can
             // add one; a single-profile non-admin sees nothing new.
             if (playlist.isDispatcharrDirectConnect()) item {
-                ProfilesSection(playlistId = playlist.id)
+                androidx.compose.foundation.layout.Column {
+                    ProfilesSection(playlistId = playlist.id)
+                    AskAtLaunchRow(playlistId = playlist.id)
+                }
             }
             if (isTv) {
             item {

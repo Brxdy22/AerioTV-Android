@@ -186,6 +186,7 @@ class PlaylistRepository @Inject constructor(
     // but the database / context, so there is no cycle back to here.
     private val vodCatalogStore: com.aeriotv.android.core.data.vod.VodCatalogStore,
     private val vodSnapshotStore: com.aeriotv.android.core.preferences.VodLibrarySnapshotStore,
+    private val snapshotStamps: com.aeriotv.android.core.profiles.ChannelSnapshotStamps,
 ) {
 
     /** Last successful cast-profile re-resolve per playlist id, so the launch
@@ -3001,7 +3002,29 @@ class PlaylistRepository @Inject constructor(
             // background refresh worker).
             dao.updateChannelCount(playlistId, channels.size)
         }
+        stampSnapshot(playlistId)
     }
+
+    /**
+     * Profiles phase 2b: record the Dispatcharr user id and channel_profiles
+     * assignment this snapshot was fetched with, so a fast profile switch can
+     * tell a stale snapshot (other user, changed assignment) from a fresh one.
+     */
+    private suspend fun stampSnapshot(playlistId: String) {
+        runCatching {
+            val row = dao.byId(playlistId) ?: return
+            if (!row.isDispatcharrDirectConnect()) return
+            val uid = com.aeriotv.android.core.profiles.ProfileScope.activeUserIdLookup?.invoke(playlistId) ?: 0
+            snapshotStamps.put(
+                com.aeriotv.android.core.profiles.ProfileScope.cacheKey(playlistId),
+                com.aeriotv.android.core.profiles.SnapshotStamp(uid, row.dispatcharrAccountProfileIds),
+            )
+        }
+    }
+
+    /** The stamp of the CURRENT scope's snapshot for [playlistId], or null. */
+    fun snapshotStamp(playlistId: String): com.aeriotv.android.core.profiles.SnapshotStamp? =
+        snapshotStamps.get(com.aeriotv.android.core.profiles.ProfileScope.cacheKey(playlistId))
 
     /**
      * Fetch the Dispatcharr channel profiles available for [playlist] so the

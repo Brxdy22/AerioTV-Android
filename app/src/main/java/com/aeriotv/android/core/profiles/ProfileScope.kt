@@ -85,6 +85,10 @@ object ProfileScope {
     fun isNonDefaultProfileUser(playlistId: String, username: String?): Boolean =
         !username.isNullOrBlank() && profileUsernames[playlistId]?.contains(username) == true
 
+    /** Dispatcharr user id of the active profile on a playlist (set by
+     *  ProfileManager), for the channel snapshot stamp. 0 = unknown. */
+    @Volatile var activeUserIdLookup: ((String) -> Int)? = null
+
     /** Persists a diverted per-user write (set by ProfileManager). */
     @Volatile var onOverlayChanged: ((Overlay) -> Unit)? = null
 

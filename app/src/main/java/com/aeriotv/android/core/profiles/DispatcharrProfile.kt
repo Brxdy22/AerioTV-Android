@@ -51,6 +51,10 @@ data class DispatcharrProfile(
     val capabilitiesSchema: Int = 0,
     val capabilitiesStale: Boolean = false,
     val createdAt: Long = System.currentTimeMillis(),
+    /** App-local role (phase 2b); null = the default for [userLevel]. */
+    val role: ProfileRole? = null,
+    /** Dispatcharr user id from /me/ (0 = not read yet). */
+    val userId: Int = 0,
 )
 
 enum class ProfileLevel(val label: String) {
@@ -139,6 +143,10 @@ class ProfileStore @Inject constructor(
         }.commit()
     }
 
+    /** TV launch picker toggle ("Ask who is watching at launch"), per playlist. */
+    fun askAtLaunch(playlistId: String): Boolean = prefs.getBoolean(KEY_ASK + playlistId, true)
+    fun setAskAtLaunch(playlistId: String, on: Boolean) { prefs.edit().putBoolean(KEY_ASK + playlistId, on).commit() }
+
     /** Last active playlist id, so onCreate can restore the scope synchronously. */
     var lastActivePlaylistId: String?
         get() = prefs.getString(KEY_LAST_PLAYLIST, null)
@@ -149,6 +157,7 @@ class ProfileStore @Inject constructor(
         const val KEY_PROFILES = "profiles.v1"
         const val KEY_ACTIVE = "active."
         const val KEY_LAST_PLAYLIST = "last_active_playlist"
+        const val KEY_ASK = "ask_at_launch."
     }
 }
 

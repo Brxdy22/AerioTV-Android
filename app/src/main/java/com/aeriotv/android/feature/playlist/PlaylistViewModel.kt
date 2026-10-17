@@ -2467,6 +2467,16 @@ class PlaylistViewModel @Inject constructor(
             return false
         }
         val entity = repository.activePlaylist()?.takeIf { it.id == r.playlistId } ?: return false
+        // Phase 2b: the snapshot must have been fetched as THIS user with the
+        // channel_profiles assignment saved on the profile now (refreshed by
+        // the switch's /me/ read and by an Admin's Channel Profiles save).
+        val uid = com.aeriotv.android.core.profiles.ProfileScope.activeUserIdLookup?.invoke(r.playlistId) ?: 0
+        com.aeriotv.android.core.profiles.SnapshotStaleness.reason(
+            repository.snapshotStamp(r.playlistId), uid, entity.dispatcharrAccountProfileIds,
+        )?.let { why ->
+            Log.i(TAG, "[SWITCH] snapshot stale ($why); waiting for the fetch")
+            return false
+        }
         runCatching { miniPlayerSession.dismiss() }
         runCatching { exoWindowState.hide() }
         runCatching { exoHolder.stop() }

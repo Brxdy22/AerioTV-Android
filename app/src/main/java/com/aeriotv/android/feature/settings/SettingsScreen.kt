@@ -149,6 +149,8 @@ fun SettingsScreen(
     onEditPlaylist: (String) -> Unit = onOpenPlaylistDetail,
     onAddPlaylist: () -> Unit = {},
     onOpenLicenses: () -> Unit = {},
+    /** Phase 2b: the Child profile's Manage Profiles row (Admin PIN gate). */
+    onOpenManageProfiles: () -> Unit = {},
     viewModel: PlaylistViewModel = hiltViewModel(),
     // Phase B3: the two-pane hosts render the Playlists and About blocks as
     // detail panes. Rather than duplicate either block (and risk the copy
@@ -160,6 +162,8 @@ fun SettingsScreen(
     listState: LazyListState = rememberLazyListState(),
 ) {
     val fullRoot = content == SettingsRootContent.Full
+    val activeRole by com.aeriotv.android.core.profiles.ProfileRoles.active.collectAsStateWithLifecycle()
+    val isChild = activeRole == com.aeriotv.android.core.profiles.ProfileRole.Child
     val context = androidx.compose.ui.platform.LocalContext.current
     // Flavor-gated: the App Updates row only exists on the GitHub/sideload
     // channel (play flavor binds a disabled no-op manager).
@@ -259,7 +263,7 @@ fun SettingsScreen(
             verticalArrangement = Arrangement.spacedBy(com.aeriotv.android.ui.settings.SettingsCardMetrics.sectionSpacing),
         ) {
             // MARK: Playlists
-            if (content != SettingsRootContent.AboutOnly) item("playlists") {
+            if (content != SettingsRootContent.AboutOnly && !isChild) item("playlists") {
                 PlaylistsSection(
                     playlists = playlists,
                     activeId = activeId,
@@ -291,7 +295,7 @@ fun SettingsScreen(
             // hosts cannot drift from this list (plan B7: frozen canon).
             if (fullRoot) {
                 items(
-                    items = visibleSettingsSections(isTv = isTv, updaterEnabled = updaterEnabled),
+                    items = visibleSettingsSections(isTv = isTv, updaterEnabled = updaterEnabled, role = activeRole),
                     key = { it.key },
                 ) { group ->
                     SettingsSectionGroup(
@@ -308,6 +312,10 @@ fun SettingsScreen(
                         },
                         syncEnabled = syncEnabled,
                     )
+                }
+                // Phase 2b: a Child's only way out, at the bottom of Settings.
+                if (isChild) item("manage-profiles") {
+                    com.aeriotv.android.feature.settings.ManageProfilesRow(onClick = onOpenManageProfiles)
                 }
             }
 

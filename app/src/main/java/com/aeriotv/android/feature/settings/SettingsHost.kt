@@ -51,6 +51,8 @@ import androidx.compose.material3.VerticalDivider
 import androidx.compose.animation.Crossfade
 import androidx.compose.animation.core.tween
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.material.icons.outlined.ManageAccounts
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
@@ -246,6 +248,8 @@ private fun SettingsSidebar(
     syncEnabled: Boolean,
     modifier: Modifier = Modifier,
 ) {
+    val sidebarRole by com.aeriotv.android.core.profiles.ProfileRoles.active.collectAsState()
+    val sidebarChild = sidebarRole == com.aeriotv.android.core.profiles.ProfileRole.Child
     LazyColumn(
         modifier = modifier.fillMaxHeight(),
         // Status bar inset: on the unfolded Fold the "Settings" title sat under
@@ -272,8 +276,9 @@ private fun SettingsSidebar(
             )
         }
         // Canon order: Playlists first, then the section groups (About is the
-        // last row of the closing group).
-        item("playlists") {
+        // last row of the closing group). A Child has no Playlists row and
+        // gets Manage Profiles at the bottom instead (phase 2b).
+        if (!sidebarChild) item("playlists") {
             SettingsNavRow(
                 title = "Playlists",
                 subtitle = activePlaylistName,
@@ -301,6 +306,20 @@ private fun SettingsSidebar(
                     onClick = { onSelect(SettingsRoute.Section(section)) },
                     selected = selection is SettingsRoute.Section &&
                         selection.section == section,
+                    trailingChevron = false,
+                    flat = true,
+                )
+            }
+        }
+        if (sidebarChild) item("manage-profiles") {
+            Column {
+                Spacer(Modifier.height(10.dp))
+                SettingsNavRow(
+                    title = "Manage Profiles",
+                    subtitle = null,
+                    icon = androidx.compose.material.icons.Icons.Outlined.ManageAccounts,
+                    onClick = { onSelect(SettingsRoute.ManageProfiles) },
+                    selected = selection is SettingsRoute.ManageProfiles,
                     trailingChevron = false,
                     flat = true,
                 )
@@ -566,9 +585,12 @@ private fun SettingsTvRail(
     // Flatten to one list so the selected index (for initial scroll + focus) is
     // a simple lookup rather than a per-section calculation. About arrives from
     // the closing section group like any other row.
-    val rows = remember(sections, activePlaylistName, syncEnabled) {
+    val railRole by com.aeriotv.android.core.profiles.ProfileRoles.active.collectAsState()
+    val railChild = railRole == com.aeriotv.android.core.profiles.ProfileRole.Child
+    val rows = remember(sections, activePlaylistName, syncEnabled, railChild) {
         buildList {
-            add(Triple(SettingsRoute.Playlists as SettingsRoute, "Playlists", activePlaylistName))
+            // Phase 2b: a Child has no Playlists row; Manage Profiles closes the rail.
+            if (!railChild) add(Triple(SettingsRoute.Playlists as SettingsRoute, "Playlists", activePlaylistName))
             sections.forEach { group ->
                 group.sections.forEach { section ->
                     add(
@@ -580,6 +602,7 @@ private fun SettingsTvRail(
                     )
                 }
             }
+            if (railChild) add(Triple(SettingsRoute.ManageProfiles as SettingsRoute, "Manage Profiles", null))
         }
     }
     val selectedIndex = rows.indexOfFirst { it.first == selection }.coerceAtLeast(0)
@@ -687,6 +710,7 @@ private fun settingsRouteIcon(route: SettingsRoute) = when (route) {
     SettingsRoute.Section(SettingsSection.DvrSettings) -> Icons.Outlined.RadioButtonChecked
     is SettingsRoute.Section -> route.section.icon
     is SettingsRoute.About -> Icons.Outlined.Info
+    is SettingsRoute.ManageProfiles -> Icons.Outlined.ManageAccounts
     else -> Icons.AutoMirrored.Filled.List
 }
 
