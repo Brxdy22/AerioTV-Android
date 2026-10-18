@@ -235,6 +235,8 @@ data class ProfileRow(
     val pinSalt: String,
     /** "admin" | "user" | "child"; "" = absent (older writer), reader keeps its own. */
     val role: String = "",
+    /** Unix seconds of the last change to this row's name, PIN, or role; 0 = absent (older writer). */
+    val updatedAt: Long = 0L,
     val tail: Tail = Tail(),
 )
 
@@ -440,7 +442,8 @@ object DsyncPayloads {
             pinHash = r.getOrNull(4).asStr() ?: "",
             pinSalt = r.getOrNull(5).asStr() ?: "",
             role = r.getOrNull(6).asStr()?.takeIf { it in ROLES } ?: "",
-            tail = tailOf(r, 7),
+            updatedAt = r.getOrNull(7).asLong() ?: 0L,
+            tail = tailOf(r, 8),
         )
     }
     fun encodeProfiles(base: JsonObject?, rows: List<ProfileRow>): JsonObject =
@@ -454,6 +457,7 @@ object DsyncPayloads {
                     JsonPrimitive(if (none) "" else it.pinHash),
                     JsonPrimitive(if (none) "" else it.pinSalt),
                     JsonPrimitive(it.role.takeIf { r -> r in ROLES } ?: "user"),
+                    JsonPrimitive(it.updatedAt),
                 ),
             ).plusTail(it.tail)
         }))
@@ -490,6 +494,51 @@ object DsyncMerge {
         }
         return out.values.sortedByDescending { it.watchedAt }
     }
+}
+
+/** Pending-write and dirty-key rules (section 7), pure so the ordering is unit tested. */
+object DsyncGate {
+    /** Keys merged row by row with the server copy when this device has an unsent change. */
+    val ROW_MERGE_KEYS = setOf(DsyncKey.Favorites, DsyncKey.Recents, DsyncKey.Progress, DsyncKey.Collections, DsyncKey.Reminders)
+
+    /** Reminders union by identity (channelId, start); local row first. */
+    fun remindersUnion(local: List<ReminderRow>, remote: List<ReminderRow>): List<ReminderRow> =
+        (local + remote).distinctBy { it.channelId to it.start }
+
+    /**
+     * A write queued by a session may go out only under that session's own
+     * profile token, after that session's first pull, for a key it has read.
+     */
+    fun mayWrite(sessionToken: String, currentToken: String, firstPullDone: Boolean, keyRead: Boolean): Boolean =
+        sessionToken == currentToken && firstPullDone && keyRead
+
+    enum class DirtyPull { TakeRemote, Merge, KeepLocal }
+
+    /**
+     * A pulled value that is newer than the last one applied here, against
+     * this device's unsent change ([dirtyAt], Unix seconds): row keys merge,
+     * whole-value keys keep the newer side. Never a blind overwrite of a dirty key.
+     */
+    fun onNewerPull(key: DsyncKey, dirty: Boolean, dirtyAt: Long, remoteAt: Long): DirtyPull = when {
+        !dirty -> DirtyPull.TakeRemote
+        key in ROW_MERGE_KEYS -> DirtyPull.Merge
+        dirtyAt > remoteAt -> DirtyPull.KeepLocal
+        else -> DirtyPull.TakeRemote
+    }
+
+    /** Favorites union: local order first, then server ids this device lacks. */
+    fun favoritesUnion(local: List<Int>, remote: List<Int>): List<Int> = (local + remote).distinct()
+
+    /** Collections union by id; members of a shared collection are the union too. */
+    fun collectionsUnion(local: List<CollectionRow>, remote: List<CollectionRow>): List<CollectionRow> {
+        val r = remote.associateBy { it.id }
+        val merged = local.map { l -> r[l.id]?.let { l.copy(members = (l.members + it.members).distinct()) } ?: l }
+        val have = local.map { it.id }.toSet()
+        return merged + remote.filter { it.id !in have }
+    }
+
+    /** Profiles merge per row: a pulled row replaces local fields only when strictly newer. */
+    fun profileRowWins(localUpdatedAt: Long, remote: ProfileRow): Boolean = remote.updatedAt > localUpdatedAt
 }
 
 /**

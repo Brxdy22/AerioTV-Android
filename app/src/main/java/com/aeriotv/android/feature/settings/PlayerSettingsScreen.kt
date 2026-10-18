@@ -332,8 +332,9 @@ fun PlayerSettingsScreen(
                     footer = if (isTv) {
                         null
                     } else {
-                        "How far the skip buttons move in live rewind, catch-up, recordings, movies, and TV shows, including the cast remote and the Lock Screen controls.\n\n" +
-                            "If a live stream stops sending video, the player reloads it to recover. Turn Auto-Recover off if live channels restart or stutter during commercial breaks (a brief freeze may show instead). Applies to the next channel you tune."
+                        // A Child has no Auto-Recover row, so its footer leaves that sentence out.
+                        "How far the skip buttons move in live rewind, catch-up, recordings, movies, and TV shows, including the cast remote and the Lock Screen controls." +
+                            if (childRole) "" else "\n\nIf a live stream stops sending video, the player reloads it to recover. Turn Auto-Recover off if live channels restart or stutter during commercial breaks (a brief freeze may show instead). Applies to the next channel you tune."
                     },
                 ) {
                     if (isTv) {

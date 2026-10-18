@@ -99,7 +99,7 @@ class ProfileStore @Inject constructor(
         val encrypted = list.map {
             it.copy(password = cipher.encrypt(it.password), apiKey = cipher.encrypt(it.apiKey))
         }
-        prefs.edit().putString(KEY_PROFILES, json.encodeToString(encrypted)).commit()
+        prefs.edit().putString(KEY_PROFILES, json.encodeToString(encrypted)).apply()
         _profiles.value = list
     }
 

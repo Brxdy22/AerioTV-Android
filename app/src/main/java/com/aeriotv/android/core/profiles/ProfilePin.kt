@@ -134,7 +134,7 @@ class ProfilePinStore @Inject constructor(
             if (hex.length == SALT_BYTES * 2) return hex.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
         }
         val fresh = ByteArray(SALT_BYTES).also { SecureRandom().nextBytes(it) }
-        prefs.edit().putString(KEY_SALT, cipher.encrypt(fresh.joinToString("") { "%02x".format(it) })).commit()
+        prefs.edit().putString(KEY_SALT, cipher.encrypt(fresh.joinToString("") { "%02x".format(it) })).apply()
         return fresh
     }
 
@@ -149,7 +149,7 @@ class ProfilePinStore @Inject constructor(
     }
 
     private fun write(profileId: String, type: PinType, hash: String, salt: String) {
-        prefs.edit().putString(KEY_PIN + profileId, cipher.encrypt("${type.name}:$hash:$salt")).commit()
+        prefs.edit().putString(KEY_PIN + profileId, cipher.encrypt("${type.name}:$hash:$salt")).apply()
     }
 
     private fun freshSalt(): String =
@@ -177,14 +177,14 @@ class ProfilePinStore @Inject constructor(
         val n = PinRules.normalize(type, entries) ?: return false
         val salt = freshSalt()
         write(profileId, type, PinRules.hashV2(salt, n), salt)
-        prefs.edit().remove(KEY_BACKOFF + profileId).commit()
+        prefs.edit().remove(KEY_BACKOFF + profileId).apply()
         _changes.value++
         return true
     }
 
     fun remove(profileId: String) {
         if (record(profileId) == null && prefs.getString(KEY_BACKOFF + profileId, null) == null) return
-        prefs.edit().remove(KEY_PIN + profileId).remove(KEY_BACKOFF + profileId).commit()
+        prefs.edit().remove(KEY_PIN + profileId).remove(KEY_BACKOFF + profileId).apply()
         _changes.value++
     }
 
@@ -204,7 +204,7 @@ class ProfilePinStore @Inject constructor(
 
     fun backoff(profileId: String): PinBackoff = PinBackoff.decode(prefs.getString(KEY_BACKOFF + profileId, null))
     fun saveBackoff(profileId: String, b: PinBackoff) {
-        prefs.edit().putString(KEY_BACKOFF + profileId, b.encode()).commit()
+        prefs.edit().putString(KEY_BACKOFF + profileId, b.encode()).apply()
     }
 
     private companion object {

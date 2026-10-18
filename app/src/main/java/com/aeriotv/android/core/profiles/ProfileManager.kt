@@ -332,6 +332,7 @@ class ProfileManager @Inject constructor(
         }
         val from = target.effectiveRole()
         store.update(profileId) { it.copy(role = to) }
+        mutated(profileId, "role")
         refreshActiveRole(playlistId)
         Log.i(TAG, "[PROFILE] role ${from.label} -> ${to.label} for ${target.username}")
     }
@@ -415,6 +416,7 @@ class ProfileManager @Inject constructor(
             RoleRules.ResetGate.ConfirmOnly -> Unit
         }
         pinStore.remove(profileId)
+        mutated(profileId, "pin reset")
         Log.i(TAG, "[PROFILE] pin removed for ${store.byId(profileId)?.username}")
     }
 
@@ -432,6 +434,7 @@ class ProfileManager @Inject constructor(
             switchTickets.remove(profileId)
         }
         check(pinStore.set(profileId, type, entries)) { "Enter 4 to 6" }
+        mutated(profileId, "pin set")
         Log.i(TAG, "[PROFILE] pin ${if (had) "changed" else "set"} for ${store.byId(profileId)?.username}")
     }
 
@@ -443,6 +446,7 @@ class ProfileManager @Inject constructor(
             switchTickets.remove(profileId)
         }
         pinStore.remove(profileId)
+        mutated(profileId, "pin removed")
         Log.i(TAG, "[PROFILE] pin removed for ${store.byId(profileId)?.username}")
     }
 
@@ -615,6 +619,7 @@ class ProfileManager @Inject constructor(
         ).applyMe(me, key)
         store.upsert(profile)
         appPreferences.seedProfileSettings(id)
+        if (!syncAdding) mutated(id, "add")
         Log.i(TAG, "[PROFILE] added ${profile.username} on ${playlistId.take(8)} level=${ProfileLevel.of(profile.userLevel).label}")
         profile
     }
@@ -622,24 +627,44 @@ class ProfileManager @Inject constructor(
     // ---- Dispatcharr Sync `profiles` key (admin only, schema 4.12 and 5) ----
 
     /** Local profile id of [username] on [playlistId], or null. */
+    /**
+     * Dispatcharr Sync hook: every profile list mutation (add, remove, rename,
+     * role, PIN) reports here so the `profiles` key is stamped and re-sent.
+     * Set by DispatcharrSyncManager.
+     */
+    @Volatile var onProfilesMutated: ((playlistId: String, username: String, what: String) -> Unit)? = null
+
+    private fun mutated(profileId: String, what: String) {
+        val p = store.byId(profileId) ?: return
+        runCatching { onProfilesMutated?.invoke(p.playlistId, p.username, what) }
+    }
+
     fun profileIdFor(playlistId: String, username: String): String? =
         store.forPlaylist(playlistId).firstOrNull { it.username.equals(username, ignoreCase = true) }?.id
 
+    @Volatile private var syncAdding = false
+
     /**
-     * Merge a pulled `profiles` list on a device signed in as the admin: a
-     * missing profile is added with the api_key from the admin user list (no
-     * typing), display names and PINs follow the list. Local profiles are
-     * never removed. Returns how many profiles were added.
+     * Merge a pulled `profiles` list on a device signed in as the admin, PER
+     * ROW (schema 4.12): a missing profile is added with the api_key from the
+     * admin user list (no typing) and adopts the row; an existing profile
+     * takes the row's display name, role, and PIN only when the row's
+     * updatedAt is newer than [localUpdatedAt] for that username. Local
+     * profiles are never removed. [adopted] records the row stamp taken.
+     * Returns how many profiles were added.
      */
     suspend fun mergeSyncedProfiles(
         playlistId: String,
         rows: List<com.aeriotv.android.core.sync.dsync.ProfileRow>,
         users: List<DispatcharrUserSummary>,
+        localUpdatedAt: (String) -> Long = { 0L },
+        adopted: (String, Long) -> Unit = { _, _ -> },
     ): Int {
         if (!activeIsAdmin(playlistId)) return 0
         var added = 0
         rows.forEach { r ->
             var local = store.forPlaylist(playlistId).firstOrNull { it.username.equals(r.username, ignoreCase = true) }
+            val isNew = local == null
             if (local == null) {
                 val user = users.firstOrNull { it.id == r.userId }
                     ?: users.firstOrNull { it.username.equals(r.username, ignoreCase = true) }
@@ -647,16 +672,27 @@ class ProfileManager @Inject constructor(
                     Log.i(TAG, "[DSYNC] profiles: ${r.username} has no listed api key; not added")
                     return@forEach
                 }
-                local = addProfile(playlistId, user, null, null)
-                    .onFailure { Log.w(TAG, "[DSYNC] profiles: add ${r.username} failed: ${it.message}") }
-                    .getOrNull() ?: return@forEach
+                syncAdding = true
+                local = try {
+                    addProfile(playlistId, user, null, null)
+                        .onFailure { Log.w(TAG, "[DSYNC] profiles: add ${r.username} failed: ${it.message}") }
+                        .getOrNull()
+                } finally {
+                    syncAdding = false
+                }
+                if (local == null) return@forEach
                 added++
             }
             val id = local.id
+            if (local.userId == 0 && r.userId > 0) store.update(id) { it.copy(userId = r.userId) }
+            val mine = localUpdatedAt(local.username)
+            if (!isNew && !com.aeriotv.android.core.sync.dsync.DsyncGate.profileRowWins(mine, r)) {
+                Log.i(TAG, "[DSYNC] profiles: keep local row for ${local.username} (local $mine >= server ${r.updatedAt})")
+                return@forEach
+            }
             if (r.displayName.isNotBlank() && r.displayName != local.displayName) {
                 store.update(id) { it.copy(displayName = r.displayName) }
             }
-            if (local.userId == 0 && r.userId > 0) store.update(id) { it.copy(userId = r.userId) }
             ProfileRole.fromWire(r.role)?.let { role ->
                 if (role != local.effectiveRole() || local.role == null) {
                     store.update(id) { it.copy(role = role) }
@@ -666,10 +702,14 @@ class ProfileManager @Inject constructor(
             val type = PinRules.typeFromWire(r.pinType)
             if (type == null) {
                 // A v1 PIN set on this device before sync stays until re-entered.
-                if (pinStore.hasPin(id) && !pinStore.isLegacy(id)) pinStore.remove(id)
+                if (pinStore.hasPin(id) && !pinStore.isLegacy(id)) {
+                    pinStore.remove(id)
+                    Log.i(TAG, "[DSYNC] profiles: pin removed for ${local.username} (server row newer)")
+                }
             } else if (r.pinHash.length == 64 && r.pinSalt.length == 32) {
                 pinStore.importSynced(id, type, r.pinHash, r.pinSalt)
             }
+            adopted(local.username, r.updatedAt)
         }
         if (added > 0) Log.i(TAG, "[DSYNC] profiles: added $added from the synced list")
         refreshActiveRole()
@@ -680,6 +720,7 @@ class ProfileManager @Inject constructor(
         val clean = name.trim()
         if (clean.isEmpty()) return
         store.update(profileId) { it.copy(displayName = clean) }
+        mutated(profileId, "rename")
     }
 
     /** Remove a profile and its local state on this device. Never touches the
@@ -724,6 +765,7 @@ class ProfileManager @Inject constructor(
         runCatching { pinStore.remove(profileId) }
         runCatching { snapshotStamps.remove("${p.playlistId}@$profileId") }
         runCatching { vodCatalogStore.deleteForPlaylistUser(p.playlistId, p.username) }
+        runCatching { onProfilesMutated?.invoke(p.playlistId, p.username, "remove") }
         store.remove(profileId)
         Log.i(TAG, "[PROFILE] removed ${p.username} on ${p.playlistId.take(8)}; local state deleted")
     }

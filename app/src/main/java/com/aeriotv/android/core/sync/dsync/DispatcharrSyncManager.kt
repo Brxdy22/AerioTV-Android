@@ -121,8 +121,21 @@ class DispatcharrSyncManager @Inject constructor(
     private data class Target(val playlistId: String, val profileToken: String)
     private val HOLD = Target("\u0000hold", "")
 
-    private inner class Session(val playlistId: String, val profileKey: String) {
+    /**
+     * One sync session, bound to ONE Dispatcharr user: the profile token and
+     * the API key captured at its start. Nothing it queued may ever go out
+     * under another profile (2026-10-18 cross-profile write on switch).
+     */
+    private inner class Session(val playlistId: String, val profileKey: String, val token: String) {
         val mutex = Mutex()
+        @Volatile var bound: Conn? = null
+        /** No key is written before this session's first complete pull. */
+        @Volatile var firstPullDone = false
+        /** The last list call answered (false while offline). */
+        @Volatile var listOk = false
+        /** Keys whose last send failed, or that were unsent when the session began. */
+        val resend = java.util.Collections.synchronizedSet(HashSet<DsyncKey>())
+        @Volatile var reconnectJob: Job? = null
         val read = HashSet<DsyncKey>()
         val blocked = HashSet<DsyncKey>()
         val tooLarge = HashSet<DsyncKey>()
@@ -162,6 +175,8 @@ class DispatcharrSyncManager @Inject constructor(
                 }
             })
         }
+        profileManager.get().onProfilesMutated = { pid, user, what -> onProfilesMutated(pid, user, what) }
+        registerNetworkCallback()
         scope.launch {
             combine(
                 prefs.syncProvider,
@@ -173,11 +188,18 @@ class DispatcharrSyncManager @Inject constructor(
                 // permissions are in place (the scrim drops), then start.
                 if (switching) HOLD else if (provider == PROVIDER && pid != null) Target(pid, token) else null
             }
-                .filter { it !== HOLD }
                 .distinctUntilChanged()
                 .collectLatest { t ->
-                    session?.let { old -> old.pending.values.forEach { it.cancel() } }
+                    session?.let { old ->
+                        // Send what the old session queued while its profile is
+                        // still the active one; the gate drops anything once
+                        // the token moved (the dirty flag keeps it for later).
+                        Log.i(TAG, "[DSYNC] session end user=${old.profileKey.take(8)} (${if (t === HOLD) "switch" else "change"})")
+                        runCatching { flush(old) }
+                        synchronized(old.pending) { old.pending.values.forEach { it.cancel() }; old.pending.clear() }
+                    }
                     session = null
+                    if (t === HOLD) return@collectLatest
                     if (t == null) {
                         _ui.value = Ui()
                         return@collectLatest
@@ -192,10 +214,62 @@ class DispatcharrSyncManager @Inject constructor(
 
     @Volatile private var lastTarget: Target? = null
 
+    private fun registerNetworkCallback() {
+        val cm = context.getSystemService(android.net.ConnectivityManager::class.java) ?: return
+        runCatching {
+            cm.registerDefaultNetworkCallback(object : android.net.ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: android.net.Network) {
+                    val s = session ?: return
+                    reconnect(s)
+                }
+            })
+        }
+    }
+
+    /**
+     * The network came back: the interface is often up before routes and DNS
+     * are, so retry the pull at 2 s, 5 s, 15 s, then every 60 s until the list
+     * call answers (or the session ends).
+     */
+    private fun reconnect(s: Session) {
+        s.reconnectJob?.cancel()
+        s.reconnectJob = scope.launch {
+            var i = 0
+            while (isActive && session === s) {
+                delay(RECONNECT_MS[minOf(i, RECONNECT_MS.size - 1)])
+                pullAll(s, "reconnect")
+                if (s.listOk) return@launch
+                i++
+                Log.i(TAG, "[DSYNC] reconnect pull failed; retry ${i + 1}")
+            }
+        }
+    }
+
+    /** ProfileManager mutation hook: stamp the row and re-send `profiles` from an admin session. */
+    private fun onProfilesMutated(playlistId: String, username: String, what: String) {
+        // Called from UI actions on the main thread: all disk work happens on IO.
+        val now = System.currentTimeMillis() / 1000
+        scope.launch {
+            val e = state.edit().putLong(rowKey(playlistId, username), now)
+            if (what == "remove") e.putLong(removedKey(playlistId, username), now) else e.remove(removedKey(playlistId, username))
+            e.apply()
+            val s = session?.takeIf { it.playlistId == playlistId }
+            Log.i(TAG, "[DSYNC] profiles dirty ($what ${username})${if (s == null) "; no session" else ""}")
+            if (s == null) return@launch
+            if (!isAdmin(s)) return@launch
+            setDirty(s, DsyncKey.Profiles, true)
+            schedule(s, DsyncKey.Profiles, DEBOUNCE_MS)
+        }
+    }
+
+    private fun rowKey(playlistId: String, username: String) = "prow|$playlistId|${username.lowercase()}"
+    private fun removedKey(playlistId: String, username: String) = "pgone|$playlistId|${username.lowercase()}"
+
     private suspend fun runSession(t: Target, trigger: String) {
         val profileKey = currentProfileId(t.playlistId) ?: t.profileToken.ifEmpty { "default" }
-        val s = Session(t.playlistId, profileKey)
+        val s = Session(t.playlistId, profileKey, t.profileToken)
         session = s
+        s.bound = conn(s)
         _ui.value = Ui(active = true, lastSyncAt = state.getLong(k("last", s), 0L))
         var who = profileStore.byId(profileKey)
         if (who != null && who.userId <= 0) {
@@ -260,7 +334,15 @@ class DispatcharrSyncManager @Inject constructor(
 
     private data class Conn(val base: String, val apiKey: String, val row: PlaylistEntity)
 
+    /** The session's own credential, captured while its profile was active. */
     private suspend fun conn(s: Session): Conn? {
+        s.bound?.let { return it }
+        if (ProfileScope.token.value != s.token) return null
+        return freshConn(s)?.also { s.bound = it }
+    }
+
+    private suspend fun freshConn(s: Session): Conn? {
+        if (ProfileScope.token.value != s.token) return null
         val row = playlistDao.byId(s.playlistId) ?: return null
         val key = row.apiKey?.takeIf { it.isNotBlank() } ?: return null
         return Conn(repository.get().effectiveBaseUrl(row), key, row)
@@ -285,9 +367,14 @@ class DispatcharrSyncManager @Inject constructor(
             .apply()
     }
 
+    /** Persistent (survives process death). [dirtyAt] = the last local change, Unix seconds. */
     private fun setDirty(s: Session, key: DsyncKey, dirty: Boolean) {
-        state.edit().putBoolean(k("dirty", s, key), dirty).apply()
+        val e = state.edit().putBoolean(k("dirty", s, key), dirty)
+        if (dirty) e.putLong(k("dirtyAt", s, key), System.currentTimeMillis() / 1000)
+        e.commit()
     }
+
+    private fun dirtyAt(s: Session, key: DsyncKey) = state.getLong(k("dirtyAt", s, key), 0L)
 
     private fun isDirty(s: Session, key: DsyncKey) = state.getBoolean(k("dirty", s, key), false)
 
@@ -312,6 +399,7 @@ class DispatcharrSyncManager @Inject constructor(
     private suspend fun pullAll(s: Session, reason: String) = s.mutex.withLock {
         if (session !== s) return@withLock
         val c = conn(s) ?: return@withLock
+        s.listOk = false
         _ui.value = _ui.value.copy(running = true)
         try {
             val list = runCatching { client.appDataList(c.base, c.apiKey) }.getOrNull()
@@ -330,6 +418,7 @@ class DispatcharrSyncManager @Inject constructor(
                 return@withLock
             }
             s.paused = false
+            s.listOk = true
             s.serverBytes.clear()
             runCatching {
                 val root = json.parseToJsonElement(list.body.orEmpty()) as? JsonObject
@@ -345,12 +434,15 @@ class DispatcharrSyncManager @Inject constructor(
                 pullKey(s, c, key)
             }
             s.lastPullAt = System.currentTimeMillis()
+            s.firstPullDone = true
             stampLast(s)
             Log.i(TAG, "[DSYNC] pull done ($reason) read=${s.read.size} server=${s.serverBytes.size}")
             // A key absent on the server, or changed here before this session
             // could write it, goes up now.
             for (key in s.read) {
-                if (isDirty(s, key) || key.wire !in s.serverBytes) schedule(s, key, 0L)
+                val dirty = isDirty(s, key)
+                if (dirty && (reason == "reconnect" || reason == "launch" || reason == "profile")) s.resend += key
+                if (dirty || key.wire !in s.serverBytes) schedule(s, key, 0L)
             }
         } finally {
             _ui.value = _ui.value.copy(running = false)
@@ -394,7 +486,38 @@ class DispatcharrSyncManager @Inject constructor(
                 val localAt = state.getLong(k("at", s, key), 0L)
                 val localDev = state.getString(k("dev", s, key), "").orEmpty()
                 val wins = DsyncEnvelopeCodec.remoteWins(localAt, localDev, env.updatedAt, env.deviceId)
+                // profiles merges per row on every pull; the rows carry their own updatedAt.
+                val decision = if (key == DsyncKey.Profiles) DsyncGate.DirtyPull.Merge
+                else DsyncGate.onNewerPull(key, isDirty(s, key), dirtyAt(s, key), env.updatedAt)
+                if (key == DsyncKey.Profiles || (wins && decision == DsyncGate.DirtyPull.Merge)) {
+                    val merged = runCatching { mergedEnvelope(s, key, env) }
+                        .onFailure { Log.w(TAG, "[DSYNC] merge ${key.suffix} failed: ${it.javaClass.simpleName}") }
+                        .getOrNull() ?: return
+                    val applied = runCatching { apply(s, key, merged) }.getOrDefault(ApplyResult.Failed)
+                    if (applied != ApplyResult.Applied) {
+                        if (applied == ApplyResult.Malformed) Log.w(TAG, "[DSYNC] malformed ${key.wire}")
+                        return
+                    }
+                    s.suppressUntil[key] = System.currentTimeMillis() + SUPPRESS_MS
+                    saveAfter(s, key, raw, env.updatedAt, env.deviceId, env.data)
+                    if (key != DsyncKey.Profiles) {
+                        setDirty(s, key, true)
+                        Log.i(TAG, "[DSYNC] pull ${key.suffix} bytes=$bytes merged with local change")
+                    } else {
+                        Log.i(TAG, "[DSYNC] pull ${key.suffix} bytes=$bytes merged per row")
+                    }
+                    // The merged result (or a newer local row) goes back up.
+                    s.read += key
+                    return
+                }
+                if (wins && decision == DsyncGate.DirtyPull.KeepLocal) {
+                    state.edit().putString(k("raw", s, key), raw.toString()).apply()
+                    Log.i(TAG, "[DSYNC] pull ${key.suffix} bytes=$bytes kept local (local change newer)")
+                    s.read += key
+                    return
+                }
                 if (wins) {
+                    if (isDirty(s, key)) setDirty(s, key, false)
                     val applied = runCatching { apply(s, key, env) }
                         .onFailure { Log.w(TAG, "[DSYNC] apply ${key.suffix} failed: ${it.javaClass.simpleName}") }
                         .getOrDefault(ApplyResult.Failed)
@@ -426,6 +549,8 @@ class DispatcharrSyncManager @Inject constructor(
 
     private fun onLocalChange(s: Session, key: DsyncKey) {
         if (session !== s) return
+        // Flows re-key on a profile switch: that emission is the NEW profile's data.
+        if (ProfileScope.token.value != s.token) return
         if ((s.suppressUntil[key] ?: 0L) > System.currentTimeMillis()) return
         s.tooLarge -= key
         setDirty(s, key, true)
@@ -458,16 +583,34 @@ class DispatcharrSyncManager @Inject constructor(
 
     private suspend fun writeLocked(s: Session, key: DsyncKey, retry413: Boolean) {
         if (session !== s || s.paused) return
-        if (key !in s.read) return // section 7.2: dirty stays set until a read.
+        if (!DsyncGate.mayWrite(s.token, ProfileScope.token.value, s.firstPullDone, key in s.read)) {
+            // Section 7.2 and the switch rule: the dirty flag stays set for this profile's next session.
+            if (ProfileScope.token.value != s.token) Log.i(TAG, "[DSYNC] drop ${key.suffix}: profile changed before send")
+            return
+        }
         if (key in s.blocked || !enabled(key, s)) return
         val c = conn(s) ?: return
+        if (key in DsyncGate.ROW_MERGE_KEYS) {
+            // Every PUT of a row key reads the server copy first and merges rows,
+            // so a resend after an offline spell can never erase another device's rows.
+            if (key in s.resend) Log.i(TAG, "[DSYNC] retry ${key.suffix} after offline")
+            if (!refreshBeforePut(s, c, key)) {
+                s.resend += key
+                val n = (s.retries[key] ?: 0)
+                if (n < BACKOFF_MS.size) {
+                    s.retries[key] = n + 1
+                    schedule(s, key, BACKOFF_MS[n])
+                }
+                return
+            }
+        }
         val raw = rawOf(s, key)
         val base = raw?.get("data") as? JsonObject
         val now = System.currentTimeMillis() / 1000
         val data = runCatching { build(s, key, base, now) }
             .onFailure { Log.w(TAG, "[DSYNC] build ${key.suffix} failed: ${it.javaClass.simpleName}") }
             .getOrNull() ?: return
-        if (session !== s) return
+        if (session !== s || ProfileScope.token.value != s.token) return
         if (data.toString() == lastDataOf(s, key)) {
             setDirty(s, key, false)
             return
@@ -510,6 +653,7 @@ class DispatcharrSyncManager @Inject constructor(
         val env = wrap(key, fitted!!)
         when (val st = put(s, c, key, env, fitted)) {
             PutStatus.Ok -> {
+                s.resend -= key
                 setDirty(s, key, false)
                 s.retries.remove(key)
                 s.tooLarge -= key
@@ -525,6 +669,7 @@ class DispatcharrSyncManager @Inject constructor(
             PutStatus.Full -> s.serverFull = true
             PutStatus.Auth -> s.paused = true
             PutStatus.Retry -> {
+                s.resend += key
                 val n = (s.retries[key] ?: 0)
                 if (n < BACKOFF_MS.size) {
                     s.retries[key] = n + 1
@@ -539,6 +684,34 @@ class DispatcharrSyncManager @Inject constructor(
 
     private enum class PutStatus { Ok, TooLarge, Full, Auth, Retry, Rejected }
 
+    /**
+     * GET [key]; when the server copy changed since this device last read or
+     * wrote it, merge its rows into local state first. False = the server
+     * could not be reached (keep the change, retry later).
+     */
+    private suspend fun refreshBeforePut(s: Session, c: Conn, key: DsyncKey): Boolean {
+        val r = runCatching { client.appDataGet(c.base, c.apiKey, key.wire) }.getOrNull()
+        if (r == null || r.status >= 500) {
+            Log.w(TAG, "[DSYNC] pre-put get ${key.suffix} status=${r?.status ?: "network"}")
+            return false
+        }
+        if (r.status == 404) return true
+        if (!r.ok) return r.status != 401 && r.status != 403
+        val raw = runCatching { json.parseToJsonElement(r.body.orEmpty()) as? JsonObject }.getOrNull() ?: return true
+        val env = (DsyncEnvelopeCodec.decode(raw, key.schemaVersion) as? DsyncDecode.Ok)?.envelope ?: return true
+        val at = state.getLong(k("at", s, key), 0L)
+        val dev = state.getString(k("dev", s, key), "").orEmpty()
+        if (env.updatedAt == at && env.deviceId == dev && (rawOf(s, key)?.get("data") as? JsonObject) == env.data) return true
+        if (ProfileScope.token.value != s.token) return false
+        val merged = runCatching { mergedEnvelope(s, key, env) }.getOrNull() ?: return false
+        val applied = runCatching { apply(s, key, merged) }.getOrDefault(ApplyResult.Failed)
+        if (applied != ApplyResult.Applied) return applied == ApplyResult.Malformed
+        s.suppressUntil[key] = System.currentTimeMillis() + SUPPRESS_MS
+        saveAfter(s, key, raw, env.updatedAt, env.deviceId, env.data)
+        Log.i(TAG, "[DSYNC] pull ${key.suffix} bytes=${r.body?.length ?: 0} merged with local change (before put)")
+        return true
+    }
+
     private suspend fun put(s: Session, c: Conn, key: DsyncKey, env: JsonObject, data: JsonObject): PutStatus? {
         val body = env.toString()
         val bytes = body.toByteArray(Charsets.UTF_8).size
@@ -546,7 +719,7 @@ class DispatcharrSyncManager @Inject constructor(
         if (r != null && (r.status == 401 || r.status == 403)) {
             // Section 7.7: take the current credential (a re-login stores a new
             // key on the profile) and try once more before pausing.
-            val again = conn(s)
+            val again = freshConn(s)?.also { s.bound = it }
             if (again != null && again.apiKey != c.apiKey) {
                 r = runCatching { client.appDataPut(again.base, again.apiKey, key.wire, body) }.getOrNull()
             }
@@ -780,20 +953,75 @@ class DispatcharrSyncManager @Inject constructor(
                 pinStore.isLegacy(p.id) && prev != null -> Triple(prev.pinType, prev.pinHash, prev.pinSalt)
                 else -> Triple("none", "", "")
             }
+            var at = state.getLong(rowKey(s.playlistId, p.username), 0L)
+            if (at <= 0L) {
+                at = prev?.updatedAt?.takeIf { it > 0 } ?: (System.currentTimeMillis() / 1000)
+                state.edit().putLong(rowKey(s.playlistId, p.username), at).apply()
+            }
             ProfileRow(
                 user.id, user.username, p.displayName, type, hash, salt,
                 role = p.effectiveRole().wire,
+                updatedAt = at,
                 tail = prev?.tail ?: Tail(),
             )
         }
-        // Rows for users this device has no profile for stay (never removed by a device that lacks them).
+        // Rows for users this device has no profile for stay, unless this
+        // device removed that profile (then the row leaves the list).
         val mine = rows.map { it.userId }.toSet()
-        return DsyncPayloads.encodeProfiles(base, rows + remote.filter { it.userId !in mine })
+        val kept = remote.filter { it.userId !in mine && state.getLong(removedKey(s.playlistId, it.username), 0L) <= it.updatedAt }
+        return DsyncPayloads.encodeProfiles(base, rows + kept)
     }
 
     // ---- apply (data -> local), section 6.1 full replace ----
 
     private enum class ApplyResult { Applied, Malformed, NotReady, Failed }
+
+    /**
+     * A newer server value for a key with an unsent local change: the row
+     * union of both sides (favorites, collections); progress and recents
+     * already merge per row inside [apply]; profiles merge per row there too.
+     */
+    private suspend fun mergedEnvelope(s: Session, key: DsyncKey, env: DsyncEnvelope): DsyncEnvelope? = when (key) {
+        DsyncKey.Favorites -> {
+            val m = channelMap(s)
+            if (m.toInt.isEmpty()) null else {
+                val remote = DsyncPayloads.decodeFavorites(env.data)
+                if (remote == null) null else {
+                    val local = favoriteDao.allOnce().sortedBy { it.displayOrder }.mapNotNull { m.toInt[it.channelId] }
+                    env.copy(data = DsyncPayloads.encodeFavorites(env.data, DsyncGate.favoritesUnion(local, remote)))
+                }
+            }
+        }
+        DsyncKey.Collections -> {
+            val m = channelMap(s)
+            val remote = DsyncPayloads.decodeCollections(env.data)
+            if (m.toInt.isEmpty() || remote == null) null else {
+                val local = prefs.channelCollections.first().map { c ->
+                    CollectionRow(
+                        id = c.id, name = c.name,
+                        placement = if (c.placement == ChannelCollection.PLACEMENT_BEGINNING) "b" else "e",
+                        members = c.memberIds.mapNotNull { m.toInt[it] },
+                    )
+                }
+                env.copy(data = DsyncPayloads.encodeCollections(env.data, DsyncGate.collectionsUnion(local, remote)))
+            }
+        }
+        DsyncKey.Reminders -> {
+            val m = channelMap(s)
+            val remote = DsyncPayloads.decodeReminders(env.data)
+            if (m.toInt.isEmpty() || remote == null) null else {
+                val local = reminderDao.allOnce()
+                    .filter { it.playlistId == null || it.playlistId == s.playlistId }
+                    .mapNotNull { r ->
+                        val cid = m.intByName[r.channelName] ?: return@mapNotNull null
+                        ReminderRow(cid, r.startMillis / 1000, r.endMillis / 1000, r.programTitle, r.channelName)
+                    }
+                val nowS = System.currentTimeMillis() / 1000
+                env.copy(data = DsyncPayloads.encodeReminders(env.data, DsyncGate.remindersUnion(local, remote), nowS))
+            }
+        }
+        else -> env
+    }
 
     private suspend fun apply(s: Session, key: DsyncKey, env: DsyncEnvelope): ApplyResult {
         val d = env.data
@@ -928,7 +1156,11 @@ class DispatcharrSyncManager @Inject constructor(
             DsyncKey.Profiles -> {
                 val rows = DsyncPayloads.decodeProfiles(d) ?: return ApplyResult.Malformed
                 if (!isAdmin(s)) return ApplyResult.Applied
-                profileManager.get().mergeSyncedProfiles(s.playlistId, rows, adminUsers(s))
+                profileManager.get().mergeSyncedProfiles(
+                    s.playlistId, rows, adminUsers(s),
+                    localUpdatedAt = { u -> state.getLong(rowKey(s.playlistId, u), 0L) },
+                    adopted = { u, at -> if (at > 0) state.edit().putLong(rowKey(s.playlistId, u), at).apply() },
+                )
             }
         }
         return ApplyResult.Applied
@@ -1000,6 +1232,7 @@ class DispatcharrSyncManager @Inject constructor(
         const val PERIODIC_PULL_MS = 15L * 60 * 1000
         private const val SUPPRESS_MS = 3_000L
         val BACKOFF_MS = longArrayOf(30_000L, 120_000L, 600_000L)
+        val RECONNECT_MS = longArrayOf(2_000L, 5_000L, 15_000L, 60_000L)
 
         /** Schema 4.9 names with an Android key. */
         val SETTINGS_OWNED: Set<String> = setOf(
