@@ -34,6 +34,7 @@ import com.aeriotv.android.feature.main.MainScaffoldEntryPoint
 import com.aeriotv.android.feature.main.floatingNavChrome
 import com.aeriotv.android.feature.miniplayer.CastMiniController
 import com.aeriotv.android.feature.multiview.RADIO_SUBTITLE
+import com.aeriotv.android.feature.multiview.RADIO_BUFFERING
 import com.aeriotv.android.feature.multiview.RADIO_UNAVAILABLE
 import dagger.hilt.android.EntryPointAccessors
 import kotlinx.coroutines.launch
@@ -121,7 +122,12 @@ fun RadioTransportCard(
         if (failed) wasFailed = true
         else if (wasFailed) { wasFailed = false; Log.i(TAG, "[RADIO] recovered ${channel.name}") }
     }
-    val statusText = if (failed) RADIO_UNAVAILABLE else RADIO_SUBTITLE
+    val holding by holder.audioOnlyHolding.collectAsStateWithLifecycle()
+    val statusText = when {
+        failed -> RADIO_UNAVAILABLE
+        holding -> RADIO_BUFFERING
+        else -> RADIO_SUBTITLE
+    }
     // 1 Hz playhead for the scrubber while the sheet is open.
     var wallNow by remember { mutableStateOf(0L) }
     var playing by remember(player) { mutableStateOf(player?.playWhenReady == true) }
@@ -159,7 +165,7 @@ fun RadioTransportCard(
             title = channel.name,
             deviceName = null,
             artUri = logo,
-            isPlaying = playing && !failed,
+            isPlaying = (playing || holding) && !failed,
             subtitle = statusText,
             transportIcon = Icons.Filled.Radio,
             stopDescription = "Stop",
@@ -200,14 +206,14 @@ fun RadioTransportCard(
             programmeStartMs = programme?.startMillis ?: 0L,
             programmeEndMs = programme?.endMillis ?: 0L,
             remoteState = CastControl.RemoteState(audio = audio, audioOnly = true),
-            isPlaying = playing && !failed,
+            isPlaying = (playing || holding) && !failed,
             position = CastControl.PositionSnapshot(
                 canSeek = tsState.buffering && tsState.headWallMs > tsState.tailWallMs,
                 isLive = !tsState.timeshifting,
                 positionWallMs = if (wallNow > 0) wallNow else tsState.headWallMs,
                 windowStartMs = tsState.tailWallMs,
                 windowEndMs = tsState.headWallMs,
-                isPlaying = playing,
+                isPlaying = playing || holding,
             ),
             radioOptions = true,
             streamInfoRows = radioStreamInfoRows(holder),

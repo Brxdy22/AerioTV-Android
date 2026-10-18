@@ -115,6 +115,32 @@ object ForceHls {
     fun isForcedHlsUrl(url: String): Boolean =
         (isDispatcharrLive(url) && url.contains(PARAM, ignoreCase = true)) || isSessionUrl(url)
 
+    // Channels whose HLS entry turned out not to be HLS (2026-10-18: a
+    // Redirect stream profile 302s the entry straight to the provider's raw
+    // .ts). Session memory only: the next tune of that channel goes straight
+    // to the plain TS path.
+    private val notHlsChannels = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    /** Records that [url]'s channel entry is not HLS and logs the fallback. */
+    fun markNotHls(url: String, reason: String) {
+        val key = channelKeyFor(url) ?: return
+        notHlsChannels.add(key)
+        Log.w(TAG, "[FORCE-HLS] entry is not HLS ($reason); falling back to TS for this tune")
+    }
+
+    fun isNotHls(url: String): Boolean = channelKeyFor(url)?.let { it in notHlsChannels } == true
+
+    /** [url] without output_format=hls (the plain TS live URL). */
+    fun stripHls(url: String): String {
+        val fragment = url.substringAfter('#', "")
+        val base = url.substringBefore('#')
+        val path = base.substringBefore('?')
+        val query = base.substringAfter('?', "")
+            .split('&').filter { it.isNotEmpty() && !it.equals(PARAM, ignoreCase = true) }
+            .joinToString("&")
+        return path + (if (query.isNotEmpty()) "?$query" else "") + (if (fragment.isNotEmpty()) "#$fragment" else "")
+    }
+
     /** True for the entry URL that still needs its 302 resolved. */
     fun isEntryUrl(url: String): Boolean =
         isDispatcharrLive(url) && url.contains(PARAM, ignoreCase = true)
@@ -159,6 +185,12 @@ object ForceHls {
                         Session(absolute, token)
                     } else {
                         Log.w(TAG, "[FORCE-HLS] entry 302 went to a non-HLS target $absolute")
+                        if (absolute != null) {
+                            val path = absolute.substringBefore('?').lowercase()
+                            if (path.endsWith(".ts") || !path.endsWith(".m3u8")) {
+                                markNotHls(entryUrl, "302 to non-HLS target ${path.substringAfterLast('/')}")
+                            }
+                        }
                         null
                     }
                 } else {
@@ -201,6 +233,10 @@ object ForceHls {
      */
     fun apply(url: String, where: String): String {
         if (!isDispatcharrLive(url)) return url
+        if (isNotHls(url)) {
+            Log.i(TAG, "[FORCE-HLS] $where: channel entry is not HLS this session; plain TS")
+            return if (url.contains(PARAM, ignoreCase = true)) stripHls(url) else url
+        }
         if (!enabled && !isServerHlsHost(url)) return url
         if (url.contains("output_format=", ignoreCase = true)) {
             Log.i(TAG, "[FORCE-HLS] $where url already carries output_format, unchanged: $url")

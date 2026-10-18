@@ -425,5 +425,9 @@ private fun StagedRows(
 /** Radio Mode card subtitle (Apple wording). */
 const val RADIO_SUBTITLE = "Playing in Radio Mode"
 
+/** Radio Mode status while an audio-only pause-to-fill hold builds the
+ *  buffer back up (same line style as the cast card's Connecting). */
+const val RADIO_BUFFERING = "Buffering"
+
 /** Radio Mode status while the stream failed: the player overlay's wording. */
 const val RADIO_UNAVAILABLE = "Channel Unavailable"

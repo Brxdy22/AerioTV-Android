@@ -473,6 +473,7 @@ private fun RadioTvBanner(
         .collectAsStateWithLifecycle()
     val radioFailedId by radioHolder.failedChannel.collectAsStateWithLifecycle()
     val radioUnavailable = radioStreamDown || radioFailedId != null
+    val radioHolding by radioHolder.audioOnlyHolding.collectAsStateWithLifecycle()
     val accent = MaterialTheme.colorScheme.primary
     Row(
         modifier = modifier
@@ -498,7 +499,11 @@ private fun RadioTvBanner(
                 overflow = TextOverflow.Ellipsis,
             )
             Text(
-                text = if (radioUnavailable) RADIO_UNAVAILABLE else RADIO_SUBTITLE,
+                text = when {
+                    radioUnavailable -> RADIO_UNAVAILABLE
+                    radioHolding -> RADIO_BUFFERING
+                    else -> RADIO_SUBTITLE
+                },
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,

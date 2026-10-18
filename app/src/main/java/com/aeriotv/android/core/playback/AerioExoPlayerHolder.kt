@@ -392,10 +392,15 @@ class AerioExoPlayerHolder @Inject constructor(
     }
 
     /** Live offset target for a forced HLS tune of [channelId]. */
-    private fun hlsLiveOffsetFor(channelId: String?): Int {
+    private fun hlsLiveOffsetFor(channelId: String?, audioOnly: Boolean = false): Int {
         val entry = channelId?.let { cachedLiveStartBuffers[it + FORCE_HLS_OFFSET_KEY_SUFFIX] }
             ?: return FORCE_HLS_TARGET_OFFSET_MS
-        if (System.currentTimeMillis() - entry.learnedAtMs > HOLDBACK_LEARNED_TTL_MS) return FORCE_HLS_TARGET_OFFSET_MS
+        val ttl = if (audioOnly) AUDIO_ONLY_HOLDBACK_TTL_MS else HOLDBACK_LEARNED_TTL_MS
+        val age = System.currentTimeMillis() - entry.learnedAtMs
+        if (age > ttl) return FORCE_HLS_TARGET_OFFSET_MS
+        if (audioOnly) {
+            Log.i(TAG, "[AVP-HOLDBACK] learned ${entry.ms / 1000}s (audio-only, age ${age / 60_000L}m, 30d TTL)")
+        }
         restampLearnedOnUse(channelId + FORCE_HLS_OFFSET_KEY_SUFFIX, entry)
         return maxOf(FORCE_HLS_TARGET_OFFSET_MS, entry.ms)
     }
@@ -537,7 +542,7 @@ class AerioExoPlayerHolder @Inject constructor(
         // EXT-X-START) governs; the TS resume gate and rejoin stay out.
         if (ForceHls.isForcedHlsUrl(url)) return false
         if (!hasReachedPlaybackRestart || !videoFrameRendered) return false
-        return p.playWhenReady || resumeGateActive
+        return p.playWhenReady || resumeGateActive || audioOnlyHoldActive
     }
 
     // ---- repeat-stall rejoin ----
@@ -556,11 +561,13 @@ class AerioExoPlayerHolder @Inject constructor(
         return maxOf(audio, if (age > HOLDBACK_LEARNED_TTL_MS) 0 else entry.ms)
     }
 
-    /** Learned audio-only hold-back of [channelId] (same 30 minute TTL), or 0. */
+    /** Learned audio-only hold-back of [channelId] (30 day TTL, 2026-10-18:
+     *  a bursty radio feed keeps its shape, so every later tune starts on it
+     *  instead of the 6 s floor), or 0. */
     private fun audioOnlyHoldBackMs(channelId: String?): Int {
         val entry = channelId?.let { cachedLiveStartBuffers[it + AUDIO_ONLY_HOLDBACK_KEY_SUFFIX] } ?: return 0
         val age = System.currentTimeMillis() - entry.learnedAtMs
-        return if (age > HOLDBACK_LEARNED_TTL_MS) 0 else entry.ms
+        return if (age > AUDIO_ONLY_HOLDBACK_TTL_MS) 0 else entry.ms
     }
 
     // ---- audio-only bursty feed (2026-10-15, Apple parity) ----
@@ -647,12 +654,11 @@ class AerioExoPlayerHolder @Inject constructor(
             logAudioOnlyCapIfNeeded(gapMs, wanted)
             if (want <= prior + 500) return
             persistAudioOnlyHoldBack(channelId, target)
-            // Rejoin at it now: the local window when it holds it, else a re-tune
-            // whose start gate is the new hold-back.
-            if (resumeGateEligible() && tryRejoin(now)) {
-                audioOnlyLastRejoinSeekAtMs = now
-                if (isTimeshifting) audioOnlyInRejoinWindow = true
-            }
+            // Pause-to-fill (2026-10-18): never seek backwards (that replays
+            // audio already heard); hold at the current position until the
+            // buffer ahead reaches the new hold-back.
+            audioOnlyPendingRejoinMs = target
+            tickAudioOnlyHoldPending(now)
             return
         }
         // Each starved closure after the first is handled once.
@@ -692,7 +698,7 @@ class AerioExoPlayerHolder @Inject constructor(
                 logAudioOnlyCapIfNeeded(gapMs, wanted)
             }
         }
-        retryAudioOnlyRejoin(now)
+        tickAudioOnlyHoldPending(now)
     }
 
     /**
@@ -752,8 +758,13 @@ class AerioExoPlayerHolder @Inject constructor(
                 logAudioOnlyCapIfNeeded(gapMs, wanted)
             }
         }
-        val holdback = audioOnlyPendingRejoinMs
-        if (holdback <= 0 || !p.playWhenReady) return
+        tickAudioOnlyHoldPending(now)
+    }
+
+    /** Legacy rejoin seek for the Force HLS twin, kept only as the fallback
+     *  when a pause-to-fill hold sees ingest stall past 25 s. */
+    private fun seekAudioOnlyHlsFallback(holdback: Int, now: Long) {
+        val p = player ?: return
         val tl = p.currentTimeline
         if (tl.isEmpty) return
         val w = tl.getWindow(p.currentMediaItemIndex, androidx.media3.common.Timeline.Window())
@@ -773,7 +784,6 @@ class AerioExoPlayerHolder @Inject constructor(
             return
         }
         val have = (w.durationMs - p.currentPosition).coerceAtLeast(0L)
-        audioOnlyPendingRejoinMs = 0
         if (have >= holdback - 500) return
         audioOnlyLastRejoinSeekAtMs = now
         Log.i(TAG, "[HOLDBACK] rejoin: seeking to edge-$holdback ms (audio-only in-session raise, was $have ms, window ${w.durationMs} ms)")
@@ -805,6 +815,154 @@ class AerioExoPlayerHolder @Inject constructor(
             "[AVP-HOLDBACK] audio-only hold-back capped at ${AUDIO_ONLY_HOLDBACK_MAX_MS / 1000}s: " +
                 "gap ${"%.1f".format(gapMs / 1000.0)}s wanted ${wantedMs / 1000}s channel=${lastPlayTitle ?: "-"}",
         )
+    }
+
+    // ---- audio-only pause-to-fill hold (2026-10-18, Apple parity) ----
+    // A raise used to seek edge - hold-back, which on a progressive TS feed
+    // (and the HLS twin) replays audio the listener already heard. Now a
+    // raise holds playback at the current position until the buffer ahead
+    // reaches the new hold-back (or the player cannot hold more), then
+    // resumes. Ingest silent > 25 s during a hold falls back to the old seek.
+    private var audioOnlyHoldActive = false
+    private var audioOnlyHoldTargetMs = 0L
+    private var audioOnlyHoldArmedAtMs = 0L
+    private var audioOnlyHoldBufferedMs = 0L
+    private var audioOnlyHoldGrowAtMs = 0L
+    private var audioOnlyLastHoldAtMs = 0L
+    private val _audioOnlyHolding = MutableStateFlow(false)
+
+    /** True while an audio-only pause-to-fill hold is active: Radio Mode's
+     *  card, sheet, TV banner, and notification say "Buffering". */
+    val audioOnlyHolding: StateFlow<Boolean> = _audioOnlyHolding.asStateFlow()
+
+    /** Arms a pending hold ([audioOnlyPendingRejoinMs]) once spacing allows.
+     *  An active hold is driven by [tickAudioOnlyHold] from the watchdog. */
+    private fun tickAudioOnlyHoldPending(now: Long) {
+        val p = player ?: return
+        // An active hold reads the raised value itself (watchdog tick).
+        if (audioOnlyHoldActive) return
+        val want = audioOnlyPendingRejoinMs
+        if (want <= 0) return
+        if (isCatchup || isTimeshifting || !p.playWhenReady) return
+        if (audioOnlyLastHoldAtMs != 0L && now - audioOnlyLastHoldAtMs < AUDIO_ONLY_REJOIN_SPACING_MS) {
+            if (!audioOnlySpacingLogged) {
+                audioOnlySpacingLogged = true
+                Log.i(
+                    TAG,
+                    "[AVP-NUDGE] audio-only hold to ${want / 1000} s waits: last hold " +
+                        "${now - audioOnlyLastHoldAtMs} ms ago (min ${AUDIO_ONLY_REJOIN_SPACING_MS / 1000} s)",
+                )
+            }
+            return
+        }
+        audioOnlyPendingRejoinMs = 0
+        armAudioOnlyHold(p, want.toLong(), now)
+    }
+
+    /** Most buffered-ahead media this player can hold: the LoadControl's max
+     *  buffer (TS), or the live window ahead of the playhead (HLS). */
+    private fun audioOnlyHoldCeilingMs(p: ExoPlayer): Long {
+        val url = lastPlayUrl
+        if (url != null && ForceHls.isForcedHlsUrl(url)) {
+            val tl = p.currentTimeline
+            if (!tl.isEmpty) {
+                val w = tl.getWindow(p.currentMediaItemIndex, androidx.media3.common.Timeline.Window())
+                if (w.isLive() && w.durationMs != C.TIME_UNSET) {
+                    // While paused the window slides; the hold ends when the
+                    // playhead would fall off its tail (2 s margin).
+                    return (w.durationMs - 2_000L).coerceAtLeast(0L)
+                }
+            }
+        }
+        return if (builtMaxBufferMs > 0L) (builtMaxBufferMs - 1_000L).coerceAtLeast(0L) else Long.MAX_VALUE
+    }
+
+    private fun armAudioOnlyHold(p: ExoPlayer, holdbackMs: Long, now: Long) {
+        val ahead = bufferedAheadMs(p)
+        val target = minOf(holdbackMs, audioOnlyHoldCeilingMs(p))
+        if (ahead >= target - 500) return
+        releaseResumeGate("audio-only hold")
+        audioOnlyHoldActive = true
+        audioOnlyHoldTargetMs = target
+        audioOnlyHoldArmedAtMs = now
+        audioOnlyHoldBufferedMs = p.bufferedPosition
+        audioOnlyHoldGrowAtMs = now
+        audioOnlyLastHoldAtMs = now
+        _audioOnlyHolding.value = true
+        Log.i(
+            TAG,
+            "[AVP-NUDGE] audio-only hold: pausing at pos ${p.currentPosition} until " +
+                "${target / 1000} s ahead (hold-back ${holdbackMs / 1000} s, have ${ahead} ms)",
+        )
+        p.playWhenReady = false
+    }
+
+    private fun tickAudioOnlyHold(p: ExoPlayer, now: Long) {
+        // Someone else resumed (user Play, media key): the hold is over.
+        if (p.playWhenReady) {
+            endAudioOnlyHold("resumed externally", resume = false)
+            return
+        }
+        val raised = maxOf(audioOnlyPendingRejoinMs.toLong(), audioOnlyHoldTargetMs)
+        audioOnlyPendingRejoinMs = 0
+        audioOnlyHoldTargetMs = minOf(raised, audioOnlyHoldCeilingMs(p))
+        val buffered = p.bufferedPosition
+        if (buffered > audioOnlyHoldBufferedMs) {
+            audioOnlyHoldBufferedMs = buffered
+            audioOnlyHoldGrowAtMs = now
+        }
+        val ahead = bufferedAheadMs(p)
+        val heldMs = now - audioOnlyHoldArmedAtMs
+        when {
+            ahead >= audioOnlyHoldTargetMs - 500 -> {
+                Log.i(
+                    TAG,
+                    "[AVP-NUDGE] audio-only hold: resumed after ${"%.1f".format(heldMs / 1000.0)} s " +
+                        "with ${"%.1f".format(ahead / 1000.0)} s ahead",
+                )
+                endAudioOnlyHold("filled", resume = true)
+            }
+            now - audioOnlyHoldGrowAtMs >= AUDIO_ONLY_HOLD_STALL_MS -> {
+                val holdback = audioOnlyHoldTargetMs.toInt()
+                Log.i(
+                    TAG,
+                    "[AVP-NUDGE] audio-only hold: ingest stalled ${(now - audioOnlyHoldGrowAtMs) / 1000} s " +
+                        "with ${"%.1f".format(ahead / 1000.0)} s ahead; falling back to the rejoin seek",
+                )
+                endAudioOnlyHold("ingest stalled", resume = true)
+                audioOnlyLastRejoinSeekAtMs = 0L
+                val url = lastPlayUrl
+                if (url != null && ForceHls.isForcedHlsUrl(url)) {
+                    seekAudioOnlyHlsFallback(holdback, now)
+                } else {
+                    audioOnlyPendingRejoinMs = holdback
+                    retryAudioOnlyRejoin(now)
+                    audioOnlyPendingRejoinMs = 0
+                }
+            }
+        }
+    }
+
+    /** Ends the hold; [resume] puts playWhenReady back. Safe when idle. */
+    private fun endAudioOnlyHold(reason: String, resume: Boolean) {
+        if (!audioOnlyHoldActive) return
+        if (reason != "filled") Log.i(TAG, "[AVP-NUDGE] audio-only hold ended: $reason")
+        // Flag stays true across the assignment so onPlayWhenReadyChanged
+        // treats it as hold traffic, not a user resume.
+        if (resume) player?.playWhenReady = true
+        audioOnlyHoldActive = false
+        audioOnlyHoldTargetMs = 0L
+        audioOnlyHoldArmedAtMs = 0L
+        _audioOnlyHolding.value = false
+    }
+
+    /** Silent reset for teardown, re-prime, and a new stream. */
+    private fun clearAudioOnlyHold() {
+        audioOnlyHoldActive = false
+        audioOnlyHoldTargetMs = 0L
+        audioOnlyHoldArmedAtMs = 0L
+        audioOnlyLastHoldAtMs = 0L
+        _audioOnlyHolding.value = false
     }
 
     /** Seeks [audioOnlyPendingRejoinMs] behind the local window's head once the
@@ -875,6 +1033,31 @@ class AerioExoPlayerHolder @Inject constructor(
             return
         }
         val now = SystemClock.elapsedRealtime()
+        if (_audioOnly.value) {
+            // Audio-only (2026-10-18): the buffer ran dry, usually on the first
+            // burst after a join too close to the edge. Pause-to-fill at the
+            // larger of the current hold-back and the measured gap shape, and
+            // persist it; never the backward rejoin seek.
+            val p = player ?: return
+            val channelId = currentChannelIdForRebuild
+            val stored = audioOnlyHoldBackMs(channelId)
+            val want = maxOf(
+                audioOnlyHoldBackNowMs.toLong(),
+                stored.toLong(),
+                resumeGateTargetMs(),
+                AUDIO_ONLY_START_GATE_MIN_MS.toLong(),
+            ).coerceAtMost(AUDIO_ONLY_HOLDBACK_MAX_MS.toLong()).toInt()
+            if (channelId != null && want > stored) persistAudioOnlyHoldBack(channelId, want)
+            audioOnlyHoldBackNowMs = maxOf(audioOnlyHoldBackNowMs, want)
+            Log.i(TAG, "[AVP-HOLDBACK] audio-only underrun ($reason): hold-back ${want / 1000}s, pause-to-fill")
+            if (audioOnlyHoldActive) {
+                audioOnlyPendingRejoinMs = maxOf(audioOnlyPendingRejoinMs, want)
+            } else {
+                // An empty buffer is the case the spacing guards against least.
+                armAudioOnlyHold(p, want.toLong(), now)
+            }
+            return
+        }
         val sinceLast = now - lastLiveUnderrunAtMs
         val repeat = lastLiveUnderrunAtMs != 0L && sinceLast <= REPEAT_STALL_WINDOW_MS
         val cooled = lastRejoinAtMs == 0L || now - lastRejoinAtMs >= REJOIN_COOLDOWN_MS
@@ -1853,7 +2036,8 @@ class AerioExoPlayerHolder @Inject constructor(
 
     private fun tickForceHlsCushion(p: ExoPlayer, now: Long) {
         val url = lastPlayUrl
-        val forced = url != null && ForceHls.isForcedHlsUrl(url) && !isTimeshifting && !isCatchup
+        val forced = url != null && ForceHls.isForcedHlsUrl(url) && !isTimeshifting && !isCatchup &&
+            !audioOnlyHoldActive
         forceHlsCushion.tick(p, forced, forceHlsTargetOffsetMs.toLong(), now)
     }
 
@@ -1905,7 +2089,7 @@ class AerioExoPlayerHolder @Inject constructor(
             // The resume gate drives playWhenReady itself; it is neither a user
             // pause nor a live-edge resume, so the Live Rewind filler lifecycle
             // must not see it.
-            if (resumeGateActive) return
+            if (resumeGateActive || audioOnlyHoldActive) return
             if (isTimeshifting || isCatchup) return
             val ts = timeshift.get()
             if (ts.activeWriter == null) return
@@ -1973,6 +2157,19 @@ class AerioExoPlayerHolder @Inject constructor(
             } else {
                 error.cause?.message
                     ?.let { "${error.errorCodeName}: $it" } ?: error.errorCodeName
+            }
+            // Force HLS entry that is not HLS (body without #EXTM3U): play
+            // this tune on the plain TS path at once, and remember the
+            // channel for the session (ForceHls.isNotHls).
+            val failedUrl = lastPlayUrl
+            if (error.errorCode == PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED &&
+                failedUrl != null && ForceHls.isEntryUrl(failedUrl)
+            ) {
+                ForceHls.markNotHls(failedUrl, "manifest malformed: ${error.cause?.message ?: error.errorCodeName}")
+                errorPending = false
+                _lastErrorText.value = null
+                playUrl(ForceHls.stripHls(failedUrl), lastPlayTitle, lastPlaySubtitle, lastPlayArtworkUri, channelId = currentChannelIdForRebuild)
+                return
             }
             // GH #8: the forced-PCM sink produced no audio / failed to init on
             // some devices. Rebuild once with the stock context sink (which is
@@ -3291,6 +3488,9 @@ class AerioExoPlayerHolder @Inject constructor(
                         setForceHlsSession(session)
                         Log.i(ForceHls.TAG, "[FORCE-HLS] resolved in ${ms}ms; playing token playlist")
                         playUrl(session.playlistUrl, title, subtitle, artworkUri, drmLicenseType, drmLicenseKey, channelId)
+                    } else if (ForceHls.isNotHls(url)) {
+                        // Entry 302'd to a non-HLS target: TS path now, no retry loop.
+                        playUrl(ForceHls.stripHls(url), title, subtitle, artworkUri, drmLicenseType, drmLicenseKey, channelId)
                     } else {
                         Log.w(ForceHls.TAG, "[FORCE-HLS] could not resolve the entry redirect in ${ms}ms; opening the entry URL directly")
                         forceHlsResolveSkipUrl = url
@@ -3343,6 +3543,12 @@ class AerioExoPlayerHolder @Inject constructor(
         val startGateMs = if (forcedHls) FORCE_HLS_START_GATE_MS
         else if (audioOnlyGateMs > 0) {
             if (audioOnlyLearnedMs > 0) {
+                val e = cachedLiveStartBuffers.getValue(effectiveChannelId + AUDIO_ONLY_HOLDBACK_KEY_SUFFIX)
+                Log.i(
+                    TAG,
+                    "[AVP-HOLDBACK] learned ${e.ms / 1000}s (audio-only, age " +
+                        "${(System.currentTimeMillis() - e.learnedAtMs) / 60_000L}m, 30d TTL)",
+                )
                 restampLearnedOnUse(
                     effectiveChannelId!! + AUDIO_ONLY_HOLDBACK_KEY_SUFFIX,
                     cachedLiveStartBuffers.getValue(effectiveChannelId + AUDIO_ONLY_HOLDBACK_KEY_SUFFIX),
@@ -3361,7 +3567,10 @@ class AerioExoPlayerHolder @Inject constructor(
         if (forcedHls) {
             Log.i(ForceHls.TAG, "[FORCE-HLS] learned TS start gate skipped")
             Log.i(ForceHls.TAG, "[FORCE-HLS] start gate $startGateMs ms")
-            forceHlsTargetOffsetMs = hlsLiveOffsetFor(effectiveChannelId)
+            forceHlsTargetOffsetMs = hlsLiveOffsetFor(
+                effectiveChannelId,
+                audioOnly = audioOnlyPolicyFor(effectiveChannelId) != AudioOnlyStartPolicy.UNKNOWN,
+            )
             // Fast start, then spend the cushion at the first stall: resume
             // only once a full target offset is buffered again.
             Log.i(ForceHls.TAG, "[FORCE-HLS] rebuffer gate $forceHlsTargetOffsetMs ms")
@@ -3405,6 +3614,7 @@ class AerioExoPlayerHolder @Inject constructor(
         audioOnlyHoldBackNowMs = 0
         audioOnlyRaiseCount = 0
         audioOnlyPendingRejoinMs = 0
+        clearAudioOnlyHold()
         audioOnlyCapLogged = false
         audioOnlyRejoinDeferredLogged = false
         audioOnlySpacingLogged = false
@@ -3825,6 +4035,7 @@ class AerioExoPlayerHolder @Inject constructor(
         player = null
         _playerInstance.value = null
         resumeGateActive = false
+        clearAudioOnlyHold()
         currentChannelId = null
         currentChannelIdForRebuild = null
         // Full teardown clears the stream-failover walk and any pending
@@ -3959,7 +4170,9 @@ class AerioExoPlayerHolder @Inject constructor(
                 val playheadFrozen = !playheadAdvanced &&
                     now - stallProbeAdvanceAtMs >= STALL_OVERLAY_FROZEN_MS
                 val bufferEmpty = bufferAheadNowMs < STALL_OVERLAY_EMPTY_BUFFER_MS && ingestSilent
-                val reallyStalled = stallWatchLive &&
+                // An audio-only pause-to-fill hold freezes the playhead on
+                // purpose; Radio Mode shows Buffering for it, not Reconnecting.
+                val reallyStalled = stallWatchLive && !audioOnlyHoldActive &&
                     (underrunBuffering || playheadFrozen || bufferEmpty)
                 if (reallyStalled) {
                     if (!ingestStallStatusShown) {
@@ -3989,6 +4202,7 @@ class AerioExoPlayerHolder @Inject constructor(
                 // deliberately skips the stream.
                 tickResumeGate(p, now)
                 tickAudioOnlyBurst(now)
+                if (audioOnlyHoldActive) tickAudioOnlyHold(p, now)
                 tickForceHlsCushion(p, now)
 
                 // Cold-start NO-DATA net (never-started stream). Runs INDEPENDENT
@@ -4199,6 +4413,7 @@ class AerioExoPlayerHolder @Inject constructor(
         // A re-prime throws the buffer away, so any gate holding against it is
         // stale; the fresh stream is governed by the tune-path start gate.
         resumeGateActive = false
+        clearAudioOnlyHold()
         Log.w(TAG, "[MPV-RELOAD] live stall reload ch=$currentChannelId reason=$reason attempt=$consecutiveReloads")
         clearPauseStamp("re-prime")
         tracer.recover("in-place reload reason=$reason attempt=$consecutiveReloads")
@@ -4642,6 +4857,7 @@ class AerioExoPlayerHolder @Inject constructor(
     private fun resetWatchdogStateForNewStream() {
         // A fresh stream gets the tune-path start gate, not a stale hold.
         resumeGateActive = false
+        clearAudioOnlyHold()
         resumeGateArmedAtMs = 0L
         resumeGateLoggedTargetMs = 0L
         hasReachedPlaybackRestart = false
@@ -4994,6 +5210,10 @@ class AerioExoPlayerHolder @Inject constructor(
         /** Known audio-only tunes start on at least 3 x 2 s segments' worth. */
         private const val AUDIO_ONLY_START_GATE_MIN_MS = 6_000
         private const val AUDIO_ONLY_HOLDBACK_KEY_SUFFIX = "#audio_only_holdback"
+        /** Learned audio-only hold-back lifetime (video keeps 30 minutes). */
+        private const val AUDIO_ONLY_HOLDBACK_TTL_MS = 30L * 24L * 60L * 60L * 1_000L
+        /** A pause-to-fill hold whose buffer stops growing this long falls back to the rejoin seek. */
+        private const val AUDIO_ONLY_HOLD_STALL_MS = 25_000L
         /** At or above this media-time ratio the feed is keeping up with real
          *  time, so a stall means the bytes arrived in bursts and the start
          *  cushion was too shallow. */

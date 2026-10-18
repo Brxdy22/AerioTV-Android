@@ -132,17 +132,29 @@ class AerioMediaPlaybackService : MediaLibraryService() {
                 com.aeriotv.android.feature.player.RadioMode.state,
                 exoHolder.streamUnavailable,
                 exoHolder.failedChannel,
-            ) { radio, unavailable, failedId -> radio != null && (unavailable || failedId != null) }
+                exoHolder.audioOnlyHolding,
+            ) { radio, unavailable, failedId, holding ->
+                when {
+                    radio == null -> 0
+                    unavailable || failedId != null -> 1
+                    holding -> 2
+                    else -> 0
+                }
+            }
                 .distinctUntilChanged()
-                .collect { failed ->
+                .collect { status ->
                     if (com.aeriotv.android.feature.player.RadioMode.state.value == null) return@collect
-                    com.aeriotv.android.core.pip.PipState.nowPlayingSubtitle =
-                        if (failed) com.aeriotv.android.feature.multiview.RADIO_UNAVAILABLE else ""
+                    val failed = status == 1
+                    com.aeriotv.android.core.pip.PipState.nowPlayingSubtitle = when (status) {
+                        1 -> com.aeriotv.android.feature.multiview.RADIO_UNAVAILABLE
+                        2 -> com.aeriotv.android.feature.multiview.RADIO_BUFFERING
+                        else -> ""
+                    }
                     runCatching {
                         (getSystemService(NOTIFICATION_SERVICE) as android.app.NotificationManager)
                             .notify(NOTIF_ID, buildNowPlayingNotification())
                     }
-                    android.util.Log.i(TAG, "[RADIO] notification ${if (failed) "Channel Unavailable" else "Live"}")
+                    android.util.Log.i(TAG, "[RADIO] notification ${if (failed) "Channel Unavailable" else if (status == 2) "Buffering" else "Live"}")
                 }
         }
         setMediaNotificationProvider(
