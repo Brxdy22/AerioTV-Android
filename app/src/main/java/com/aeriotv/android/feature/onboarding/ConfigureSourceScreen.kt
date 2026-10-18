@@ -624,7 +624,7 @@ private fun LanUrlField(state: PlaylistViewModel.UiState, viewModel: PlaylistVie
 }
 
 @Composable
-private fun LabeledField(label: String, content: @Composable () -> Unit) {
+internal fun LabeledField(label: String, content: @Composable () -> Unit) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text(
             text = label,
@@ -637,7 +637,7 @@ private fun LabeledField(label: String, content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun IconTextField(
+internal fun IconTextField(
     value: String,
     onValueChange: (String) -> Unit,
     placeholder: String,
@@ -677,7 +677,7 @@ private fun IconTextField(
 
 
 @Composable
-private fun PasswordField(
+internal fun PasswordField(
     label: String,
     value: String,
     onValueChange: (String) -> Unit,
@@ -706,7 +706,7 @@ private fun PasswordField(
 }
 
 @Composable
-private fun SegmentedAuthControl(
+internal fun SegmentedAuthControl(
     selected: DispatcharrAuthMode,
     onSelect: (DispatcharrAuthMode) -> Unit,
     enabled: Boolean,
@@ -933,7 +933,7 @@ private fun GuideHistoryRow(
                 val selected = days == sanitizeGuideDays(selectedDays)
                 Text(
                     text = when (days) {
-                        0 -> "All Available"
+                        0 -> "All"
                         1 -> "1 Day"
                         else -> "$days Days"
                     },

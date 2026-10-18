@@ -28,6 +28,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.CloudOff
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Key
 import androidx.compose.material.icons.filled.Tv
@@ -79,6 +80,10 @@ fun WelcomeScreen(
      */
     onSignInWithGoogle: (() -> Unit)? = null,
     googleSignInInProgress: Boolean = false,
+    /** Signed-in Google account, shown on the sync card in place of the chevron. */
+    googleSignedInEmail: String? = null,
+    /** "Sync via Dispatcharr": opens the Direct Connect form, sync turns on after the connect. */
+    onSyncViaDispatcharr: (() -> Unit)? = null,
 ) {
     val config = LocalConfiguration.current
     val isTv = com.aeriotv.android.feature.livetv.rememberLiveTvFormFactor().isTv
@@ -87,8 +92,8 @@ fun WelcomeScreen(
     // single column to mirror the tvOS welcome layout.
     val twoColumn = !isTv && config.screenWidthDp >= 720 && config.screenHeightDp < 720
 
-    if (twoColumn) WelcomeTwoColumn(onConnectServer, onSkip, onSignInWithGoogle, googleSignInInProgress)
-    else WelcomeSingleColumn(onConnectServer, onSkip, onSignInWithGoogle, googleSignInInProgress)
+    if (twoColumn) WelcomeTwoColumn(onConnectServer, onSkip, onSignInWithGoogle, googleSignInInProgress, googleSignedInEmail, onSyncViaDispatcharr)
+    else WelcomeSingleColumn(onConnectServer, onSkip, onSignInWithGoogle, googleSignInInProgress, googleSignedInEmail, onSyncViaDispatcharr)
 }
 
 @Composable
@@ -97,6 +102,8 @@ private fun WelcomeSingleColumn(
     onSkip: () -> Unit,
     onSignInWithGoogle: (() -> Unit)?,
     googleSignInInProgress: Boolean,
+    googleSignedInEmail: String?,
+    onSyncViaDispatcharr: (() -> Unit)?,
 ) {
     Box(
         modifier = Modifier
@@ -125,8 +132,12 @@ private fun WelcomeSingleColumn(
             Spacer(Modifier.height(22.dp))
             SupportedTypesGroup(alignStart = false)
             Spacer(Modifier.height(22.dp))
-            SyncCard(inProgress = googleSignInInProgress, onClick = onSignInWithGoogle)
+            SyncCard(inProgress = googleSignInInProgress, signedInEmail = googleSignedInEmail, onClick = onSignInWithGoogle)
             if (onSignInWithGoogle != null) Spacer(Modifier.height(12.dp))
+            if (onSyncViaDispatcharr != null) {
+                DispatcharrSyncCard(onClick = onSyncViaDispatcharr)
+                Spacer(Modifier.height(12.dp))
+            }
             ConnectServerRow(onClick = onConnectServer)
             Spacer(Modifier.height(4.dp))
             SkipRow(onSkip = onSkip)
@@ -140,6 +151,8 @@ private fun WelcomeTwoColumn(
     onSkip: () -> Unit,
     onSignInWithGoogle: (() -> Unit)?,
     googleSignInInProgress: Boolean,
+    googleSignedInEmail: String?,
+    onSyncViaDispatcharr: (() -> Unit)?,
 ) {
     Box(
         modifier = Modifier
@@ -147,7 +160,7 @@ private fun WelcomeTwoColumn(
             .background(MaterialTheme.colorScheme.background),
     ) {
         WelcomeAmbientOrbs(modifier = Modifier.fillMaxSize())
-        WelcomeTwoColumnRow(onConnectServer, onSkip, onSignInWithGoogle, googleSignInInProgress)
+        WelcomeTwoColumnRow(onConnectServer, onSkip, onSignInWithGoogle, googleSignInInProgress, googleSignedInEmail, onSyncViaDispatcharr)
     }
 }
 
@@ -157,6 +170,8 @@ private fun WelcomeTwoColumnRow(
     onSkip: () -> Unit,
     onSignInWithGoogle: (() -> Unit)?,
     googleSignInInProgress: Boolean,
+    googleSignedInEmail: String?,
+    onSyncViaDispatcharr: (() -> Unit)?,
 ) {
     Row(
         modifier = Modifier
@@ -189,8 +204,12 @@ private fun WelcomeTwoColumnRow(
                 .verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.Center,
         ) {
-            SyncCard(inProgress = googleSignInInProgress, onClick = onSignInWithGoogle)
+            SyncCard(inProgress = googleSignInInProgress, signedInEmail = googleSignedInEmail, onClick = onSignInWithGoogle)
             if (onSignInWithGoogle != null) Spacer(Modifier.height(12.dp))
+            if (onSyncViaDispatcharr != null) {
+                DispatcharrSyncCard(onClick = onSyncViaDispatcharr)
+                Spacer(Modifier.height(12.dp))
+            }
             ConnectServerRow(onClick = onConnectServer)
             Spacer(Modifier.height(4.dp))
             SkipRow(onSkip = onSkip)
@@ -244,7 +263,7 @@ private fun SupportedTypesGroup(alignStart: Boolean = false) {
  * the build ships without an OAuth client id (onClick null).
  */
 @Composable
-private fun SyncCard(inProgress: Boolean, onClick: (() -> Unit)?) {
+private fun SyncCard(inProgress: Boolean, signedInEmail: String?, onClick: (() -> Unit)?) {
     if (onClick == null) return
     SourceTypeCard(
         modifier = Modifier
@@ -252,25 +271,47 @@ private fun SyncCard(inProgress: Boolean, onClick: (() -> Unit)?) {
             .clickable(enabled = !inProgress, onClick = onClick),
         icon = Icons.Filled.CloudOff,
         title = "Sync via Google Account",
-        subtitle = "Sign in to mirror playlists, watch progress, reminders, and preferences across your devices.",
+        subtitle = if (signedInEmail != null) "Signed in as $signedInEmail"
+        else "Sign in to mirror playlists, watch progress, reminders, and preferences across your devices.",
         trailing = {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(8.dp)
-                        .clip(CircleShape)
-                        .background(MaterialTheme.colorScheme.decorSecondary),
-                )
-                Text(
-                    text = if (inProgress) "..." else "Off",
+            when {
+                inProgress -> Text(
+                    text = "...",
                     style = MaterialTheme.typography.titleMedium,
                     fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.onBackground,
                 )
+                signedInEmail != null -> Icon(
+                    imageVector = Icons.Filled.CheckCircle,
+                    contentDescription = "Signed in",
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+                else -> Icon(
+                    imageVector = Icons.Filled.ChevronRight,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
+        },
+    )
+}
+
+/** Dispatcharr Sync entry: the Direct Connect form, then sync turns on by itself. */
+@Composable
+private fun DispatcharrSyncCard(onClick: () -> Unit) {
+    SourceTypeCard(
+        modifier = Modifier
+            .clip(RoundedCornerShape(16.dp))
+            .clickable(onClick = onClick),
+        icon = Icons.Filled.Key,
+        title = "Sync via Dispatcharr",
+        subtitle = "Connect your Dispatcharr server to keep favorites, progress, reminders, and preferences on it for every profile and device.",
+        trailing = {
+            Icon(
+                imageVector = Icons.Filled.ChevronRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         },
     )
 }

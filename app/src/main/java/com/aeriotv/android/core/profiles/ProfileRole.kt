@@ -14,15 +14,30 @@ enum class ProfileRole(val label: String, val wire: String) {
     Admin("Admin", "admin"), User("User", "user"), Child("Child", "child");
 
     companion object {
-        /** Default: a Dispatcharr Admin level is Admin, every other level User. */
-        fun defaultFor(userLevel: Int): ProfileRole =
-            if (ProfileLevel.of(userLevel) == ProfileLevel.Admin) Admin else User
+        /**
+         * Default role. The BASE profile (the login that added the playlist)
+         * is always Admin, whatever its Dispatcharr level, so two Standard
+         * users can share a device without a server admin. Other profiles:
+         * a Dispatcharr Admin level is Admin, every other level User.
+         */
+        fun defaultFor(userLevel: Int, isBase: Boolean = false): ProfileRole =
+            if (isBase || ProfileLevel.of(userLevel) == ProfileLevel.Admin) Admin else User
+
+        /**
+         * One-time promotion of an existing base profile: its stored role
+         * moves to Admin unless it is already Admin or deliberately Child.
+         * Returns the role to store, or null when nothing changes.
+         */
+        fun basePromotion(stored: ProfileRole?): ProfileRole? = when (stored) {
+            Admin, Child -> null
+            null, User -> Admin
+        }
 
         fun fromWire(s: String?): ProfileRole? = entries.firstOrNull { it.wire == s }
     }
 }
 
-fun DispatcharrProfile.effectiveRole(): ProfileRole = role ?: ProfileRole.defaultFor(userLevel)
+fun DispatcharrProfile.effectiveRole(): ProfileRole = role ?: ProfileRole.defaultFor(userLevel, isBase = isDefault)
 
 /** Pure role and PIN gating decisions, unit tested (no Android types). */
 object RoleRules {
@@ -33,6 +48,23 @@ object RoleRules {
     fun canManageProfiles(active: ProfileRole?): Boolean = active == null || active == ProfileRole.Admin
 
     fun canChangeRoles(active: ProfileRole?): Boolean = active == ProfileRole.Admin
+
+    /** How Add Profile picks a user: the server's list (admin key) or a typed username. */
+    enum class AddPath { ServerList, Manual }
+
+    /**
+     * The users list needs a server admin key; a non-admin base (or a 403
+     * from GET /api/accounts/users/) gets the manual username form instead.
+     */
+    fun addPath(baseIsServerAdmin: Boolean, usersListForbidden: Boolean): AddPath =
+        if (baseIsServerAdmin && !usersListForbidden) AddPath.ServerList else AddPath.Manual
+
+    /** Channel Profiles are assigned on the server: server admin only. */
+    fun canAssignChannelProfiles(baseIsServerAdmin: Boolean, activeIsServerAdmin: Boolean, active: ProfileRole?): Boolean =
+        baseIsServerAdmin && activeIsServerAdmin && active == ProfileRole.Admin
+
+    /** Dispatcharr Sync `profiles` key: written by the local Admin, server admin or not. */
+    fun canWriteProfilesKey(active: ProfileRole?): Boolean = active == ProfileRole.Admin
 
     /** Server-editing actions (Mark/Unmark as Radio Channel, Switch Stream, Manage Groups). */
     fun canEditServer(active: ProfileRole?): Boolean = active != ProfileRole.Child

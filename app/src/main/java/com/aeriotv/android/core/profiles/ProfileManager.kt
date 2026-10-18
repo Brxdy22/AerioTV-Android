@@ -506,7 +506,7 @@ class ProfileManager @Inject constructor(
         if (started) return
         started = true
         scope.launch {
-            runCatching { playlistDao.rawAll().forEach { ensureDefaultProfile(it) } }
+            runCatching { playlistDao.rawAll().forEach { ensureDefaultProfile(it); promoteBaseProfile(it.id) } }
                 .onFailure { Log.w(TAG, "[PROFILE] migration pass failed", it) }
             playlistDao.observeActive()
                 .map { it.firstOrNull()?.id }
@@ -527,6 +527,24 @@ class ProfileManager @Inject constructor(
             ProfileScope.activate(null)
         }
         refreshActiveRole(pid)
+    }
+
+    /**
+     * One-time: an existing base profile (the login that added the playlist)
+     * becomes local Admin whatever its Dispatcharr level. A Child base stays.
+     */
+    private fun promoteBaseProfile(playlistId: String) {
+        if (store.basePromoted(playlistId)) return
+        val base = store.forPlaylist(playlistId).firstOrNull { it.isDefault } ?: return
+        ProfileRole.basePromotion(base.role)?.let { to ->
+            val wasAdmin = base.role == null && ProfileLevel.of(base.userLevel) == ProfileLevel.Admin
+            store.update(base.id) { it.copy(role = to) }
+            if (!wasAdmin) {
+                Log.i(TAG, "[PROFILE] base profile promoted to local Admin (${base.username}, level ${ProfileLevel.of(base.userLevel).label})")
+                mutated(base.id, "role")
+            }
+        }
+        store.markBasePromoted(playlistId)
     }
 
     /** Every Dispatcharr playlist has exactly one default profile. Its state
@@ -551,6 +569,8 @@ class ProfileManager @Inject constructor(
                 username = username,
                 isDefault = true,
                 userLevel = row.dispatcharrUserLevel,
+                // The base login is always the local Admin.
+                role = ProfileRole.Admin,
                 createdAt = 0L,
             ),
         )
@@ -573,6 +593,71 @@ class ProfileManager @Inject constructor(
         return row.dispatcharrUserLevel >= 10 || row.dispatcharrIsSuperuser || row.dispatcharrIsStaff
     }
 
+    /** The BASE login (the playlist row's own credentials) is a server admin. */
+    suspend fun baseIsServerAdmin(playlistId: String): Boolean {
+        val row = playlistDao.rawById(playlistId) ?: return false
+        return row.dispatcharrUserLevel >= 10 || row.dispatcharrIsSuperuser || row.dispatcharrIsStaff
+    }
+
+    /** Result of [addCandidates]: the server's users, or the manual username form. */
+    sealed interface AddCandidates {
+        data class ServerList(val users: List<DispatcharrUserSummary>) : AddCandidates
+        data object Manual : AddCandidates
+    }
+
+    /**
+     * Add Profile entry: a server admin gets the users list (keyless adds);
+     * anyone else, or a 403 from GET /api/accounts/users/, gets the manual
+     * form (username, then password or API key, validated by signing in).
+     */
+    suspend fun addCandidates(playlistId: String): Result<AddCandidates> = runCatching {
+        check(RoleRules.canManageProfiles(activeRole(playlistId))) { "Only an Admin profile can add profiles." }
+        val serverAdmin = baseIsServerAdmin(playlistId) && activeIsAdmin(playlistId)
+        if (RoleRules.addPath(serverAdmin, usersListForbidden = false) == RoleRules.AddPath.Manual) {
+            return@runCatching AddCandidates.Manual
+        }
+        val listed = listServerUsers(playlistId)
+        val forbidden = listed.exceptionOrNull()?.message?.let { it.contains("HTTP 403") || it.contains("HTTP 401") } == true
+        when (RoleRules.addPath(serverAdmin, forbidden)) {
+            RoleRules.AddPath.Manual -> AddCandidates.Manual
+            RoleRules.AddPath.ServerList -> AddCandidates.ServerList(listed.getOrThrow())
+        }
+    }
+
+    /** Manual add (non-admin base): [username] signs in with [password] or [apiKey]. */
+    suspend fun addProfileManual(playlistId: String, username: String, password: String?, apiKey: String?): Result<DispatcharrProfile> {
+        val name = username.trim()
+        if (name.isEmpty()) return Result.failure(IllegalArgumentException("Enter a username."))
+        if (store.forPlaylist(playlistId).any { it.username.equals(name, ignoreCase = true) }) {
+            return Result.failure(IllegalStateException("$name already has a profile."))
+        }
+        return addProfile(playlistId, DispatcharrUserSummary(id = 0, username = name), password, apiKey)
+    }
+
+    /**
+     * Manual add by API key only: GET /api/accounts/users/me/ with [apiKey]
+     * names the user (username, level, id). A key for a user that already
+     * has a profile here is rejected.
+     */
+    suspend fun addProfileByApiKey(playlistId: String, apiKey: String): Result<DispatcharrProfile> {
+        val key = apiKey.trim()
+        if (key.isEmpty()) return Result.failure(IllegalArgumentException("Enter an API key."))
+        val me = runCatching {
+            val row = playlistDao.rawById(playlistId) ?: error("Playlist not found")
+            client.fetchMe(repository.effectiveBaseUrl(row), key)
+        }.getOrElse { return Result.failure(it) }
+            ?: return Result.failure(IllegalStateException("This API key was not accepted by the server."))
+        if (store.forPlaylist(playlistId).any { it.username.equals(me.username, ignoreCase = true) }) {
+            return Result.failure(IllegalStateException("${me.username} already has a profile."))
+        }
+        return addProfile(
+            playlistId,
+            DispatcharrUserSummary(id = me.id, username = me.username, userLevel = me.userLevel, isSuperuser = me.isSuperuser, isStaff = me.isStaff),
+            null,
+            key,
+        )
+    }
+
     /** Add Profile step 1: the server's users, fetched with the admin key. */
     suspend fun listServerUsers(playlistId: String): Result<List<DispatcharrUserSummary>> = runCatching {
         val row = playlistDao.byId(playlistId) ?: error("Playlist not found")
@@ -593,7 +678,9 @@ class ProfileManager @Inject constructor(
         password: String?,
         apiKey: String?,
     ): Result<DispatcharrProfile> = runCatching {
-        check(activeIsAdmin(playlistId)) { "Only an Admin profile can add profiles." }
+        // Local Admin role, not the server level: a profile is added by
+        // signing in as that user, which never changes the server.
+        check(syncAdding || RoleRules.canManageProfiles(activeRole(playlistId))) { "Only an Admin profile can add profiles." }
         val row = playlistDao.rawById(playlistId) ?: error("Playlist not found")
         val base = repository.effectiveBaseUrl(row)
         val id = UUID.randomUUID().toString()
@@ -660,7 +747,7 @@ class ProfileManager @Inject constructor(
         localUpdatedAt: (String) -> Long = { 0L },
         adopted: (String, Long) -> Unit = { _, _ -> },
     ): Int {
-        if (!activeIsAdmin(playlistId)) return 0
+        if (!RoleRules.canWriteProfilesKey(activeRole(playlistId))) return 0
         var added = 0
         rows.forEach { r ->
             var local = store.forPlaylist(playlistId).firstOrNull { it.username.equals(r.username, ignoreCase = true) }
@@ -728,7 +815,7 @@ class ProfileManager @Inject constructor(
     suspend fun remove(profileId: String): Result<Unit> = runCatching {
         val p = store.byId(profileId) ?: return@runCatching
         check(!p.isDefault) { "The default profile cannot be removed." }
-        check(activeIsAdmin(p.playlistId) && activeRole(p.playlistId) == ProfileRole.Admin) { "Only an Admin profile can remove profiles." }
+        check(activeRole(p.playlistId) == ProfileRole.Admin) { "Only an Admin profile can remove profiles." }
         if (RoleRules.removeNeedsAdminPin(p.effectiveRole())) {
             check(consumeAdminTicket(p.playlistId)) { "Enter an Admin PIN" }
         }

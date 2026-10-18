@@ -147,6 +147,10 @@ class ProfileStore @Inject constructor(
     fun askAtLaunch(playlistId: String): Boolean = prefs.getBoolean(KEY_ASK + playlistId, true)
     fun setAskAtLaunch(playlistId: String, on: Boolean) { prefs.edit().putBoolean(KEY_ASK + playlistId, on).commit() }
 
+    /** One-time base profile promotion to local Admin, per playlist. */
+    fun basePromoted(playlistId: String): Boolean = prefs.getBoolean(KEY_BASE_PROMOTED + playlistId, false)
+    fun markBasePromoted(playlistId: String) { prefs.edit().putBoolean(KEY_BASE_PROMOTED + playlistId, true).apply() }
+
     /** Last active playlist id, so onCreate can restore the scope synchronously. */
     var lastActivePlaylistId: String?
         get() = prefs.getString(KEY_LAST_PLAYLIST, null)
@@ -158,6 +162,7 @@ class ProfileStore @Inject constructor(
         const val KEY_ACTIVE = "active."
         const val KEY_LAST_PLAYLIST = "last_active_playlist"
         const val KEY_ASK = "ask_at_launch."
+        const val KEY_BASE_PROMOTED = "base_admin_promoted."
     }
 }
 

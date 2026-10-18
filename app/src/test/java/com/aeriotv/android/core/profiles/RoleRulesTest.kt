@@ -20,6 +20,41 @@ class RoleRulesTest {
         assertEquals(null, ProfileRole.fromWire("boss"))
     }
 
+    @Test fun baseProfileIsAlwaysAdmin() {
+        assertEquals(A, ProfileRole.defaultFor(1, isBase = true))
+        assertEquals(A, ProfileRole.defaultFor(0, isBase = true))
+        assertEquals(A, ProfileRole.defaultFor(10, isBase = true))
+        assertEquals(U, ProfileRole.defaultFor(1, isBase = false))
+        assertEquals(A, DispatcharrProfile("b", "p", "Base", "base", isDefault = true, userLevel = 1).effectiveRole())
+        assertEquals(U, DispatcharrProfile("o", "p", "Other", "other", isDefault = false, userLevel = 1).effectiveRole())
+        assertEquals(C, DispatcharrProfile("b", "p", "Base", "base", isDefault = true, userLevel = 1, role = C).effectiveRole())
+    }
+
+    @Test fun basePromotionKeepsAdminAndChild() {
+        assertEquals(A, ProfileRole.basePromotion(null))
+        assertEquals(A, ProfileRole.basePromotion(U))
+        assertEquals(null, ProfileRole.basePromotion(A))
+        assertEquals(null, ProfileRole.basePromotion(C))
+    }
+
+    @Test fun addPathSelection() {
+        assertEquals(RoleRules.AddPath.ServerList, RoleRules.addPath(baseIsServerAdmin = true, usersListForbidden = false))
+        assertEquals(RoleRules.AddPath.Manual, RoleRules.addPath(baseIsServerAdmin = true, usersListForbidden = true))
+        assertEquals(RoleRules.AddPath.Manual, RoleRules.addPath(baseIsServerAdmin = false, usersListForbidden = false))
+        assertEquals(RoleRules.AddPath.Manual, RoleRules.addPath(baseIsServerAdmin = false, usersListForbidden = true))
+    }
+
+    @Test fun channelProfilesNeedServerAdminAndProfilesKeyNeedsLocalAdmin() {
+        assertTrue(RoleRules.canAssignChannelProfiles(true, true, A))
+        assertFalse(RoleRules.canAssignChannelProfiles(false, true, A))
+        assertFalse(RoleRules.canAssignChannelProfiles(true, false, A))
+        assertFalse(RoleRules.canAssignChannelProfiles(true, true, U))
+        assertTrue(RoleRules.canWriteProfilesKey(A))
+        assertFalse(RoleRules.canWriteProfilesKey(U))
+        assertFalse(RoleRules.canWriteProfilesKey(C))
+        assertFalse(RoleRules.canWriteProfilesKey(null))
+    }
+
     @Test fun childSeesOnlyBasics() {
         assertFalse(RoleRules.canSeeSwitcher(C))
         assertTrue(RoleRules.canSeeSwitcher(U))

@@ -102,9 +102,19 @@ class ProfilesViewModel @Inject constructor(
 
     fun profiles(playlistId: String) = manager.profiles(playlistId)
     fun activeProfileId(playlistId: String) = manager.activeProfileId(playlistId)
-    /** Server Admin AND app-local Admin role: add, remove, roles, channel profiles. */
+    /** App-local Admin role: add and remove profiles (server level not needed). */
     suspend fun isAdmin(playlistId: String) =
-        manager.activeIsAdmin(playlistId) && manager.activeRole(playlistId) == com.aeriotv.android.core.profiles.ProfileRole.Admin
+        com.aeriotv.android.core.profiles.RoleRules.canManageProfiles(manager.activeRole(playlistId)) &&
+            manager.activeRole(playlistId) != null
+    /** Channel Profiles are assigned on the server: base and active must be server admins. */
+    suspend fun canAssignChannelProfiles(playlistId: String) =
+        com.aeriotv.android.core.profiles.RoleRules.canAssignChannelProfiles(
+            manager.baseIsServerAdmin(playlistId), manager.activeIsAdmin(playlistId), manager.activeRole(playlistId),
+        )
+    suspend fun addCandidates(playlistId: String) = manager.addCandidates(playlistId)
+    suspend fun addManual(playlistId: String, username: String, password: String?, apiKey: String?) =
+        if (apiKey != null) manager.addProfileByApiKey(playlistId, apiKey)
+        else manager.addProfileManual(playlistId, username, password, null)
     fun isRoleAdmin(playlistId: String) = manager.activeRole(playlistId) == com.aeriotv.android.core.profiles.ProfileRole.Admin
     val activeRole = com.aeriotv.android.core.profiles.ProfileRoles.active
 
@@ -390,7 +400,7 @@ private fun RoleBadge(profile: DispatcharrProfile) {
 }
 
 @Composable
-private fun LevelBadge(level: ProfileLevel) {
+internal fun LevelBadge(level: ProfileLevel) {
     Text(
         text = level.label,
         style = MaterialTheme.typography.labelSmall,
@@ -409,7 +419,11 @@ fun ProfilesSection(playlistId: String) {
     val profiles by vm.profiles(playlistId).collectAsStateWithLifecycle(initialValue = emptyList())
     val activeId by vm.activeProfileId(playlistId).collectAsStateWithLifecycle(initialValue = null)
     var isAdmin by remember { mutableStateOf(false) }
-    LaunchedEffect(playlistId, activeId) { isAdmin = vm.isAdmin(playlistId) }
+    var canChannelProfiles by remember { mutableStateOf(false) }
+    LaunchedEffect(playlistId, activeId) {
+        isAdmin = vm.isAdmin(playlistId)
+        canChannelProfiles = vm.canAssignChannelProfiles(playlistId)
+    }
     val isTv = rememberIsTvDevice()
     val role by vm.activeRole.collectAsStateWithLifecycle()
     // Phase 2b: a Child has no Profiles section (Manage Profiles at the
@@ -551,7 +565,7 @@ fun ProfilesSection(playlistId: String) {
                     if (vm.isRoleAdmin(playlistId)) {
                         ChoiceRow(label = "Role", onClick = { actionsFor = null; roleFor = p })
                     }
-                    if (isAdmin) {
+                    if (canChannelProfiles) {
                         ChoiceRow(label = "Channel Profiles", onClick = { actionsFor = null; channelProfilesFor = p })
                     }
                     if (isAdmin && !p.isDefault) {
@@ -793,8 +807,33 @@ private fun AddProfileDialog(playlistId: String, vm: ProfilesViewModel, onClose:
     var busy by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
     val firstUser = remember { androidx.compose.ui.focus.FocusRequester() }
+    var manual by remember { mutableStateOf(false) }
     LaunchedEffect(playlistId) {
-        vm.listUsers(playlistId).fold({ users = it }, { error = it.message ?: "Could not load users" })
+        vm.addCandidates(playlistId).fold(
+            { c ->
+                when (c) {
+                    com.aeriotv.android.core.profiles.ProfileManager.AddCandidates.Manual -> manual = true
+                    is com.aeriotv.android.core.profiles.ProfileManager.AddCandidates.ServerList -> users = c.users
+                }
+            },
+            { error = it.message ?: "Could not load users" },
+        )
+    }
+    if (manual) {
+        AlertDialog(
+            onDismissRequest = onClose,
+            title = { Text("Add Profile") },
+            text = {
+                com.aeriotv.android.feature.onboarding.components.ManualProfileForm(
+                    onAdd = { u, pw, key ->
+                        vm.addManual(playlistId, u, pw, key).fold({ onClose(); null }, { it.message ?: "Could not add profile" })
+                    },
+                )
+            },
+            confirmButton = {},
+            dismissButton = { SettingsDialogTextButton(label = "Cancel", onClick = onClose) },
+        )
+        return
     }
     LaunchedEffect(users?.isNotEmpty() == true) { if (users?.isNotEmpty() == true) focusFirst(firstUser) }
     AlertDialog(

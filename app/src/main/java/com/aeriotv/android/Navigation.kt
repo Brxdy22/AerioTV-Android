@@ -578,6 +578,7 @@ fun AerioTVNavHost(
                 val context = androidx.compose.ui.platform.LocalContext.current
                 val scope = androidx.compose.runtime.rememberCoroutineScope()
                 var googleSignInInFlight by remember { mutableStateOf(false) }
+                val welcomeGoogleEmail by syncVm.accountEmail.collectAsStateWithLifecycle(initialValue = "")
                 var welcomeNotConfiguredDialog by remember { mutableStateOf(false) }
                 // Sync-category chooser shown before the first Drive pull.
                 var welcomeSyncChooser by remember { mutableStateOf(false) }
@@ -791,7 +792,15 @@ fun AerioTVNavHost(
                         },
                     )
                 } else WelcomeScreen(
-                    onConnectServer = { navController.navigate(Routes.CHOOSE_TYPE) },
+                    onConnectServer = {
+                        vm.enableDispatcharrSyncAfterConnect = false
+                        navController.navigate(Routes.CHOOSE_TYPE)
+                    },
+                    onSyncViaDispatcharr = {
+                        vm.enableDispatcharrSyncAfterConnect = true
+                        vm.startNewSource(SourceType.DispatcharrUserPass)
+                        navController.navigate(Routes.configure(SourceType.DispatcharrUserPass))
+                    },
                     // "Skip for now" is iOS parity. With no playlist saved the channel
                     // list is empty; user can reach Settings -> Change playlist later.
                     // The flag stops MAIN's NeedsUrl guard from bouncing right back.
@@ -802,6 +811,7 @@ fun AerioTVNavHost(
                         }
                     },
                     googleSignInInProgress = googleSignInInFlight,
+                    googleSignedInEmail = welcomeGoogleEmail.takeIf { it.isNotBlank() },
                     onSignInWithGoogle = {
                         if (!syncBuildConfigured) {
                             welcomeNotConfiguredDialog = true
@@ -872,6 +882,7 @@ fun AerioTVNavHost(
                 ChooseSourceTypeScreen(
                     onBack = { navController.popBackStack() },
                     onChoose = { type ->
+                        vm.enableDispatcharrSyncAfterConnect = false
                         // Start a FRESH draft so the add creates a NEW row and
                         // never edits the active playlist (and so the form can't
                         // carry over the active server's API key).
@@ -897,6 +908,8 @@ fun AerioTVNavHost(
                 // Dispatcharr only: "Add profiles for other users?" step
                 // between a successful connect and the advance to MAIN.
                 var profileStepFor by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf<String?>(null) }
+                // Then "Turn on Dispatcharr Sync?" (Direct Connect only).
+                var syncStepFor by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf<String?>(null) }
                 LaunchedEffect(Unit) {
                     // Navigate on a one-shot "configured" EVENT, not on
                     // phase == ChannelsReady: when adding a second playlist the
@@ -920,7 +933,17 @@ fun AerioTVNavHost(
                         playlistId = stepPid,
                         onDone = {
                             if (profileStepFor == null) return@AddProfilesStepScreen
+                            syncStepFor = profileStepFor
                             profileStepFor = null
+                        },
+                    )
+                } else if (syncStepFor != null) {
+                    com.aeriotv.android.feature.onboarding.DispatcharrSyncStepScreen(
+                        autoEnable = vm.enableDispatcharrSyncAfterConnect,
+                        onDone = {
+                            if (syncStepFor == null) return@DispatcharrSyncStepScreen
+                            syncStepFor = null
+                            vm.enableDispatcharrSyncAfterConnect = false
                             navController.navigate(Routes.MAIN) {
                                 popUpTo(Routes.PLAYLIST_GRAPH) { inclusive = false }
                             }

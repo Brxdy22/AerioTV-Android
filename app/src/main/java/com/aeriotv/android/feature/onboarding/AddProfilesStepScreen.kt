@@ -7,6 +7,10 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.safeDrawing
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -59,8 +63,8 @@ import javax.inject.Inject
  * Dispatcharr-only add step, right after the server connection succeeds:
  * "Add profiles for other users?". Lists the server's users (admin list,
  * GET /api/accounts/users/) minus the connected login, which is already the
- * Admin/default profile. Non-admin logins (403, or a level below admin) get
- * an empty result and the step is skipped silently.
+ * Admin/default profile. A non-admin login (403, or a level below admin)
+ * gets manual add rows instead: username, then password or API key.
  */
 @HiltViewModel
 class AddProfilesStepViewModel @Inject constructor(
@@ -69,24 +73,34 @@ class AddProfilesStepViewModel @Inject constructor(
     private val repository: PlaylistRepository,
 ) : ViewModel() {
 
-    /** Users to offer, or empty when the step should be skipped. Never throws. */
-    suspend fun candidates(playlistId: String): List<DispatcharrUserSummary> = runCatching {
-        val row = repository.playlistById(playlistId) ?: return emptyList()
-        val key = row.apiKey?.takeIf { it.isNotBlank() } ?: return emptyList()
-        val base = repository.effectiveBaseUrl(row)
-        val all = client.listUsers(base, key)
-        val me = client.fetchMe(base, key)
-        val meName = me?.username ?: row.username
-        val meRow = all.firstOrNull { it.username.equals(meName, ignoreCase = true) }
-        val meIsAdmin = meRow == null ||
-            meRow.isSuperuser || meRow.isStaff || (meRow.userLevel ?: 0) >= 10
-        if (!meIsAdmin) return emptyList()
-        val listed = manager.listServerUsers(playlistId).getOrElse { return emptyList() }
-        listed.filterNot { meName != null && it.username.equals(meName, ignoreCase = true) }
+    sealed interface Step {
+        data class Pick(val users: List<DispatcharrUserSummary>) : Step
+        /** The base login is not a server admin (or the list answered 403). */
+        data object Manual : Step
+        data object Skip : Step
+    }
+
+    /** Which form to show, or Skip. Never throws. */
+    suspend fun candidates(playlistId: String): Step = runCatching {
+        when (val c = manager.addCandidates(playlistId).getOrThrow()) {
+            ProfileManager.AddCandidates.Manual -> Step.Manual
+            is ProfileManager.AddCandidates.ServerList -> {
+                val row = repository.playlistById(playlistId)
+                val key = row?.apiKey?.takeIf { it.isNotBlank() }
+                val meName = key?.let { runCatching { client.fetchMe(repository.effectiveBaseUrl(row), it)?.username }.getOrNull() }
+                    ?: row?.username
+                val listed = c.users.filterNot { meName != null && it.username.equals(meName, ignoreCase = true) }
+                if (listed.isEmpty()) Step.Skip else Step.Pick(listed)
+            }
+        }
     }.getOrElse {
         Log.i(TAG, "[PROFILE] onboarding step skipped: ${it.message}")
-        emptyList()
+        Step.Skip
     }
+
+    suspend fun addManual(playlistId: String, username: String, password: String?, apiKey: String?) =
+        if (apiKey != null) manager.addProfileByApiKey(playlistId, apiKey)
+        else manager.addProfileManual(playlistId, username, password, null)
 
     suspend fun add(playlistId: String, user: DispatcharrUserSummary, password: String?, apiKey: String?) =
         manager.addProfile(playlistId, user, password, apiKey)
@@ -108,9 +122,17 @@ fun AddProfilesStepScreen(
     val needsCredential = remember { mutableStateListOf<DispatcharrUserSummary>() }
     val scope = rememberCoroutineScope()
 
+    var manual by remember { mutableStateOf(false) }
     LaunchedEffect(playlistId) {
-        val list = vm.candidates(playlistId)
-        if (list.isEmpty()) onDone() else users = list
+        when (val step = vm.candidates(playlistId)) {
+            AddProfilesStepViewModel.Step.Skip -> onDone()
+            AddProfilesStepViewModel.Step.Manual -> manual = true
+            is AddProfilesStepViewModel.Step.Pick -> users = step.users
+        }
+    }
+    if (manual) {
+        ManualAddProfilesStep(playlistId, vm, onDone)
+        return
     }
 
     val list = users
@@ -122,17 +144,24 @@ fun AddProfilesStepScreen(
     }
 
     val vp = com.aeriotv.android.ui.adaptive.rememberViewport()
+    var query by remember { mutableStateOf("") }
+    val shown = remember(list, query) {
+        val q = query.trim()
+        if (q.isEmpty()) list else list.filter { it.username.contains(q, ignoreCase = true) }
+    }
+    // Insets like the other onboarding screens: the title clears the status
+    // bar. The user list scrolls; Add selected / Skip stay pinned below it.
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .verticalScroll(rememberScrollState())
+            .windowInsetsPadding(WindowInsets.safeDrawing)
             .padding(horizontal = vp.gutter, vertical = 24.dp),
         contentAlignment = Alignment.TopCenter,
     ) {
         Column(
-            modifier = if (vp.onboardingMaxWidth != androidx.compose.ui.unit.Dp.Unspecified)
+            modifier = (if (vp.onboardingMaxWidth != androidx.compose.ui.unit.Dp.Unspecified)
                 Modifier.widthIn(max = vp.onboardingMaxWidth).fillMaxWidth()
-            else Modifier.fillMaxWidth(),
+            else Modifier.fillMaxWidth()).fillMaxHeight(),
             verticalArrangement = Arrangement.spacedBy(12.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
@@ -149,30 +178,53 @@ fun AddProfilesStepScreen(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
             )
-            Spacer(Modifier.height(4.dp))
-            list.forEach { user ->
-                val checked = user.id in selected
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clip(RoundedCornerShape(12.dp))
-                        .dpadFocusRing(RoundedCornerShape(12.dp), washTint = MaterialTheme.colorScheme.primary)
-                        .toggleable(
-                            value = checked,
-                            enabled = !busy,
-                            role = Role.Checkbox,
-                            onValueChange = { on -> if (on) selected.add(user.id) else selected.remove(user.id) },
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                singleLine = true,
+                placeholder = { Text("Search users") },
+                modifier = Modifier.fillMaxWidth().dpadFocusRing(RoundedCornerShape(4.dp)),
+            )
+            Column(
+                modifier = Modifier.weight(1f).fillMaxWidth().verticalScroll(rememberScrollState()),
+            ) {
+                shown.forEach { user ->
+                    val checked = user.id in selected
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .dpadFocusRing(RoundedCornerShape(12.dp), washTint = MaterialTheme.colorScheme.primary)
+                            .toggleable(
+                                value = checked,
+                                enabled = !busy,
+                                role = Role.Checkbox,
+                                onValueChange = { on -> if (on) selected.add(user.id) else selected.remove(user.id) },
+                            )
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Checkbox(checked = checked, onCheckedChange = null)
+                        Spacer(Modifier.size(12.dp))
+                        Text(user.username, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                        com.aeriotv.android.feature.settings.LevelBadge(
+                            com.aeriotv.android.core.profiles.ProfileLevel.of(
+                                if (user.isSuperuser || user.isStaff) 10 else user.userLevel ?: 0,
+                            ),
                         )
-                        .padding(horizontal = 12.dp, vertical = 10.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Checkbox(checked = checked, onCheckedChange = null)
-                    Spacer(Modifier.size(12.dp))
-                    Text(user.username, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                    }
+                }
+                if (shown.isEmpty()) {
+                    Text(
+                        "No users match.",
+                        style = MaterialTheme.typography.bodyMedium.subtext(),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 12.dp),
+                        textAlign = TextAlign.Center,
+                    )
                 }
             }
             error?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
-            Spacer(Modifier.height(8.dp))
             Button(
                 onClick = {
                     busy = true; error = null
@@ -276,4 +328,62 @@ private fun CredentialDialog(
         },
         dismissButton = { TextButton(onClick = onCancel) { Text("Cancel") } },
     )
+}
+
+/** Non-admin base: type each user's name and sign in as them once. */
+@Composable
+private fun ManualAddProfilesStep(playlistId: String, vm: AddProfilesStepViewModel, onDone: () -> Unit) {
+    val added = remember { mutableStateListOf<String>() }
+    val vp = com.aeriotv.android.ui.adaptive.rememberViewport()
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .windowInsetsPadding(WindowInsets.safeDrawing)
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = vp.gutter, vertical = 24.dp),
+        contentAlignment = Alignment.TopCenter,
+    ) {
+        Column(
+            modifier = if (vp.onboardingMaxWidth != androidx.compose.ui.unit.Dp.Unspecified)
+                Modifier.widthIn(max = vp.onboardingMaxWidth).fillMaxWidth()
+            else Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text(
+                "Add profiles for other users?",
+                style = MaterialTheme.typography.titleLarge,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onBackground,
+                textAlign = TextAlign.Center,
+            )
+            Text(
+                "Add the Dispatcharr users who also watch on this device.",
+                style = MaterialTheme.typography.bodyMedium.subtext(),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+            )
+            added.forEach { name ->
+                Text("Added $name", style = MaterialTheme.typography.titleMedium, modifier = Modifier.fillMaxWidth())
+            }
+            com.aeriotv.android.feature.onboarding.components.ManualProfileForm(
+                onAdd = { u, pw, key ->
+                    vm.addManual(playlistId, u, pw, key).fold(
+                        { added += it.username; null },
+                        { it.message ?: "Could not add profile" },
+                    )
+                },
+            )
+            OutlinedButton(
+                onClick = onDone,
+                modifier = Modifier.fillMaxWidth().heightIn(min = 54.dp).dpadFocusRing(RoundedCornerShape(50)),
+            ) { Text(if (added.isEmpty()) "Skip" else "Done", style = MaterialTheme.typography.titleMedium) }
+            Text(
+                "You can add or remove profiles later in Settings > Playlists.",
+                style = MaterialTheme.typography.bodySmall.subtext(),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+            )
+        }
+    }
 }

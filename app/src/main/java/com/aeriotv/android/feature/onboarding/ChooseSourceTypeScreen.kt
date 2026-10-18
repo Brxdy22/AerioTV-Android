@@ -5,7 +5,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.runtime.remember
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -137,11 +139,14 @@ fun ChooseSourceTypeScreen(
 
                 Spacer(Modifier.height(4.dp))
 
-                // Dispatcharr Direct Connect is the headline: one large
-                // primary card. Xtream Codes and M3U + EPG sit behind a
-                // single secondary "Other playlist types" button.
-                DirectConnectHeroCard(
-                    onClick = { onChoose(SourceType.DispatcharrUserPass) },
+                // Dispatcharr Direct Connect leads the list in the same
+                // unselected card style as Xtream Codes and M3U + EPG; the
+                // accent style appears only while pressed or focused.
+                SourceTypeCard(
+                    icon = Icons.Filled.Key,
+                    title = "Dispatcharr Direct Connect",
+                    subtitle = "Connect to your Dispatcharr server. Profiles, DVR, catch-up, and server sync.",
+                    modifier = Modifier.tappable { onChoose(SourceType.DispatcharrUserPass) },
                 )
                 Text(
                     text = "*AerioTV is not officially affiliated with the Dispatcharr project",
@@ -181,54 +186,24 @@ fun ChooseSourceTypeScreen(
 }
 
 @Composable
-private fun DirectConnectHeroCard(onClick: () -> Unit) {
-    val shape = RoundedCornerShape(20.dp)
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(shape)
-            .dpadFocusRing(shape, washTint = MaterialTheme.colorScheme.primary)
-            .clickable(onClick = onClick)
-            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.16f))
-            .border(1.5.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.55f), shape)
-            .padding(horizontal = 20.dp, vertical = 24.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        Box(
-            modifier = Modifier
-                .size(56.dp)
-                .clip(RoundedCornerShape(14.dp))
-                .background(MaterialTheme.colorScheme.primary),
-            contentAlignment = Alignment.Center,
-        ) {
-            Icon(
-                imageVector = Icons.Filled.Key,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onPrimary,
-                modifier = Modifier.size(30.dp),
-            )
-        }
-        Text(
-            text = "Dispatcharr Direct Connect",
-            style = MaterialTheme.typography.headlineSmall,
-            fontWeight = FontWeight.Bold,
-            color = MaterialTheme.colorScheme.onBackground,
-            textAlign = TextAlign.Center,
-        )
-        Text(
-            text = "Connect to your Dispatcharr server. Profiles, DVR, catch-up, and server sync.",
-            style = MaterialTheme.typography.bodyMedium.subtext(),
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center,
-        )
-    }
-}
-
-@Composable
-private fun Modifier.tappable(onClick: () -> Unit): Modifier =
+private fun Modifier.tappable(onClick: () -> Unit): Modifier {
     // Clip to the SourceTypeCard rounded shape BEFORE the clickable so the D-pad
     // focus indication follows the rounded corners, not a squared rectangle.
-    this.clip(RoundedCornerShape(16.dp))
-        .dpadFocusRing(RoundedCornerShape(16.dp), washTint = MaterialTheme.colorScheme.primary)
-        .clickable(onClick = onClick)
+    // Touch press shows the same accent wash + ring the TV focus ring uses.
+    val shape = RoundedCornerShape(16.dp)
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val accent = MaterialTheme.colorScheme.primary
+    return this.clip(shape)
+        .dpadFocusRing(shape, washTint = accent)
+        .then(
+            if (pressed) {
+                Modifier
+                    .background(accent.copy(alpha = 0.16f), shape)
+                    .border(1.5.dp, accent, shape)
+            } else {
+                Modifier
+            },
+        )
+        .clickable(interactionSource = interaction, indication = null, onClick = onClick)
+}

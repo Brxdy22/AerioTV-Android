@@ -172,6 +172,9 @@ class PlaylistViewModel @Inject constructor(
      */
     var onboardingSkipped: Boolean = false
 
+    /** Set by the Welcome "Sync via Dispatcharr" card: turn Dispatcharr Sync on after the connect, no question. */
+    var enableDispatcharrSyncAfterConnect: Boolean = false
+
     data class ActiveRoute(val isLan: Boolean, val url: String)
 
     companion object {

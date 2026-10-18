@@ -640,7 +640,7 @@ fun EditPlaylistScreen(
                             SettingsPickerOption(
                                 value = days,
                                 label = when (days) {
-                                    0 -> "All Available"
+                                    0 -> "All"
                                     1 -> "1 Day"
                                     7 -> "7 Days (Default)"
                                     else -> "$days Days"
