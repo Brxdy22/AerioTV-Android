@@ -1966,6 +1966,8 @@ class DispatcharrClient @Inject constructor() {
                 if (idx >= 0) base + n.substring(idx) else n
             }
         }
+        // Dispatcharr Sync keys episodes by the integer id: remember each uuid/id pair.
+        runCatching { com.aeriotv.android.core.sync.dsync.VodIdSink.onEpisodes?.invoke(all.map { it.uuid to it.id }) }
         VODEpisodesPage(count = maxOf(count, all.size), next = null, results = all)
     }
 

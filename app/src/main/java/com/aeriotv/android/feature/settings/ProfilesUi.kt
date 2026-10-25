@@ -162,6 +162,10 @@ class ProfilesViewModel @Inject constructor(
     fun hasPin(profileId: String) = manager.hasPin(profileId)
     fun hasSwitchTicket(profileId: String) = manager.hasSwitchTicket(profileId)
     fun pinType(profileId: String) = manager.pinType(profileId)
+    fun pinLength(profileId: String) = manager.pinLength(profileId)
+    /** Known only when every Admin PIN holder's length is known and equal. */
+    fun adminPinLength(playlistId: String): Int? =
+        manager.adminPinHolders(playlistId).map { manager.pinLength(it.id) }.distinct().singleOrNull()
     fun verifyPin(profileId: String, entries: List<String>) = manager.verifyPin(profileId, entries)
     fun pinLockSeconds(profileId: String) = manager.pinLockSeconds(profileId)
     fun adminPinLockSeconds(playlistId: String) =
@@ -279,6 +283,7 @@ internal fun SwitchPinDialog(p: DispatcharrProfile, vm: ProfilesViewModel, onDis
     PinEntryDialog(
         title = "Enter PIN for ${p.displayName}",
         type = vm.pinType(p.id) ?: com.aeriotv.android.core.profiles.PinType.Numbers,
+        pinLength = vm.pinLength(p.id),
         onDismiss = onDismiss,
         onEntered = { seq ->
             val r = vm.verifyPin(p.id, seq)
@@ -672,6 +677,7 @@ fun AdminPinDialog(playlistId: String, vm: ProfilesViewModel, title: String, onD
     PinEntryDialog(
         title = title,
         type = vm.adminPinType(playlistId) ?: com.aeriotv.android.core.profiles.PinType.Numbers,
+        pinLength = vm.adminPinLength(playlistId),
         onDismiss = onDismiss,
         onEntered = { seq ->
             val r = vm.verifyAnyAdminPin(playlistId, seq)
@@ -781,6 +787,7 @@ private fun ResetPinFlow(playlistId: String, p: DispatcharrProfile, vm: Profiles
             PinEntryDialog(
                 title = "Enter your PIN to reset the PIN for ${p.displayName}",
                 type = vm.pinType(admin.id) ?: com.aeriotv.android.core.profiles.PinType.Numbers,
+                pinLength = vm.pinLength(admin.id),
                 onDismiss = { onClose(null) },
                 onEntered = { seq ->
                     val r = vm.verifyPin(admin.id, seq)

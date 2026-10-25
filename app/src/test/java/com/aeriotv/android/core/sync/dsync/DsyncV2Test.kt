@@ -27,7 +27,7 @@ class DsyncV2Test {
     }
 
     @Test fun v3EncodeDecodeEveryCategory() {
-        val p = ProgressRow("8812", "e", 1834, 2640, now, false, "301", 2, 5, "The Pilot")
+        val p = ProgressRow(8812, "e", 1834, 2640, now, false, 301, 2, 5, "The Pilot")
         val value = DsyncV2.encodeBucket(
             null, dev, "0.5.13", now,
             mapOf(
@@ -99,8 +99,8 @@ class DsyncV2Test {
             ),
             DsyncV2.TRIMS.map { it.label },
         )
-        val progress = (1..300).map { ProgressRow("v$it", "m", 1, 1, now - it, false, null, 0, 0, "t") }
-        val marks = (1..500).map { VodMarkRow("m$it", "m", now - it) }
+        val progress = (1..300).map { ProgressRow(it, "m", 1, 1, now - it, false, null, 0, 0, "t") }
+        val marks = (1..500).map { VodMarkRow(it, "m", now - it) }
         var value = DsyncV2.encodeBucket(
             null, dev, "0.5.13", now,
             mapOf(
@@ -116,14 +116,14 @@ class DsyncV2Test {
         value = DsyncV2.applyTrim(value, 0)!!
         val p = DsyncPayloads.decodeProgress(cat(ok(value), DsyncKey.Progress).data)!!
         assertEquals(200, p.size)
-        assertEquals("v1", p.first().vodId)
+        assertEquals(1, p.first().vodId)
         assertEquals(50, DsyncPayloads.decodeRecents(cat(ok(value), DsyncKey.Recents).data)!!.size)
         for (i in 1 until DsyncV2.TRIMS.size) value = DsyncV2.applyTrim(value, i)!!
         val b = ok(value)
         assertEquals(100, DsyncPayloads.decodeProgress(cat(b, DsyncKey.Progress).data)!!.size)
         assertEquals(25, DsyncPayloads.decodeRecents(cat(b, DsyncKey.Recents).data)!!.size)
         assertEquals(150, DsyncPayloads.decodeVodMarks(cat(b, DsyncKey.Watchlist).data)!!.size)
-        assertEquals("m1", DsyncPayloads.decodeVodMarks(cat(b, DsyncKey.Watchlist).data)!!.first().vodId)
+        assertEquals(1, DsyncPayloads.decodeVodMarks(cat(b, DsyncKey.Watchlist).data)!!.first().vodId)
         assertEquals(150, DsyncPayloads.decodeVodMarks(cat(b, DsyncKey.HiddenTitles).data)!!.size)
         assertEquals((1..500).toList(), DsyncPayloads.decodeFavorites(cat(b, DsyncKey.Favorites).data))
         assertTrue(DsyncEnvelopeCodec.byteSize(value) < before)
@@ -132,5 +132,27 @@ class DsyncV2Test {
         val empty = DsyncV2.encodeBucket(null, dev, "0.5.13", now, emptyMap())
         assertNull(DsyncV2.applyTrim(empty, 0))
         assertTrue(JsonArray(emptyList()).isEmpty())
+    }
+}
+
+class VodIntIdTest {
+    /** The catalog's movie payload starts with the integer id, which movieUuidsByIds reads. */
+    @Test fun moviePayloadStartsWithIntegerId() {
+        val m = com.aeriotv.android.core.network.DispatcharrVODMovie(id = 4242, uuid = "0b7e2c1a-uuid")
+        val payload = Json { ignoreUnknownKeys = true }.encodeToString(com.aeriotv.android.core.network.DispatcharrVODMovie.serializer(), m)
+        assertTrue(payload, payload.startsWith("{\"id\":4242,"))
+        assertEquals("4242", Regex("^\\{\"id\":(\\d+)").find(payload.take(24))!!.groupValues[1])
+    }
+
+    /** Rows carry integers for vodId and seriesId; movie and episode ids never collide in the merge. */
+    @Test fun integerIdsRoundTripAndTypeSeparatesMovieAndEpisode() {
+        val e = ProgressRow(77, "e", 10, 20, 300, false, 12, 1, 2, "Ep")
+        val m = ProgressRow(77, "m", 5, 20, 200, false, null, 0, 0, "Movie")
+        val d = DsyncPayloads.encodeProgress(null, listOf(e, m), 400)
+        assertEquals("""{"rows":[[77,"e",10,20,300,0,12,1,2,"Ep"],[77,"m",5,20,200,0,null,0,0,"Movie"]]}""", d.toString())
+        assertEquals(2, DsyncMerge.progress(listOf(e), listOf(m)).size)
+        assertEquals(listOf(VodMarkRow(5531, "m", 9)), DsyncPayloads.decodeVodMarks(Json.parseToJsonElement("""{"rows":[[5531,"m",9]]}""").jsonObject))
+        // A uuid string where an int belongs is malformed.
+        assertNull(DsyncPayloads.decodeVodMarks(Json.parseToJsonElement("""{"rows":[["5531","m",9]]}""").jsonObject))
     }
 }

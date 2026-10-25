@@ -342,6 +342,7 @@ class ProfileManager @Inject constructor(
 
     fun hasPin(profileId: String): Boolean = pinStore.hasPin(profileId)
     fun pinType(profileId: String): PinType? = pinStore.type(profileId)
+    fun pinLength(profileId: String): Int? = pinStore.length(profileId)
     fun pinLockSeconds(profileId: String): Int = pinStore.backoff(profileId).remainingSeconds(System.currentTimeMillis())
 
     /** Check [entries] against [profileId]'s PIN, with the wrong-PIN backoff. */

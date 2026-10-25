@@ -89,6 +89,7 @@ class DispatcharrSyncManager @Inject constructor(
     private val profileStore: ProfileStore,
     private val pinStore: ProfilePinStore,
     private val profileManager: Provider<ProfileManager>,
+    private val vodIds: VodIdResolver,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val state = context.getSharedPreferences("aerio_dsync", Context.MODE_PRIVATE)
@@ -976,16 +977,21 @@ class DispatcharrSyncManager @Inject constructor(
             }
         }
         DsyncKey.Progress -> {
+            val c = conn(s) ?: return null
             val local = watchProgressDao.allOnce()
                 .filter { (it.playlistId == null || it.playlistId == s.playlistId) && !it.videoId.contains("://") }
                 .filter { it.vodType == "movie" || it.vodType == "episode" }
-                .map { p ->
+                .mapNotNull { p ->
                     val ep = p.vodType == "episode"
+                    val sid = p.seriesId?.toIntOrNull()
+                    // Rows carry the server's integer ids; a row that cannot be resolved stays local.
+                    val id = if (ep) vodIds.episodeId(c.base, c.apiKey, p.videoId, sid) else vodIds.movieId(c.row, p.videoId)
+                    if (id == null) { unresolvedOnce(s, "progress", p.videoId); return@mapNotNull null }
                     ProgressRow(
-                        vodId = p.videoId, type = if (ep) "e" else "m",
+                        vodId = id, type = if (ep) "e" else "m",
                         position = p.positionMs / 1000, duration = p.durationMs / 1000,
                         updatedAt = p.updatedAt / 1000, finished = p.isFinished,
-                        seriesId = if (ep) p.seriesId else null,
+                        seriesId = if (ep) sid else null,
                         season = if (ep) p.seasonNumber else 0, episode = if (ep) p.episodeNumber else 0,
                         title = p.title,
                     )
@@ -1011,24 +1017,18 @@ class DispatcharrSyncManager @Inject constructor(
         DsyncKey.Watchlist -> {
             val host = scopeHost(s)
             val local = watchlistStore.allOnce().filter { it.isLive && (it.playlistId == host || it.playlistId == null) }
-                .mapNotNull { e ->
-                    val t = when { e.key.startsWith("m:") -> "m"; e.key.startsWith("s:") -> "s"; else -> null } ?: return@mapNotNull null
-                    VodMarkRow(e.key.substring(2), t, e.addedAt / 1000)
-                }
+                .mapNotNull { e -> markRow(s, "watchlist", e.key, e.addedAt / 1000) }
             val remote = base?.let(DsyncPayloads::decodeVodMarks).orEmpty()
             val rows = DsyncPayloads.carryTails(local, remote, { it.type to it.vodId }, { it.tail }) { r, t -> r.copy(tail = t) }
-            DsyncPayloads.encodeVodMarks(base, rows, DsyncLimits.WATCHLIST)
+            DsyncPayloads.encodeVodMarks(base, rows + unknownMovieRows(s, remote, rows), DsyncLimits.WATCHLIST)
         }
         DsyncKey.HiddenTitles -> {
             val host = scopeHost(s)
             val local = hiddenTitlesStore.allOnce().filter { it.isLive && (it.playlistId == host || it.playlistId == null) }
-                .mapNotNull { e ->
-                    val t = when { e.key.startsWith("m:") -> "m"; e.key.startsWith("s:") -> "s"; else -> null } ?: return@mapNotNull null
-                    VodMarkRow(e.key.substring(2), t, e.hiddenAt / 1000)
-                }
+                .mapNotNull { e -> markRow(s, "hiddenTitles", e.key, e.hiddenAt / 1000) }
             val remote = base?.let(DsyncPayloads::decodeVodMarks).orEmpty()
             val rows = DsyncPayloads.carryTails(local, remote, { it.type to it.vodId }, { it.tail }) { r, t -> r.copy(tail = t) }
-            DsyncPayloads.encodeVodMarks(base, rows, DsyncLimits.HIDDEN_TITLES)
+            DsyncPayloads.encodeVodMarks(base, rows + unknownMovieRows(s, remote, rows), DsyncLimits.HIDDEN_TITLES)
         }
         DsyncKey.HiddenGroups -> DsyncPayloads.encodeHiddenGroups(
             base,
@@ -1071,6 +1071,35 @@ class DispatcharrSyncManager @Inject constructor(
             }
         }
         DsyncKey.Profiles -> buildProfiles(s, base)
+    }
+
+    /** A local "m:<uuid>" / "s:<id>" key as a row with the integer id, or null (kept local, logged once). */
+    private suspend fun markRow(s: Session, what: String, key: String, at: Long): VodMarkRow? {
+        val c = conn(s) ?: return null
+        return when {
+            key.startsWith("s:") -> key.substring(2).toIntOrNull()?.let { VodMarkRow(it, "s", at) }
+            key.startsWith("m:") -> vodIds.movieId(c.row, key.substring(2))?.let { VodMarkRow(it, "m", at) }
+                ?: run { unresolvedOnce(s, what, key); null }
+            else -> null
+        }
+    }
+
+    /** Server movie rows this device cannot map (not in its catalog) are kept, never dropped. */
+    private suspend fun unknownMovieRows(s: Session, remote: List<VodMarkRow>, ours: List<VodMarkRow>): List<VodMarkRow> {
+        val c = conn(s) ?: return emptyList()
+        val have = ours.map { it.type to it.vodId }.toSet()
+        val movies = remote.filter { it.type == "m" && ("m" to it.vodId) !in have }
+        if (movies.isEmpty()) return emptyList()
+        val known = vodIds.movieUuids(c.row, movies.map { it.vodId }.toSet())
+        return movies.filter { it.vodId !in known }
+    }
+
+    private val unresolvedLogged = java.util.concurrent.ConcurrentHashMap.newKeySet<String>()
+
+    private fun unresolvedOnce(s: Session, what: String, localId: String) {
+        if (unresolvedLogged.add("${s.profileKey}|$what|$localId")) {
+            Log.i(TAG, "[DSYNC] $what: no server id for a local row yet; kept on this device only")
+        }
     }
 
     private suspend fun adminUsers(s: Session): List<DispatcharrUserSummary> {
@@ -1124,6 +1153,19 @@ class DispatcharrSyncManager @Inject constructor(
     // ---- apply (data -> local), section 6.1 full replace ----
 
     private enum class ApplyResult { Applied, Malformed, NotReady, Failed }
+
+    /** Pulled rows with integer ids as local "m:<uuid>" / "s:<id>" keys; rows with no local movie are skipped. */
+    private suspend fun localMarkKeys(s: Session, rows: List<VodMarkRow>): List<Pair<String, VodMarkRow>> {
+        val c = conn(s) ?: return emptyList()
+        val uuids = vodIds.movieUuids(c.row, rows.filter { it.type == "m" }.map { it.vodId }.toSet())
+        return rows.mapNotNull { r ->
+            when (r.type) {
+                "s" -> "s:${r.vodId}" to r
+                "m" -> uuids[r.vodId]?.let { "m:$it" to r }
+                else -> null
+            }
+        }
+    }
 
     /**
      * A newer server value for a key with an unsent local change: the row
@@ -1210,13 +1252,17 @@ class DispatcharrSyncManager @Inject constructor(
             }
             DsyncKey.Progress -> {
                 val rows = DsyncPayloads.decodeProgress(d) ?: return ApplyResult.Malformed
+                val c = conn(s) ?: return ApplyResult.Failed
+                val movieUuids = vodIds.movieUuids(c.row, rows.filter { it.type == "m" }.map { it.vodId }.toSet())
                 rows.forEach { r ->
-                    if (r.vodId.contains("://")) return@forEach
-                    val local = watchProgressDao.getOnce(r.vodId)
+                    // Integer id back to the local uuid; a row this device cannot map is skipped.
+                    val uuid = if (r.type == "e") vodIds.episodeUuid(c.base, c.apiKey, r.vodId, r.seriesId) else movieUuids[r.vodId]
+                    if (uuid == null) { unresolvedOnce(s, "progress in", "${r.type}${r.vodId}"); return@forEach }
+                    val local = watchProgressDao.getOnce(uuid)
                     if (local != null && r.updatedAt * 1000 <= local.updatedAt) return@forEach
                     val ep = r.type == "e"
                     val baseRow = local ?: WatchProgressEntity(
-                        videoId = r.vodId, title = r.title, posterUrl = null,
+                        videoId = uuid, title = r.title, posterUrl = null,
                         positionMs = 0, durationMs = 0, updatedAt = 0, playlistId = s.playlistId,
                     )
                     watchProgressDao.upsert(
@@ -1226,7 +1272,7 @@ class DispatcharrSyncManager @Inject constructor(
                             durationMs = if (r.duration > 0) r.duration * 1000 else baseRow.durationMs,
                             updatedAt = r.updatedAt * 1000,
                             vodType = if (ep) "episode" else "movie",
-                            seriesId = r.seriesId ?: baseRow.seriesId,
+                            seriesId = r.seriesId?.toString() ?: baseRow.seriesId,
                             seasonNumber = if (r.season > 0) r.season else baseRow.seasonNumber,
                             episodeNumber = if (r.episode > 0) r.episode else baseRow.episodeNumber,
                             isFinished = r.finished,
@@ -1243,22 +1289,24 @@ class DispatcharrSyncManager @Inject constructor(
             DsyncKey.Watchlist -> {
                 val rows = DsyncPayloads.decodeVodMarks(d) ?: return ApplyResult.Malformed
                 val host = scopeHost(s)
+                val keyed = localMarkKeys(s, rows)
+                // Local rows that have no server id yet are kept as they are.
+                val keepLocal = watchlistStore.allOnce()
+                    .filter { it.isLive && it.playlistId == host && it.key.startsWith("m:") && markRow(s, "watchlist", it.key, 0) == null }
                 watchlistStore.replaceScope(
                     host,
-                    rows.filter { it.type == "m" || it.type == "s" }.map { r ->
-                        WatchlistStore.Entry(
-                            key = "${r.type}:${r.vodId}", title = "", isMovie = r.type == "m",
-                            playlistId = host, addedAt = r.at * 1000,
-                        )
-                    },
+                    keyed.map { (key, r) ->
+                        WatchlistStore.Entry(key = key, title = "", isMovie = r.type == "m", playlistId = host, addedAt = r.at * 1000)
+                    } + keepLocal,
                 )
             }
             DsyncKey.HiddenTitles -> {
                 val rows = DsyncPayloads.decodeVodMarks(d) ?: return ApplyResult.Malformed
-                hiddenTitlesStore.replaceScope(
-                    scopeHost(s),
-                    rows.filter { it.type == "m" || it.type == "s" }.associate { "${it.type}:${it.vodId}" to it.at * 1000 },
-                )
+                val host = scopeHost(s)
+                val keepLocal = hiddenTitlesStore.allOnce()
+                    .filter { it.isLive && it.playlistId == host && it.key.startsWith("m:") && markRow(s, "hiddenTitles", it.key, 0) == null }
+                    .associate { it.key to it.hiddenAt }
+                hiddenTitlesStore.replaceScope(host, localMarkKeys(s, rows).associate { (key, r) -> key to r.at * 1000 } + keepLocal)
             }
             DsyncKey.HiddenGroups -> {
                 val g = DsyncPayloads.decodeHiddenGroups(d) ?: return ApplyResult.Malformed

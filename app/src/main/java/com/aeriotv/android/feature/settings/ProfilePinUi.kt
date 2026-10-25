@@ -98,7 +98,14 @@ fun PinEntryDialog(
     lockSeconds: (() -> Int)? = null,
     /** Start focus on Clear instead of "1" (a step that follows another pad). */
     focusClear: Boolean = false,
+    /** Entering an existing PIN: its stored length (null = unknown, 6 dots). */
+    pinLength: Int? = null,
+    /** Setting a new PIN: 4 dots that grow to 6 as digits are typed. */
+    setting: Boolean = false,
 ) {
+    val fixed = pinLength?.coerceIn(PinRules.MIN_LENGTH, PinRules.MAX_LENGTH)
+    val minLen = fixed ?: PinRules.MIN_LENGTH
+    val maxLen = fixed ?: PinRules.MAX_LENGTH
     val isTv = rememberIsTvDevice()
     val entries = remember { mutableStateListOf<String>() }
     // A key press that started on the previous dialog (OK on Enter PIN)
@@ -110,7 +117,7 @@ fun PinEntryDialog(
 
     fun submit() {
         if (!ready()) return
-        if (entries.size < PinRules.MIN_LENGTH) return
+        if (entries.size < minLen) return
         val msg = onEntered(entries.toList())
         entries.clear()
         error = msg
@@ -130,7 +137,7 @@ fun PinEntryDialog(
     }
     fun add(v: String) {
         if (!ready()) return
-        if (entries.size < PinRules.MAX_LENGTH) { entries.add(v); error = null }
+        if (entries.size < maxLen) { entries.add(v); error = null }
     }
     fun back(): Boolean {
         if (entries.isNotEmpty()) { entries.clear(); return true }
@@ -202,7 +209,14 @@ fun PinEntryDialog(
                     verticalArrangement = Arrangement.spacedBy(14.dp),
                 ) {
                     Text(title, style = MaterialTheme.typography.titleMedium, textAlign = TextAlign.Center)
-                    PinDots(filled = entries.size)
+                    PinDots(
+                        filled = entries.size,
+                        count = when {
+                            fixed != null -> fixed
+                            setting -> entries.size.coerceIn(PinRules.MIN_LENGTH, PinRules.MAX_LENGTH)
+                            else -> PinRules.MAX_LENGTH
+                        },
+                    )
                     Text(
                         error.orEmpty(),
                         color = MaterialTheme.colorScheme.error,
@@ -214,7 +228,7 @@ fun PinEntryDialog(
                             onDigit = { add(it) },
                             onClear = { if (ready()) entries.clear() },
                             onOk = { submit() },
-                            okEnabled = entries.size >= PinRules.MIN_LENGTH,
+                            okEnabled = entries.size >= minLen,
                             firstFocus = rootFocus,
                             focusClear = focusClear,
                         )
@@ -238,7 +252,7 @@ fun PinEntryDialog(
                             onDirection = { add(it.name) },
                             onClear = { if (ready()) entries.clear() },
                             onOk = { submit() },
-                            okEnabled = entries.size >= PinRules.MIN_LENGTH,
+                            okEnabled = entries.size >= minLen,
                             firstFocus = rootFocus,
                             focusClear = focusClear,
                         )
@@ -254,9 +268,9 @@ fun PinEntryDialog(
 }
 
 @Composable
-private fun PinDots(filled: Int) {
+private fun PinDots(filled: Int, count: Int) {
     Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        repeat(PinRules.MAX_LENGTH) { i ->
+        repeat(count) { i ->
             val on = i < filled
             Box(
                 Modifier
@@ -390,6 +404,7 @@ fun SetPinFlow(
         nc && current == null -> PinEntryDialog(
             title = "Enter PIN",
             type = vm.pinType(profile.id) ?: PinType.Numbers,
+            pinLength = vm.pinLength(profile.id),
             onDismiss = { onClose(null) },
             onEntered = { seq ->
                 val r = vm.verifyPin(profile.id, seq)
@@ -416,11 +431,13 @@ fun SetPinFlow(
             onDismiss = { onClose(null) },
             initialError = mismatch,
             focusClear = true,
+            setting = true,
             onEntered = { seq -> first = seq; mismatch = null; null },
         )
         else -> PinEntryDialog(
             title = "Confirm PIN",
             type = type!!,
+            pinLength = first!!.size,
             focusClear = true,
             onDismiss = { onClose(null) },
             onEntered = { seq ->
@@ -468,6 +485,7 @@ fun RemovePinFlow(
     PinEntryDialog(
         title = "Remove PIN",
         type = vm.pinType(profile.id) ?: PinType.Numbers,
+        pinLength = vm.pinLength(profile.id),
         onDismiss = { onClose(null) },
         onEntered = { seq ->
             val r = vm.verifyPin(profile.id, seq)
@@ -590,6 +608,7 @@ fun ProfileLaunchGate(manager: ProfileManager) {
     PinEntryDialog(
         title = "Enter PIN for ${p.displayName}",
         type = manager.pinType(p.id) ?: PinType.Numbers,
+        pinLength = manager.pinLength(p.id),
         onDismiss = null,
         onEntered = { seq -> pinCheckMessage(manager.unlockLaunchGate(seq)) },
         lockSeconds = { manager.pinLockSeconds(p.id) },

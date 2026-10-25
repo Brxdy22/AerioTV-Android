@@ -169,7 +169,19 @@ class ProfilePinStore @Inject constructor(
         val cur = record(profileId)
         if (cur != null && cur.type == type && cur.hash == hash && cur.salt == salt) return
         write(profileId, type, hash, salt)
+        // A synced PIN's length is unknown here until the next correct entry.
+        prefs.edit().remove(KEY_LEN + profileId).apply()
         _changes.value++
+    }
+
+    /** Stored PIN length (dots to show on entry); null = unknown (older record). */
+    fun length(profileId: String): Int? {
+        if (record(profileId) == null) return null
+        return prefs.getInt(KEY_LEN + profileId, 0).takeIf { it in PinRules.MIN_LENGTH..PinRules.MAX_LENGTH }
+    }
+
+    private fun saveLength(profileId: String, n: Int) {
+        if (prefs.getInt(KEY_LEN + profileId, 0) != n) prefs.edit().putInt(KEY_LEN + profileId, n).apply()
     }
 
     /** False when [entries] is not a valid PIN of [type]. */
@@ -177,26 +189,31 @@ class ProfilePinStore @Inject constructor(
         val n = PinRules.normalize(type, entries) ?: return false
         val salt = freshSalt()
         write(profileId, type, PinRules.hashV2(salt, n), salt)
-        prefs.edit().remove(KEY_BACKOFF + profileId).apply()
+        prefs.edit().remove(KEY_BACKOFF + profileId).putInt(KEY_LEN + profileId, n.length).apply()
         _changes.value++
         return true
     }
 
     fun remove(profileId: String) {
         if (record(profileId) == null && prefs.getString(KEY_BACKOFF + profileId, null) == null) return
-        prefs.edit().remove(KEY_PIN + profileId).remove(KEY_BACKOFF + profileId).apply()
+        prefs.edit().remove(KEY_PIN + profileId).remove(KEY_BACKOFF + profileId).remove(KEY_LEN + profileId).apply()
         _changes.value++
     }
 
     fun check(profileId: String, entries: List<String>): Boolean {
         val r = record(profileId) ?: return true
         val n = PinRules.normalize(r.type, entries) ?: return false
-        if (r.salt != null) return PinRules.matches(PinRules.hashV2(r.salt, n), r.hash)
+        if (r.salt != null) {
+            val ok = PinRules.matches(PinRules.hashV2(r.salt, n), r.hash)
+            if (ok) saveLength(profileId, n.length)
+            return ok
+        }
         val ok = PinRules.matches(PinRules.hash(deviceSalt(), profileId, r.type, n), r.hash)
         if (ok) {
             // One-time migration to the synced v2 form.
             val salt = freshSalt()
             write(profileId, r.type, PinRules.hashV2(salt, n), salt)
+            saveLength(profileId, n.length)
             _changes.value++
         }
         return ok
@@ -212,5 +229,6 @@ class ProfilePinStore @Inject constructor(
         const val KEY_SALT = "pin.salt"
         const val KEY_PIN = "pin.rec."
         const val KEY_BACKOFF = "pin.backoff."
+        const val KEY_LEN = "pin.len."
     }
 }

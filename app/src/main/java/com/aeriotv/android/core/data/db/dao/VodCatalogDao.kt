@@ -49,6 +49,10 @@ interface VodCatalogDao {
     @Query("SELECT * FROM vod_title WHERE playlistKey = :playlistKey AND kind = :kind AND itemKey = :itemKey LIMIT 1")
     suspend fun byItemKey(playlistKey: String, kind: String, itemKey: String): VodTitleEntity?
 
+    /** Dispatcharr Sync: item key plus the start of the payload, which begins `{"id":<int>,`. */
+    @Query("SELECT itemKey, substr(payload, 1, 24) AS head FROM vod_title WHERE playlistKey = :playlistKey AND kind = :kind")
+    suspend fun itemHeads(playlistKey: String, kind: String): List<VodItemHead>
+
     @Query("SELECT * FROM vod_title WHERE playlistKey = :playlistKey AND kind = :kind AND tmdbId IN (:tmdbIds)")
     suspend fun byTmdbIds(playlistKey: String, kind: String, tmdbIds: List<String>): List<VodTitleEntity>
 
@@ -133,3 +137,6 @@ interface VodCatalogDao {
 
 /** Projection for [VodCatalogDao.artPage]. */
 data class VodArtRow(val id: Long, val artKey: String, val title: String)
+
+/** Item key and the first bytes of its payload (Dispatcharr Sync id lookup). */
+data class VodItemHead(val itemKey: String, val head: String)

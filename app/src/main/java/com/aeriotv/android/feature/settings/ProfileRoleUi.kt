@@ -294,6 +294,7 @@ fun TvLaunchProfilePicker(manager: ProfileManager) {
         PinEntryDialog(
             title = "Enter PIN for ${p.displayName}",
             type = manager.pinType(p.id) ?: PinType.Numbers,
+            pinLength = manager.pinLength(p.id),
             onDismiss = { pinFor = null },
             onEntered = { seq ->
                 val r = manager.verifyPin(p.id, seq)

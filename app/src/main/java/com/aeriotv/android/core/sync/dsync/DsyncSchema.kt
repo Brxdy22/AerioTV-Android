@@ -193,13 +193,15 @@ private fun JsonArray.plusTail(t: Tail): JsonArray = if (t.extra.isEmpty()) this
 data class RecentRow(val channelId: Int, val watchedAt: Long, val tail: Tail = Tail())
 
 data class ProgressRow(
-    val vodId: String,
+    /** Dispatcharr integer primary key of the movie or episode. */
+    val vodId: Int,
     val type: String,
     val position: Long,
     val duration: Long,
     val updatedAt: Long,
     val finished: Boolean,
-    val seriesId: String?,
+    /** Dispatcharr integer series id; null for movies. */
+    val seriesId: Int?,
     val season: Int,
     val episode: Int,
     val title: String,
@@ -216,7 +218,7 @@ data class ReminderRow(
 )
 
 /** watchlist and hiddenTitles: `[vodId, "m"|"s", at]`. */
-data class VodMarkRow(val vodId: String, val type: String, val at: Long, val tail: Tail = Tail())
+data class VodMarkRow(val vodId: Int, val type: String, val at: Long, val tail: Tail = Tail())
 
 data class CollectionRow(
     val id: String,
@@ -281,13 +283,13 @@ object DsyncPayloads {
     fun decodeProgress(data: JsonObject): List<ProgressRow>? = rows(data)?.map { el ->
         val r = el as? JsonArray ?: return null
         ProgressRow(
-            vodId = r.getOrNull(0).asStr() ?: return null,
+            vodId = r.getOrNull(0).asInt() ?: return null,
             type = r.getOrNull(1).asStr() ?: return null,
             position = r.getOrNull(2).asLong() ?: return null,
             duration = r.getOrNull(3).asLong() ?: 0L,
             updatedAt = r.getOrNull(4).asLong() ?: return null,
             finished = (r.getOrNull(5).asInt() ?: 0) == 1,
-            seriesId = r.getOrNull(6).asStr(),
+            seriesId = r.getOrNull(6).asInt(),
             season = r.getOrNull(7).asInt() ?: 0,
             episode = r.getOrNull(8).asInt() ?: 0,
             title = r.getOrNull(9).asStr() ?: "",
@@ -306,7 +308,7 @@ object DsyncPayloads {
         base.with("rows" to JsonArray(capProgress(rows, now).map { progressRowJson(it) }))
     /** Finished rows older than 30 days go first, then the 300 newest by updatedAt stay. */
     fun capProgress(rows: List<ProgressRow>, now: Long, cap: Int = DsyncLimits.PROGRESS): List<ProgressRow> =
-        rows.groupBy { it.vodId }.map { (_, v) -> v.maxBy { it.updatedAt } }
+        rows.groupBy { it.type to it.vodId }.map { (_, v) -> v.maxBy { it.updatedAt } }
             .filterNot { it.finished && now - it.updatedAt > DsyncLimits.FINISHED_MAX_AGE_S }
             .sortedByDescending { it.updatedAt }.take(cap)
 
@@ -339,7 +341,7 @@ object DsyncPayloads {
     // watchlist / hiddenTitles
     fun decodeVodMarks(data: JsonObject): List<VodMarkRow>? = rows(data)?.map { el ->
         val r = el as? JsonArray ?: return null
-        VodMarkRow(r.getOrNull(0).asStr() ?: return null, r.getOrNull(1).asStr() ?: return null, r.getOrNull(2).asLong() ?: 0L, tailOf(r, 3))
+        VodMarkRow(r.getOrNull(0).asInt() ?: return null, r.getOrNull(1).asStr() ?: return null, r.getOrNull(2).asLong() ?: 0L, tailOf(r, 3))
     }
     fun encodeVodMarks(base: JsonObject?, rows: List<VodMarkRow>, cap: Int): JsonObject =
         base.with("rows" to JsonArray(capVodMarks(rows, cap).map {
@@ -476,11 +478,11 @@ object DsyncPayloads {
 /** Section 6.1 exception: row merge for progress and recents before writing. */
 object DsyncMerge {
     fun progress(local: List<ProgressRow>, remote: List<ProgressRow>): List<ProgressRow> {
-        val out = LinkedHashMap<String, ProgressRow>()
+        val out = LinkedHashMap<Pair<String, Int>, ProgressRow>()
         (remote + local).forEach { r ->
-            val cur = out[r.vodId]
+            val cur = out[r.type to r.vodId]
             if (cur == null || r.updatedAt >= cur.updatedAt) {
-                out[r.vodId] = if (cur != null && r.tail.extra.isEmpty()) r.copy(tail = cur.tail) else r
+                out[r.type to r.vodId] = if (cur != null && r.tail.extra.isEmpty()) r.copy(tail = cur.tail) else r
             }
         }
         return out.values.sortedByDescending { it.updatedAt }

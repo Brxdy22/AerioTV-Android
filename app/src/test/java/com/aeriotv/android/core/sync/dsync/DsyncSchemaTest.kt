@@ -57,11 +57,11 @@ class DsyncSchemaTest {
     }
 
     @Test fun progressRoundTrip() {
-        val p = ProgressRow("8812", "e", 1834, 2640, 1760724245, false, "301", 2, 5, "The Pilot")
-        val m = ProgressRow("5531", "m", 10, 0, 1760720000, true, null, 0, 0, "Movie")
+        val p = ProgressRow(8812, "e", 1834, 2640, 1760724245, false, 301, 2, 5, "The Pilot")
+        val m = ProgressRow(5531, "m", 10, 0, 1760720000, true, null, 0, 0, "Movie")
         val d = roundTrip(DsyncKey.Progress, DsyncPayloads.encodeProgress(null, listOf(m, p), now))
         assertEquals(
-            """{"rows":[["8812","e",1834,2640,1760724245,0,"301",2,5,"The Pilot"],["5531","m",10,0,1760720000,1,null,0,0,"Movie"]]}""",
+            """{"rows":[[8812,"e",1834,2640,1760724245,0,301,2,5,"The Pilot"],[5531,"m",10,0,1760720000,1,null,0,0,"Movie"]]}""",
             d.toString(),
         )
         assertEquals(listOf(p, m), DsyncPayloads.decodeProgress(d))
@@ -74,9 +74,9 @@ class DsyncSchemaTest {
     }
 
     @Test fun watchlistAndHiddenTitlesRoundTrip() {
-        val rows = listOf(VodMarkRow("5531", "m", 1760700000), VodMarkRow("301", "s", 1760600000))
+        val rows = listOf(VodMarkRow(5531, "m", 1760700000), VodMarkRow(301, "s", 1760600000))
         val w = roundTrip(DsyncKey.Watchlist, DsyncPayloads.encodeVodMarks(null, rows, DsyncLimits.WATCHLIST))
-        assertEquals("""{"rows":[["5531","m",1760700000],["301","s",1760600000]]}""", w.toString())
+        assertEquals("""{"rows":[[5531,"m",1760700000],[301,"s",1760600000]]}""", w.toString())
         assertEquals(rows, DsyncPayloads.decodeVodMarks(w))
         val h = roundTrip(DsyncKey.HiddenTitles, DsyncPayloads.encodeVodMarks(null, rows.take(1), DsyncLimits.HIDDEN_TITLES))
         assertEquals(rows.take(1), DsyncPayloads.decodeVodMarks(h))
@@ -131,10 +131,10 @@ class DsyncSchemaTest {
     }
 
     @Test fun trailingPositionsAndUnknownMembersRoundTrip() {
-        val remote = obj("""{"rows":[["8812","e",1,2,100,0,"301",2,5,"T","newField",9]],"extraMember":{"a":1}}""")
+        val remote = obj("""{"rows":[[8812,"e",1,2,100,0,301,2,5,"T","newField",9]],"extraMember":{"a":1}}""")
         val pulled = DsyncPayloads.decodeProgress(remote)!!
         assertEquals(listOf(JsonPrimitive("newField"), JsonPrimitive(9)), pulled[0].tail.extra)
-        val local = listOf(ProgressRow("8812", "e", 50, 2, 200, false, "301", 2, 5, "T"))
+        val local = listOf(ProgressRow(8812, "e", 50, 2, 200, false, 301, 2, 5, "T"))
         val built = DsyncPayloads.encodeProgress(remote, DsyncMerge.progress(local, pulled), 200)
         val row = built["rows"]!!.jsonArray[0].jsonArray
         assertEquals(12, row.size)
@@ -171,12 +171,12 @@ class DsyncSchemaTest {
     }
 
     @Test fun progressRowMergeKeepsNewerPerId() {
-        val local = listOf(ProgressRow("1", "m", 10, 0, 200, false, null, 0, 0, "A"), ProgressRow("2", "m", 5, 0, 100, false, null, 0, 0, "B"))
-        val remote = listOf(ProgressRow("1", "m", 99, 0, 150, false, null, 0, 0, "A"), ProgressRow("2", "m", 77, 0, 300, false, null, 0, 0, "B"), ProgressRow("3", "m", 1, 0, 50, false, null, 0, 0, "C"))
+        val local = listOf(ProgressRow(1, "m", 10, 0, 200, false, null, 0, 0, "A"), ProgressRow(2, "m", 5, 0, 100, false, null, 0, 0, "B"))
+        val remote = listOf(ProgressRow(1, "m", 99, 0, 150, false, null, 0, 0, "A"), ProgressRow(2, "m", 77, 0, 300, false, null, 0, 0, "B"), ProgressRow(3, "m", 1, 0, 50, false, null, 0, 0, "C"))
         val m = DsyncMerge.progress(local, remote)
-        assertEquals(listOf("2", "1", "3"), m.map { it.vodId })
-        assertEquals(10L, m.first { it.vodId == "1" }.position)
-        assertEquals(77L, m.first { it.vodId == "2" }.position)
+        assertEquals(listOf(2, 1, 3), m.map { it.vodId })
+        assertEquals(10L, m.first { it.vodId == 1 }.position)
+        assertEquals(77L, m.first { it.vodId == 2 }.position)
     }
 
     @Test fun recentsRowMergeKeepsNewerPerId() {
@@ -188,15 +188,15 @@ class DsyncSchemaTest {
         val many = (1..60).map { RecentRow(it, it.toLong()) }
         assertEquals(50, DsyncPayloads.capRecents(many).size)
         assertEquals(60, DsyncPayloads.capRecents(many).first().channelId)
-        val old = ProgressRow("old", "m", 1, 1, now - 31L * 24 * 3600, true, null, 0, 0, "x")
-        val keep = ProgressRow("new", "m", 1, 1, now - 1, true, null, 0, 0, "x")
-        assertEquals(listOf("new"), DsyncPayloads.capProgress(listOf(old, keep), now).map { it.vodId })
+        val old = ProgressRow(1, "m", 1, 1, now - 31L * 24 * 3600, true, null, 0, 0, "x")
+        val keep = ProgressRow(2, "m", 1, 1, now - 1, true, null, 0, 0, "x")
+        assertEquals(listOf(2), DsyncPayloads.capProgress(listOf(old, keep), now).map { it.vodId })
         val past = ReminderRow(1, now - 7200, now - 3600, "t", "c")
         assertTrue(DsyncPayloads.capReminders(listOf(past), now).isEmpty())
         assertEquals(1000, DsyncPayloads.decodeFavorites(DsyncPayloads.encodeFavorites(null, (1..1200).toList()))!!.size)
         assertEquals("ab", truncateUtf8("abc", 2))
         assertEquals("a", truncateUtf8("aé", 2)) // e-acute is 2 bytes
-        val p = ProgressRow("1", "m", 1, 1, 1, false, null, 0, 0, "x".repeat(80))
+        val p = ProgressRow(1, "m", 1, 1, 1, false, null, 0, 0, "x".repeat(80))
         assertEquals(40, (DsyncPayloads.progressRowJson(p)[9] as JsonPrimitive).content.length)
     }
 
@@ -204,7 +204,7 @@ class DsyncSchemaTest {
         DsyncPayloads.encodeProgress(
             null,
             (1..n).map { i ->
-                ProgressRow("0b7e2c1a-uuid-movie-${"%06d".format(i)}", "e", 100L + i, 2640, now - i, i % finishedEvery == 0, "1a2b3c4d-series-${"%06d".format(i)}", 1, i % 20, "T".repeat(40))
+                ProgressRow(1_000_000 + i, "e", 100L + i, 2640, now - i, i % finishedEvery == 0, 2_000_000 + i, 1, i % 20, "T".repeat(40), Tail(listOf(JsonPrimitive("x".repeat(40)))))
             },
             now,
         )

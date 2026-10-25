@@ -329,6 +329,22 @@ class VodCatalogStore @Inject constructor(
         dao.byItemKey(playlistKey, KIND_MOVIE, uuid)?.let(::decodeMovie)
     }
 
+    /**
+     * Dispatcharr Sync: movie uuid for each Dispatcharr integer movie id in
+     * [ids]. Reads only the item key and the payload head (`{"id":N,`), so it
+     * stays cheap on a 100k-title catalog.
+     */
+    suspend fun movieUuidsByIds(playlistKey: String, ids: Set<Int>): Map<Int, String> = withContext(Dispatchers.IO) {
+        if (ids.isEmpty()) return@withContext emptyMap()
+        val out = HashMap<Int, String>()
+        for (h in dao.itemHeads(playlistKey, KIND_MOVIE)) {
+            val id = MOVIE_ID_HEAD.find(h.head)?.groupValues?.get(1)?.toIntOrNull() ?: continue
+            if (id in ids) out[id] = h.itemKey
+            if (out.size == ids.size) break
+        }
+        out
+    }
+
     suspend fun series(playlistKey: String, id: Int): DispatcharrVODSeries? = withContext(Dispatchers.IO) {
         dao.byItemKey(playlistKey, KIND_SERIES, id.toString())?.let(::decodeSeries)
     }
@@ -531,6 +547,7 @@ class VodCatalogStore @Inject constructor(
     companion object {
         const val TAG = "VodCatalogStore"
         const val KIND_MOVIE = "m"
+        private val MOVIE_ID_HEAD = Regex("^\\{\"id\":(\\d+)")
         const val KIND_SERIES = "s"
         /** SQLite's host-parameter limit on API 26 is 999. */
         const val MAX_BIND = 900
