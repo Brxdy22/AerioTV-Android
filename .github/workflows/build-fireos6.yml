@@ -1,41 +1,95 @@
-name: Build AerioTV for Fire OS 6 (experimental)
+name: AerioTV Fire OS 6 - Build upstream updates
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: '23 10 * * 1'  # Mondays at 10:23 UTC (GitHub may delay scheduled jobs)
 
 permissions:
-  contents: read
+  contents: write  # Required only to publish your custom APK as a GitHub Release
 
 jobs:
-  build-fireos6:
-    runs-on: ubuntu-latest
-    timeout-minutes: 50
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
     steps:
-      - name: Check out AerioTV source
-        uses: actions/checkout@v4
+      - name: Check latest official AerioTV release
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          upstream_tag=$(gh api repos/jonzey231/AerioTV-Android/releases/latest --jq '.tag_name')
+          if [[ ! "$upstream_tag" =~ ^v[0-9][A-Za-z0-9._-]*$ ]]; then
+            echo "Unexpected upstream release tag: $upstream_tag" >&2
+            exit 1
+          fi
+          local_tag="fireos6-${upstream_tag}"
+          echo "upstream_tag=$upstream_tag" >> "$GITHUB_OUTPUT"
+          echo "local_tag=$local_tag" >> "$GITHUB_OUTPUT"
+          if gh release view "$local_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "already_built=true" >> "$GITHUB_OUTPUT"
+            echo "The custom Fire OS 6 build for $upstream_tag already exists. Nothing to do."
+          else
+            echo "already_built=false" >> "$GITHUB_OUTPUT"
+            echo "Will build Fire OS 6 APK for $upstream_tag."
+          fi
 
-      - name: Set up Java
+      - name: Check out the upstream stable release
+        if: steps.version.outputs.already_built == 'false'
+        uses: actions/checkout@v4
+        with:
+          repository: jonzey231/AerioTV-Android
+          ref: ${{ steps.version.outputs.upstream_tag }}
+          path: upstream
+          persist-credentials: false
+
+      - name: Set up Java 21
+        if: steps.version.outputs.already_built == 'false'
         uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '21'
 
       - name: Set up Android SDK
+        if: steps.version.outputs.already_built == 'false'
         uses: android-actions/setup-android@v4
         with:
           packages: platform-tools
 
-      - name: Install SDK 36 build tools
-        run: |
-          sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'platform-tools'
+      - name: Install required Android SDK packages
+        if: steps.version.outputs.already_built == 'false'
+        shell: bash
+        run: sdkmanager 'platforms;android-36' 'build-tools;36.0.0' 'platform-tools'
 
-      - name: Patch minimum OS and desugar Java APIs for Android 7.1
+      - name: Restore permanent debug signing key from Actions secret
+        if: steps.version.outputs.already_built == 'false'
+        env:
+          SIGNING_KEY_BASE64: ${{ secrets.FIREOS6_DEBUG_KEYSTORE_B64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "$SIGNING_KEY_BASE64" ]; then
+            echo 'Missing repository secret FIREOS6_DEBUG_KEYSTORE_B64. See README.' >&2
+            exit 1
+          fi
+          mkdir -p "$HOME/.android"
+          printf '%s' "$SIGNING_KEY_BASE64" | base64 --decode > "$HOME/.android/debug.keystore"
+          chmod 600 "$HOME/.android/debug.keystore"
+          keytool -list -keystore "$HOME/.android/debug.keystore" -storepass android -alias androiddebugkey >/dev/null
+          echo 'Restored the same signing certificate for this and subsequent builds.'
+
+      - name: Patch Android 7.1 compatibility and update version code
+        if: steps.version.outputs.already_built == 'false'
         shell: bash
         run: |
           python3 - <<'PY'
+          import re
+          import time
           from pathlib import Path
 
-          path = Path('app/build.gradle.kts')
+          path = Path('upstream/app/build.gradle.kts')
           source = path.read_text(encoding='utf-8')
           substitutions = [
               ('minSdk = 26', 'minSdk = 25'),
@@ -47,45 +101,76 @@ jobs:
           for old, new in substitutions:
               count = source.count(old)
               if count != 1:
-                  raise SystemExit(f'Unexpected source layout: expected one {old!r}, found {count}. Stop rather than patching wrong code.')
+                  raise SystemExit(f'Upstream Gradle layout changed: expected exactly one {old!r}, found {count}. Review instead of guessing.')
               source = source.replace(old, new, 1)
+
+          # Changes on every build; larger than the upstream app's normal versionCode.
+          # Keeps future APK updates in increasing order without changing package ID.
+          version_code = int(time.time() // 60)
+          version_pattern = r'(?m)^(\s*versionCode\s*=\s*)\d+'
+          if len(re.findall(version_pattern, source)) != 1:
+              raise SystemExit('Upstream versionCode layout changed; stopping.')
+          source = re.sub(version_pattern, lambda m: m.group(1) + str(version_code), source, count=1)
           path.write_text(source, encoding='utf-8')
-          print('Patched minSdk=25, core-library desugaring enabled, added desugar_jdk_libs.')
+          print(f'Patched Android 7.1 (API 25), java.time support, versionCode={version_code}.')
           PY
 
       - name: Set up Gradle cache
+        if: steps.version.outputs.already_built == 'false'
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Build debug APK (no in-app updates)
+      - name: Build Fire OS 6-compatible PlayDebug APK
+        if: steps.version.outputs.already_built == 'false'
+        working-directory: upstream
         shell: bash
         run: |
-          set -o pipefail
+          set -euo pipefail
           chmod +x ./gradlew
-          ./gradlew :app:assemblePlayDebug --no-daemon --stacktrace --console=plain 2>&1 | tee fireos6-build.log
+          ./gradlew :app:assemblePlayDebug --no-daemon --stacktrace --console=plain 2>&1 | tee ../fireos6-build.log
 
-      - name: Verify APK is compatible with API 25 at manifest level
+      - name: Verify the APK and prepare distribution asset
+        if: steps.version.outputs.already_built == 'false'
         shell: bash
         run: |
-          apk=$(find app/build/outputs/apk/play/debug -maxdepth 1 -name '*.apk' -print -quit)
-          test -n "$apk" || { echo 'No APK found'; exit 1; }
-          echo "APK: $apk"
+          set -euo pipefail
+          apk=$(find upstream/app/build/outputs/apk/play/debug -maxdepth 1 -name '*.apk' -print -quit)
+          test -n "$apk" || { echo 'No APK was generated' >&2; exit 1; }
           aapt="$ANDROID_HOME/build-tools/36.0.0/aapt"
-          "$aapt" dump badging "$apk" | grep -E "^(package:|sdkVersion:|targetSdkVersion:|native-code:)" | tee fireos6-apk-info.txt
-          "$aapt" dump badging "$apk" | grep -q "sdkVersion:'25'" || { echo 'APK did not report API 25 as minimum'; exit 1; }
+          "$aapt" dump badging "$apk" | grep -E "^(package:|sdkVersion:|targetSdkVersion:)" | tee fireos6-apk-info.txt
+          "$aapt" dump badging "$apk" | grep -q "sdkVersion:'25'" || { echo 'APK minimum SDK is not 25' >&2; exit 1; }
+          "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs "$apk" | grep -E '^Signer #1 certificate SHA-256 digest:'
+          mkdir -p out
+          cp "$apk" out/AerioTV-FireOS6.apk
 
-      - name: Upload Fire OS 6 APK
+      - name: Upload APK to the successful workflow run
+        if: steps.version.outputs.already_built == 'false'
         uses: actions/upload-artifact@v4
         with:
-          name: AerioTV-FireOS6-API25-UNTESTED
+          name: AerioTV-FireOS6-${{ steps.version.outputs.upstream_tag }}
           path: |
-            app/build/outputs/apk/play/debug/*.apk
+            out/AerioTV-FireOS6.apk
             fireos6-apk-info.txt
           if-no-files-found: error
 
-      - name: Upload build log if a step fails
+      - name: Publish a custom GitHub release
+        if: steps.version.outputs.already_built == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_TAG: ${{ steps.version.outputs.upstream_tag }}
+          LOCAL_TAG: ${{ steps.version.outputs.local_tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "$LOCAL_TAG" 'out/AerioTV-FireOS6.apk#AerioTV-FireOS6.apk' \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "AerioTV $UPSTREAM_TAG for Fire OS 6 (experimental)" \
+            --notes "Source: https://github.com/jonzey231/AerioTV-Android/tree/$UPSTREAM_TAG. Rebuilt for Android 7.1 / API 25, with Java time desugaring. Signed with the private key configured in this fork's Actions secrets. Review and test on Fire OS 6 before installing. The app does not silently self-update." \
+            --prerelease
+
+      - name: Upload build log on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: AerioTV-FireOS6-Build-Log
+          name: AerioTV-FireOS6-Failed-Build-Log
           path: fireos6-build.log
           if-no-files-found: ignore
