@@ -129,6 +129,21 @@ class AppSettleGate @Inject constructor() {
      * guide that is not coming.
      */
     suspend fun awaitGuidePainted() {
+        // Launch picker / PIN gate up: the cached restores this gates (VOD
+        // catalog, channel refresh, catch-up prune) wait for it to close.
+        LaunchWorkHold.awaitStage(LaunchWorkHold.STAGE_CACHED, com.aeriotv.android.core.app.LaunchWorkHold.STAGE_CACHED_NAME, "cached restores behind the guide paint", 0L)
+        withTimeoutOrNull(GUIDE_PAINT_WAIT_MAX_MS) { guidePainted.first { it } }
+    }
+
+    /**
+     * [awaitGuidePainted] without the launch hold, for a pure local READ
+     * (the VOD catalog restore from Room). Decision 2026-10-27: cached data
+     * repaints under the launch picker / PIN gate; only network work
+     * (sweeps, refills, enrichment, sync pulls) stays parked.
+     */
+    suspend fun awaitGuidePaintedForCachedRead() {
+        // A PIN pad on screen pauses cached work too (2026-10-27).
+        LaunchWorkHold.awaitPinPad("cached read behind the guide paint")
         withTimeoutOrNull(GUIDE_PAINT_WAIT_MAX_MS) { guidePainted.first { it } }
     }
 
@@ -149,6 +164,8 @@ class AppSettleGate @Inject constructor() {
         settleJob?.cancel()
         settleJob = scope.launch {
             _settled.value = false
+            // The quiet period starts once the launch picker / PIN gate closes.
+            LaunchWorkHold.awaitStage(LaunchWorkHold.STAGE_CACHED, com.aeriotv.android.core.app.LaunchWorkHold.STAGE_CACHED_NAME, "settle cycle", 0L)
             val startedAt = SystemClock.elapsedRealtime()
             withTimeoutOrNull(GUIDE_WAIT_MAX_MS) { guideRendered.first { it } }
             val remaining = SETTLE_DELAY_MS - (SystemClock.elapsedRealtime() - startedAt)

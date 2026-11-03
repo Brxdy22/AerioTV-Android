@@ -16,6 +16,14 @@ data class SyncEnvelope(
     val version: Int = 1,
     val lastModified: Long,
     val device: String,
+    /** Owner's sync providers (SyncProviders.kt). Absent in older files; older readers ignore it. */
+    val syncProviders: SyncProvidersRecord? = null,
+    /**
+     * Backup format (docs/DispatcharrSyncSchema.md 10a, Rule 4). 2 = written by
+     * a build that fills the canonical Dispatcharr ids where they resolve.
+     * Null in older files, which AerioTV offers to update. [version] stays 1.
+     */
+    val format: Int? = null,
 )
 
 @Serializable
@@ -70,6 +78,11 @@ data class WatchProgressSnapshotEntry(
     val seasonNumber: Int = 0,
     val episodeNumber: Int = 0,
     val isFinished: Boolean = false,
+    /** Canonical id (docs/DispatcharrSyncSchema.md 10a, Rule 4): the Dispatcharr
+     *  integer id Dispatcharr Sync puts on the wire for this row, filled on
+     *  push when the active playlist is Dispatcharr and the id resolves. Null
+     *  otherwise; older files decode without it. */
+    val dispatcharrVodId: Int? = null,
 )
 
 @Serializable
@@ -101,6 +114,8 @@ data class FavoriteSnapshotEntry(
     val channelName: String,
     val displayOrder: Long,
     val addedAt: Long,
+    /** Canonical id (Rule 4): the Dispatcharr channel id, null when unresolved or not Dispatcharr. */
+    val dispatcharrChannelId: Int? = null,
 )
 
 @Serializable
@@ -127,6 +142,11 @@ data class WatchlistSnapshotEntry(
     val serverId: String? = null,
     val addedAt: Long,
     val removedAt: Long? = null,
+    /** Canonical id (docs/DispatcharrSyncSchema.md 10a, Rule 4): the Dispatcharr
+     *  integer id Dispatcharr Sync puts on the wire for this row, filled on
+     *  push when the active playlist is Dispatcharr and the id resolves. Null
+     *  otherwise; older files decode without it. */
+    val dispatcharrVodId: Int? = null,
 )
 
 /**
@@ -142,6 +162,11 @@ data class HiddenTitleSnapshotEntry(
     val serverId: String? = null,
     val hiddenAt: Long,
     val unhiddenAt: Long? = null,
+    /** Canonical id (docs/DispatcharrSyncSchema.md 10a, Rule 4): the Dispatcharr
+     *  integer id Dispatcharr Sync puts on the wire for this row, filled on
+     *  push when the active playlist is Dispatcharr and the id resolves. Null
+     *  otherwise; older files decode without it. */
+    val dispatcharrVodId: Int? = null,
 )
 
 @Serializable
@@ -159,8 +184,19 @@ data class WatchlistSnapshot(
 @Serializable
 data class PreferencesSnapshot(
     val envelope: SyncEnvelope,
-    /** key → value map encoded as strings (DataStore keys can be Bool/Int/Double/String; we string-encode for the wire). */
+    /** key → value map encoded as strings (DataStore keys can be Bool/Int/Double/String; we string-encode for the wire).
+     *  This is the `v` lane: values every device class reads. */
     val keys: Map<String, String>,
+    /** "TVs only" lane: written and read by TVs only. Absent in older files. */
+    val tv: Map<String, String> = emptyMap(),
+    /** "Phones and tablets only" lane. Absent in older files. */
+    val mobile: Map<String, String> = emptyMap(),
+    /**
+     * Canonical ids (Rule 4): local channel id to Dispatcharr channel id for
+     * every channel recents.v1 and channelCollections.v1 reference that
+     * resolves. Null when not Dispatcharr or in files written before it.
+     */
+    val dispatcharrChannelIds: Map<String, Int>? = null,
 )
 
 /**

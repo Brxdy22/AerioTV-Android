@@ -59,6 +59,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -684,6 +685,43 @@ fun MainScaffold(
     }
     val companionDevices by companionDiscovery.devices.collectAsStateWithLifecycle()
     var showCompanionPicker by remember { mutableStateOf(false) }
+    // Set up a TV dock card (docs/DeviceSetupHandoff.md): phones and tablets
+    // browse _aeriotv-setup._tcp while the app is in the foreground only.
+    val setupDiscovery = remember { com.aeriotv.android.core.setup.SetupDiscovery(context.applicationContext) }
+    val setupLifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    if (!isTvShell) {
+        androidx.compose.runtime.DisposableEffect(setupLifecycle) {
+            val obs = androidx.lifecycle.LifecycleEventObserver { _, e ->
+                when (e) {
+                    androidx.lifecycle.Lifecycle.Event.ON_START -> setupDiscovery.start()
+                    androidx.lifecycle.Lifecycle.Event.ON_STOP -> setupDiscovery.stop()
+                    else -> {}
+                }
+            }
+            setupLifecycle.lifecycle.addObserver(obs)
+            onDispose { setupLifecycle.lifecycle.removeObserver(obs); setupDiscovery.stop() }
+        }
+    }
+    val setupTvs by setupDiscovery.tvs.collectAsStateWithLifecycle()
+    var setupDockTarget by remember { mutableStateOf<com.aeriotv.android.core.setup.SetupTarget?>(null) }
+    val setupPm = remember {
+        dagger.hilt.android.EntryPointAccessors.fromApplication(
+            context.applicationContext, com.aeriotv.android.feature.settings.SetupEntryPoint::class.java,
+        ).profileManager()
+    }
+    // The one TV on offer (dock card AND Settings root banner): the first
+    // advertising TV not dismissed, hidden while its setup sheet is open.
+    // Phones and tablets, Admin or default profile.
+    val setupOfferPid = capsPlaylist?.id
+    val setupOfferTarget = if (isTvShell || setupOfferPid == null || !setupPm.canSetUpTv(setupOfferPid) || setupDockTarget != null) null
+        else setupTvs.firstOrNull { !com.aeriotv.android.feature.devicesetup.SetupDockDismissals.isDismissed(it) }
+    val setupOffer = setupOfferTarget?.let { t ->
+        com.aeriotv.android.feature.devicesetup.SetupTvOffer(
+            target = t,
+            onSetUp = { setupDockTarget = t },
+            onDismiss = { com.aeriotv.android.feature.devicesetup.SetupDockDismissals.dismiss(t) },
+        )
+    }
     // Poll pause state from the held ExoPlayer so the mini-player's
     // Pause/Play icon stays accurate when the notification action /
     // BT button toggles playback elsewhere.
@@ -700,6 +738,9 @@ fun MainScaffold(
     val defaultTabPref by settingsVm.defaultTab.collectAsStateWithLifecycle(initialValue = "")
 
     var selectedTab by rememberSaveable { mutableStateOf(AppTab.LiveTV) }
+    androidx.compose.runtime.LaunchedEffect(selectedTab) {
+        com.aeriotv.android.core.app.LiveTabVisibility.set(selectedTab == AppTab.LiveTV)
+    }
     var initialTabApplied by rememberSaveable { mutableStateOf(false) }
     // Which tabs are already composed and alive (see MainTabContent). Hoisted
     // here because the TV tab bar needs it too: switching to a tab that is
@@ -756,11 +797,32 @@ fun MainScaffold(
     // defaultLiveTVView("guide") here, which both failed to switch when the view
     // was already resolving to Guide and clobbered the Drive-synced default across
     // devices; forcing the session view instead avoids both.
+    // Deduped by request key, same as LiveTVTabContent: guideJumpRequests is
+    // replay=1 and this collector restarts whenever MAIN re-enters composition
+    // (Back from a detail or player route pushed over it), so without the key
+    // the LAST jump replayed and bounced TV Search back to Live TV (Streamer
+    // 2026-11-02: [SEARCH] restore, then tab:LiveTV -> grid:r0 on one Back).
+    // rememberSaveable survives the push/pop via the entry's saved state.
+    var consumedTabJumpKey by rememberSaveable { mutableStateOf("") }
+    // GH #162 (Streamer 2026-11-02): a guide jump out of TV Search left Search
+    // off the back path, so Back on the guide raised Exit AerioTV?. Back after
+    // such a jump returns to Search instead; any other tab change drops it.
+    var backToSearch by rememberSaveable { mutableStateOf(false) }
     LaunchedEffect(Unit) {
-        viewModel.guideJumpRequests.collect {
+        viewModel.guideJumpRequests.collect { jump ->
+            val key = "${jump.channelId}@${jump.startMillis}"
+            if (key == consumedTabJumpKey) return@collect
+            consumedTabJumpKey = key
+            backToSearch = selectedTab == AppTab.Search
             selectedTab = AppTab.LiveTV
             initialTabApplied = true
         }
+    }
+    LaunchedEffect(selectedTab) { if (selectedTab != AppTab.LiveTV) backToSearch = false }
+    androidx.activity.compose.BackHandler(enabled = backToSearch && selectedTab == AppTab.LiveTV) {
+        android.util.Log.i("AerioSearch", "[SEARCH] back from guide jump -> Search")
+        backToSearch = false
+        selectedTab = AppTab.Search
     }
 
     // Companion remote X (GH #33). Popping the player back to MAIN is only
@@ -849,8 +911,23 @@ fun MainScaffold(
     // header's spinning indicator; the old "Syncing | Tap for Info" pill it
     // used to drive was removed (Logan 2026-09-14: it overlapped the sidebar
     // button on both shells).
-    val anyBackgroundWork = state.isLoading || state.isEpgLoading ||
-        onDemandState.isLoading || onDemandState.isLoadingSeries
+    //
+    // Silent background refresh (Logan 2026-10-27): a guide painted from
+    // cache (launch or profile switch) refreshes behind the paint without the
+    // indicator. The channel and guide flags are already only raised when
+    // there is nothing cached to paint or on an explicit Refresh; the On
+    // Demand sweeps raise theirs on every background pass, so they count only
+    // while their library has nothing to show yet.
+    val vodForegroundLoad = (onDemandState.isLoading && !onDemandState.hasMovies) ||
+        (onDemandState.isLoadingSeries && !onDemandState.hasSeries)
+    val anyBackgroundWork = state.isLoading || state.isEpgLoading || vodForegroundLoad
+    androidx.compose.runtime.LaunchedEffect(anyBackgroundWork) {
+        android.util.Log.i(
+            "AerioTV",
+            "[LOADING] header indicator=$anyBackgroundWork (channels=${state.isLoading} epg=${state.isEpgLoading} " +
+                "vodForeground=$vodForegroundLoad vodSweep=${onDemandState.isLoading || onDemandState.isLoadingSeries})",
+        )
+    }
 
     // Pre-warm (Logan 2026-09-11): a FIRST visit to a tab still cost 419-567 ms
     // key to frame on the Streamer, of which ~250 ms was the settle window and
@@ -947,6 +1024,9 @@ fun MainScaffold(
                 viewModel.repaintGuideIfShed("main-start")
                 if (sawFirstStart) {
                     viewModel.refreshEpgIfStale()
+                    // Channels too (none of the foreground paths refreshed
+                    // them): silent, behind the painted guide, past 30 min.
+                    viewModel.refreshChannelsIfStale()
                     viewModel.checkEpgSourcesForChanges()
                 } else {
                     sawFirstStart = true
@@ -1429,6 +1509,7 @@ fun MainScaffold(
         ) {
             androidx.compose.runtime.CompositionLocalProvider(
                 com.aeriotv.android.feature.livetv.LocalRetainedChannelIds provides retainedIds,
+                com.aeriotv.android.feature.devicesetup.LocalSetupTvOffer provides setupOffer,
             ) {
             MainTabContent(
                 selectedTab = selectedTab,
@@ -1595,8 +1676,13 @@ fun MainScaffold(
                 val showMvBg = mvBgState != null && !isTv
                 val radioOnDock = com.aeriotv.android.feature.player.RadioMode.state
                     .collectAsStateWithLifecycle().value != null && !isTv && !casting
+                val setupCard = setupOffer
                 val fabRow = when {
                     !phoneFab -> 0
+                    // Set up a TV card: the lowest row (the cast card's spot,
+                    // directly above the tab bar), so the button rides it the
+                    // way it rides Kept Live.
+                    setupCard != null -> 6
                     showKept -> 1
                     showMv -> 2
                     showMvBg -> 3
@@ -1616,6 +1702,27 @@ fun MainScaffold(
                     )
                 }
                 fun gapAfter(row: Int) = if (tabletNav) 12.dp else if (fabRow == row) 10.dp else 8.dp
+                // Set up a TV dock card (setupOffer): the cast card's place,
+                // directly above the tab bar; the Control a TV button rides
+                // its row like the other dock cards.
+                @Composable
+                fun DockSetup() {
+                    val o = setupCard ?: return
+                    if (isTv) return
+                    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                        Row(mvRowFrame, verticalAlignment = Alignment.CenterVertically) {
+                            com.aeriotv.android.feature.devicesetup.SetupTvDockCard(
+                                target = o.target,
+                                tablet = tabletNav,
+                                onSetUp = o.onSetUp,
+                                onDismiss = o.onDismiss,
+                                modifier = Modifier.weight(1f),
+                            )
+                            if (fabRow == 6) DockFab()
+                        }
+                    }
+                    Spacer(Modifier.height(gapAfter(6)))
+                }
                 @Composable
                 fun DockKept() {
                     if (showKept) {
@@ -1795,9 +1902,9 @@ fun MainScaffold(
                     }
                 }
                 if (tabletNav) {
-                    DockMvStaging(); DockMvBg(); DockKept(); DockFabOnly(); DockRadio(); DockCast()
+                    DockMvStaging(); DockMvBg(); DockKept(); DockFabOnly(); DockRadio(); DockCast(); DockSetup()
                 } else {
-                    DockRadio(); DockCast(); DockMvBg(); DockMvStaging(); DockKept(); DockFabOnly()
+                    DockRadio(); DockCast(); DockMvBg(); DockMvStaging(); DockKept(); DockFabOnly(); DockSetup()
                 }
                 val miniState = miniPlayerState
                 // Phase 139 / audit #22: on TV the mini-player is a top-right
@@ -1937,6 +2044,13 @@ fun MainScaffold(
     // as the player's cast button (Google Cast routes + AerioTV companion TVs
     // with inline pairing), replacing the old companion-only dialog that made
     // cast targets invisible outside the player.
+    setupDockTarget?.let { t ->
+        com.aeriotv.android.feature.devicesetup.SetUpTvDialog(
+            playlistId = capsPlaylist?.id,
+            target = t,
+            onDismiss = { setupDockTarget = null },
+        )
+    }
     if (showCompanionPicker) {
         // Force a fresh query sweep the moment the picker opens: the Fold's
         // WiFi misses mid-browse announcements, so a long-running browse can
@@ -2315,6 +2429,13 @@ private fun MainTabContent(
                     onEpgResult = { channelKey, startMillis ->
                         viewModel.requestGuideJump(channelKey, startMillis)
                     },
+                    // GH #162: a live result plays its channel (Shield report:
+                    // every channel result landed on the guide instead).
+                    onPlayChannel = { id ->
+                        val ch = viewModel.state.value.channels.firstOrNull { it.id == id }
+                        if (ch != null) onChannelClick(ch)
+                        else android.util.Log.w("AerioSearch", "[SEARCH] live result: channel not in the loaded list")
+                    },
                     onMovieClick = onMovieClick,
                     onSeriesClick = onSeriesClick,
                     showBackButton = false,
@@ -2413,6 +2534,9 @@ private fun TvTopTabBar(
             armed = false
         }
     }
+    // The profile switcher right of the capsule (2c): Right from the last
+    // pill moves here explicitly (the geometric search did not leave the group).
+    val profileSwitcherFocus = remember { FocusRequester() }
     LaunchedEffect(focusedTab) {
         val cur = focusedTab ?: return@LaunchedEffect
         // Deliberate bar ENTRY (a fresh D-pad UP) selects immediately too, so
@@ -2584,9 +2708,29 @@ private fun TvTopTabBar(
                                 onSelect(tab)
                             }
                         },
-                        modifier = pillRequesters[tab]?.let { Modifier.focusRequester(it) } ?: Modifier,
+                        modifier = (pillRequesters[tab]?.let { Modifier.focusRequester(it) } ?: Modifier).then(
+                            if (tab == tabs.last()) {
+                                Modifier.onPreviewKeyEvent { e ->
+                                    e.type == androidx.compose.ui.input.key.KeyEventType.KeyDown &&
+                                        e.key == androidx.compose.ui.input.key.Key.DirectionRight &&
+                                        runCatching { profileSwitcherFocus.requestFocus() }.isSuccess
+                                }
+                            } else Modifier,
+                        ),
                     )
                 }
+            }
+            // Profile switcher (2c): right of the capsule, outside its focus
+            // group like the circles on the left, so Right from the last pill
+            // reaches it geometrically and focus never selects a tab.
+            Box {
+                com.aeriotv.android.feature.settings.TvProfileSwitcherButton(
+                    modifier = Modifier.focusRequester(profileSwitcherFocus),
+                    onDown = {
+                        val target = tabEntryFocus?.value
+                        target != null && runCatching { target.requestFocus() }.getOrDefault(false)
+                    },
+                )
             }
             if (showActionCircles) {
                 Row(
@@ -2624,12 +2768,14 @@ private fun TvTopTabBar(
     ) { measurables, constraints ->
         val loose = constraints.copy(minWidth = 0, minHeight = 0)
         val capsule = measurables[0].measure(loose)
-        val circles = measurables.getOrNull(1)?.measure(loose)
+        val avatar = measurables[1].measure(loose)
+        val circles = measurables.getOrNull(2)?.measure(loose)
         val width = constraints.maxWidth
         val height = maxOf(capsule.height, circles?.height ?: 0)
         layout(width, height) {
             val capsuleX = (width - capsule.width) / 2
             capsule.placeRelative(capsuleX, (height - capsule.height) / 2)
+            avatar.placeRelative(capsuleX + capsule.width + 10.dp.roundToPx(), (height - avatar.height) / 2)
             val circlesX = capsuleX - 10.dp.roundToPx() - (circles?.width ?: 0)
             circles?.placeRelative(circlesX, (height - circles.height) / 2)
             // Publish the real left edge for the hint chips. Writing snapshot
@@ -2889,6 +3035,10 @@ private fun SettingsTabContent(
     // Watch for a playlist id flip while we're inside the Add Playlist flow;
     // that means the user's onboarding Save succeeded and the new row was
     // promoted active. Close the embedded flow.
+    var qrRestoreSignIn by remember { mutableStateOf<com.aeriotv.android.core.qr.QrImportBus.SignIn?>(null) }
+    qrRestoreSignIn?.let { si ->
+        com.aeriotv.android.feature.onboarding.QrRestoreOfferDialog(signIn = si, onClose = { qrRestoreSignIn = null })
+    }
     val startId = remember(addPlaylistStep) {
         if (addPlaylistStep != AddPlaylistStep.None) playlistState.playlist?.id else null
     }
@@ -2903,6 +3053,8 @@ private fun SettingsTabContent(
                 (step.sourceType == com.aeriotv.android.core.data.SourceType.DispatcharrApiKey ||
                     step.sourceType == com.aeriotv.android.core.data.SourceType.DispatcharrUserPass)
             ) {
+                // Added from a Dispatcharr user QR: offer sync if the server has data.
+                qrRestoreSignIn = com.aeriotv.android.core.qr.QrImportBus.takeSignIn(playlistVm.state.value.apiKey)
                 nav.replaceTop(SettingsRoute.AddPlaylist(AddPlaylistWizardStep.AddProfiles(newId)))
             } else {
                 nav.pop()
@@ -2985,6 +3137,16 @@ private fun SettingsTabContent(
         } else if (nav.stack.any { it is SettingsRoute.ManageProfiles }) {
             nav.popToRoot()
         }
+    }
+    // A switch to another profile returns Settings to its root, so coming
+    // back to this tab never reopens a page from the previous profile.
+    val profileSwitches by com.aeriotv.android.core.profiles.ProfileSwitchFocus.switches.collectAsStateWithLifecycle()
+    var seenProfileSwitches by rememberSaveable { mutableLongStateOf(profileSwitches) }
+    LaunchedEffect(profileSwitches) {
+        if (profileSwitches == seenProfileSwitches) return@LaunchedEffect
+        seenProfileSwitches = profileSwitches
+        nav.popToRoot()
+        selection = if (tvRail) SettingsRoute.Root else DefaultSettingsPaneSelection
     }
     val renderRoute: @Composable (SettingsRoute?) -> Unit = { r0 ->
     val r = if (r0.allowedFor(activeRole)) r0 else null

@@ -4,6 +4,8 @@ import android.os.Build
 import android.util.Log
 import android.view.Surface
 import android.view.SurfaceView
+import androidx.media3.common.PlaybackParameters
+import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.video.VideoFrameMetadataListener
@@ -81,6 +83,16 @@ object DisplayFrameRateMatcher {
      *  the seamless request cannot be honoured (2160p50 on a 60 Hz mode). */
     @Volatile var onRateRequested: ((Float) -> Unit)? = null
 
+    /** Fired on the main thread when the VOD player's attachment is torn
+     *  down, so MainActivity can drop a mode pin the VOD title requested
+     *  when no live playback needs it. */
+    @Volatile var onVodDetached: (() -> Unit)? = null
+
+    /** Speed mirrors per attachment handle, so [detach] can remove the
+     *  Player.Listener that feeds each one. */
+    private val speedListeners =
+        java.util.Collections.synchronizedMap(java.util.WeakHashMap<Any, Player.Listener>())
+
     /**
      * Start measuring [player]'s frame rate and request a refresh-rate match on
      * [surfaceView]'s Surface (framework arbitrates via the user's OS Match
@@ -93,6 +105,9 @@ object DisplayFrameRateMatcher {
         /** False on phones / tablets: measure [contentFps] only (the format
          *  badge and Stream Info need it) and never request a display rate. */
         matchRate: Boolean = true,
+        /** VOD only: also request the 24 film class (23.976 / 24). Live keeps
+         *  the 50 / 60 classes only. */
+        filmRate: Boolean = false,
     ): Any? {
         // Android#134: measure on every API level. Below S (Shield on
         // Android 11) there is no Surface.setFrameRate, but the measured rate
@@ -101,12 +116,42 @@ object DisplayFrameRateMatcher {
         val deltasUs = ArrayDeque<Long>()
         var lastPtsUs = -1L
         var lastAppliedFps = 0f
+        var lastLoggedClass = Float.NaN
+        // Playback speed, mirrored from the application thread by a
+        // Player.Listener (reading player.playbackParameters here on the
+        // playback thread would trip the wrong-thread check). At a non-1.0
+        // speed the renderer drops frames, the measured rate slides (57.62
+        // down to 45.63 within 1 s at 1.5x on the Streamer, 2026-10-29), and
+        // each slide re-requested setFrameRate: repeated HDMI mode switches,
+        // a black flash. Off 1.0x we freeze the last measurement and request
+        // nothing; on return to 1.0x the sample window starts fresh.
+        val speed = java.util.concurrent.atomic.AtomicReference(
+            runCatching { player.playbackParameters.speed }.getOrDefault(1f),
+        )
+        val resetWindow = java.util.concurrent.atomic.AtomicBoolean(false)
+        var paused = false
         val listener = VideoFrameMetadataListener { presentationTimeUs, _, _, _ ->
+            val sp = speed.get()
+            if (sp != 1.0f) {
+                if (!paused) {
+                    paused = true
+                    Log.i(TAG, "[AerioFpsMatch] paused: speed=${"%.2f".format(sp)}")
+                }
+                lastPtsUs = -1L
+                return@VideoFrameMetadataListener
+            }
+            if (resetWindow.getAndSet(false) || paused) {
+                if (paused) Log.i(TAG, "[AerioFpsMatch] resumed")
+                paused = false
+                deltasUs.clear()
+                lastPtsUs = -1L
+            }
             if (lastPtsUs >= 0L) {
                 val d = presentationTimeUs - lastPtsUs
                 if (d < 0L || d > 1_000_000L) {
                     deltasUs.clear() // stream discontinuity / channel flip
                     contentFps.value = 0f
+                    lastLoggedClass = Float.NaN
                 } else if (d in 4_000L..210_000L) {
                     deltasUs.addLast(d)
                     if (deltasUs.size > 60) deltasUs.removeFirst()
@@ -140,10 +185,24 @@ object DisplayFrameRateMatcher {
                 // 24-class film cadence (23.976 / 24) is deliberately NOT
                 // requested: it divides neither 50 nor 60, so it keeps the
                 // status-quo 3:2 behavior until handled on purpose.
+                //
+                // VOD (filmRate) requests the 24 class directly: a film title
+                // on a 60 Hz panel otherwise plays with 3:2 pulldown judder
+                // (Streamer 2026-10-27). 24 is a real panel mode, not a
+                // sub-mode override, so the 25 lesson above does not apply.
                 val target = when {
                     fps in 45f..65f -> fps
                     fps in 24.5f..32.5f -> fps * 2f
+                    filmRate && fps in 23.5f..24.5f -> filmTarget(sorted, surfaceView)
                     else -> 0f
+                }
+                val cls = if (target > 0f) target else Math.round(fps).toFloat()
+                if (lastLoggedClass.isNaN() || abs(cls - lastLoggedClass) > 1.0f) {
+                    lastLoggedClass = cls
+                    // Always PTS-derived: this runs on the playback thread,
+                    // where reading player.videoFormat throws a wrong-thread
+                    // runtime check.
+                    Log.i(TAG, "[AerioFpsMatch] measured ${"%.3f".format(fps)} (n=${deltasUs.size}, source=pts)")
                 }
                 if (matchRate && target > 0f && abs(target - lastAppliedFps) > 1.0f) {
                     lastAppliedFps = target
@@ -166,10 +225,35 @@ object DisplayFrameRateMatcher {
                 }
             }
         }
+        val speedListener = object : Player.Listener {
+            override fun onPlaybackParametersChanged(playbackParameters: PlaybackParameters) {
+                val old = speed.getAndSet(playbackParameters.speed)
+                if (old != 1.0f && playbackParameters.speed == 1.0f) resetWindow.set(true)
+            }
+        }
+        runCatching { player.addListener(speedListener) }
+        speedListeners[listener] = speedListener
         player.setVideoFrameMetadataListener(listener)
         latestHandle = listener
         attachedPlayer = player
         return listener
+    }
+
+    /** 23.976 when the median frame interval says below 24.0 fps and the
+     *  display lists a 23.976-class mode, else 24. */
+    private fun filmTarget(sorted: List<Long>, surfaceView: SurfaceView): Float {
+        val median = 1_000_000.0 / sorted[sorted.size / 2]
+        if (median >= 24.0) return 24f
+        val modes = runCatching { surfaceView.display?.supportedModes }.getOrNull() ?: return 24f
+        return if (modes.any { abs(it.refreshRate - 23.976f) < 0.01f }) 23.976f else 24f
+    }
+
+    /** Hand ownership back to an earlier attachment (the live window) after
+     *  a temporary one (VOD) detaches, so [attachedPlayer] / [latestHandle]
+     *  never keep pointing at a released player. */
+    fun restoreOwner(player: ExoPlayer?, handle: Any?) {
+        attachedPlayer = player
+        latestHandle = handle
     }
 
     /** Stop measuring and release our frame-rate preference (so the guide /
@@ -178,6 +262,7 @@ object DisplayFrameRateMatcher {
         contentFps.value = 0f
         (handle as? VideoFrameMetadataListener)?.let { l ->
             runCatching { player?.clearVideoFrameMetadataListener(l) }
+            speedListeners.remove(l)?.let { sl -> runCatching { player?.removeListener(sl) } }
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             val surface = surfaceView?.holder?.surface

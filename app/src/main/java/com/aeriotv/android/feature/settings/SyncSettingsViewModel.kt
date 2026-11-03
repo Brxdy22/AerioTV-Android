@@ -33,35 +33,145 @@ class SyncSettingsViewModel @Inject constructor(
     private val sync: DriveSyncManager,
     private val dsync: com.aeriotv.android.core.sync.dsync.DispatcharrSyncManager,
     playlistDao: com.aeriotv.android.core.data.db.dao.PlaylistDao,
+    private val providersStore: com.aeriotv.android.core.sync.SyncProvidersStore,
+    private val setupSource: com.aeriotv.android.core.sync.SetupSourceCoordinator,
 ) : ViewModel() {
 
-    /** Settings > Sync > Sync with: "off", "drive", or "dispatcharr". */
-    val syncProvider: Flow<String> = prefs.syncProvider
+    // ---- Rule 4: choosing a source when both hold data ----
+
+    /** Welcome with both providers selected: Drive's shared categories wait for the choice. */
+    fun holdSharedForChoice() = setupSource.holdShared()
+
+    /** Apply anything Drive held (no choice was needed or the flow ended). */
+    fun releaseHeld() { viewModelScope.launch { setupSource.releaseHeld() } }
+
+    // ---- "Your backup needs an update" (BackupUpdateOffer) ----
+
+    /** Onboarding after a restore: the playlist to offer the id update for, or null. */
+    suspend fun backupUpdateFor(playlistId: String): String? {
+        val pid = runCatching { sync.idUpdateCandidate() }.getOrNull() ?: return null
+        return pid.takeIf {
+            it == playlistId && com.aeriotv.android.core.sync.BackupUpdateOffer.shouldOffer(
+                backupOutdated = true, accepted = false, playlistId = it,
+            )
+        }
+    }
+
+    /** Sync screen open with Drive sync on: the playlist to offer for (marks the session), or null. */
+    suspend fun backupUpdateForSettings(): String? {
+        val driveOn = runCatching { prefs.syncMasterEnabled.first() }.getOrDefault(false)
+        if (!driveOn) return null
+        val pid = runCatching { sync.idUpdateCandidate() }.getOrNull() ?: return null
+        val offer = com.aeriotv.android.core.sync.BackupUpdateOffer.shouldOfferInSettings(
+            driveOn = true, backupOutdated = true, accepted = false, playlistId = pid,
+        )
+        if (!offer) return null
+        com.aeriotv.android.core.sync.BackupUpdateOffer.markSettingsShown(pid)
+        return pid
+    }
+
+    suspend fun acceptBackupUpdate(playlistId: String) = sync.acceptIdUpdate(playlistId)
+
+    fun declineBackupUpdate(playlistId: String) = com.aeriotv.android.core.sync.BackupUpdateOffer.decline(playlistId)
+
+    suspend fun probeSetupSource(): com.aeriotv.android.core.sync.SetupSourceCoordinator.Probe? = setupSource.probe()
+
+    /** Settings: the SECOND provider is being turned on and both hold data. */
+    fun applySetupSourceAndEnable(
+        source: com.aeriotv.android.core.sync.SetupSourceChoice.Source,
+        playlistId: String,
+        enablingDrive: Boolean,
+    ) {
+        viewModelScope.launch {
+            if (enablingDrive) {
+                // Dispatcharr Sync already owns the shared data here, so a Drive
+                // choice applies the backup over it (ignoreOwnership).
+                setupSource.choose(source, playlistId, ignoreOwnership = true)
+                prefs.setSyncMasterEnabled(true)
+                DriveSyncWorker.enqueuePeriodic(context)
+            } else {
+                setupSource.choose(source, playlistId)
+                prefs.setDispatcharrSyncEnabled(true)
+            }
+            setupSource.afterDispatcharrOn()
+        }
+    }
+
+    /** Onboarding Drive restore (base profile only): evaluate the providers offer once in Main. */
+    fun armProvidersOffer() {
+        if (com.aeriotv.android.core.profiles.ProfileScope.token.value.isEmpty()) providersStore.arm()
+    }
+
+    /** Dispatcharr Sync switch for the active base user; independent of Drive Sync. */
+    val dispatcharrSyncEnabled: Flow<Boolean> = prefs.dispatcharrSyncEnabled
 
     /** Dispatcharr is offered only while the active playlist is Dispatcharr Direct Connect. */
     val dispatcharrAvailable: Flow<Boolean> = playlistDao.observeActive().map { rows ->
         rows.firstOrNull()?.isDispatcharrDirectConnect() == true
     }
 
-    /** Picking a provider turns the other one off; Drive keeps its own toggle and worker. */
-    fun setSyncProvider(value: String) {
-        viewModelScope.launch {
-            prefs.setSyncProvider(value)
-            when (value) {
-                "drive" -> {
-                    prefs.setSyncMasterEnabled(true)
-                    DriveSyncWorker.enqueuePeriodic(context)
-                }
-                else -> {
-                    prefs.setSyncMasterEnabled(false)
-                    DriveSyncWorker.cancel(context)
-                }
-            }
-        }
+    /** Turns only Dispatcharr Sync on or off; Drive Sync is untouched. */
+    fun setDispatcharrSyncEnabled(value: Boolean) {
+        viewModelScope.launch { prefs.setDispatcharrSyncEnabled(value) }
     }
 
     val dispatcharrUi: StateFlow<com.aeriotv.android.core.sync.dsync.DispatcharrSyncManager.Ui> = dsync.ui
     fun dispatcharrSyncNow() = dsync.syncNow()
+
+    // ---- Manual push and pull (section 10a, owner decision 2026-11-02) ----
+
+    private val _dsyncPushStatus = MutableStateFlow<ActionStatus>(ActionStatus.Idle)
+    val dsyncPushStatus: StateFlow<ActionStatus> = _dsyncPushStatus
+    private val _dsyncPullStatus = MutableStateFlow<ActionStatus>(ActionStatus.Idle)
+    val dsyncPullStatus: StateFlow<ActionStatus> = _dsyncPullStatus
+    private val _bothPushStatus = MutableStateFlow<ActionStatus>(ActionStatus.Idle)
+    val bothPushStatus: StateFlow<ActionStatus> = _bothPushStatus
+
+    private fun manualBusy(): Boolean = listOf(_dsyncPushStatus, _dsyncPullStatus, _bothPushStatus)
+        .any { it.value is ActionStatus.Running }
+
+    /** "Push to Dispatcharr": forced replace of every enabled shared key. */
+    fun runDispatcharrPush() {
+        if (manualBusy()) return
+        viewModelScope.launch {
+            _dsyncPushStatus.value = ActionStatus.Running
+            val ok = runCatching { dsync.manualPush() }.getOrDefault(false)
+            _dsyncPushStatus.value = if (ok) ActionStatus.Success(PUSHED_TO_DISPATCHARR) else ActionStatus.Failure(DISPATCHARR_UNREACHABLE)
+        }
+    }
+
+    /** "Pull from Dispatcharr": the server copy replaces this device's shared data; Drive follows. */
+    fun runDispatcharrPull() {
+        if (manualBusy()) return
+        viewModelScope.launch {
+            _dsyncPullStatus.value = ActionStatus.Running
+            val ok = runCatching { dsync.manualPull() }.getOrDefault(false)
+            _dsyncPullStatus.value = if (ok) ActionStatus.Success(PULLED_FROM_DISPATCHARR) else ActionStatus.Failure(DISPATCHARR_UNREACHABLE)
+        }
+    }
+
+    /** "Push to both": the Dispatcharr forced push, then the Drive backup replace. */
+    fun runPushToBoth() {
+        if (manualBusy()) return
+        viewModelScope.launch {
+            _bothPushStatus.value = ActionStatus.Running
+            android.util.Log.i("AerioDsync", "[SYNC] manual push to both")
+            val ok = runCatching { dsync.manualPush() }.getOrDefault(false)
+            if (!ok) {
+                _bothPushStatus.value = ActionStatus.Failure(DISPATCHARR_UNREACHABLE)
+                return@launch
+            }
+            runCatching { sync.replaceBackupNow() }
+                .onFailure { android.util.Log.w("AerioDsync", "[SYNC] manual push to both: Drive replace failed: ${it.javaClass.simpleName}") }
+            _bothPushStatus.value = ActionStatus.Success(PUSHED_TO_BOTH)
+        }
+    }
+
+    fun clearManualStatuses() {
+        _dsyncPushStatus.value = ActionStatus.Idle
+        _dsyncPullStatus.value = ActionStatus.Idle
+        _bothPushStatus.value = ActionStatus.Idle
+    }
 
     val masterEnabled: Flow<Boolean> = prefs.syncMasterEnabled
     fun setMasterEnabled(value: Boolean) {
@@ -86,6 +196,8 @@ class SyncSettingsViewModel @Inject constructor(
     val lastPushAt: Flow<Long> = prefs.syncLastPushAt
     val lastPullAt: Flow<Long> = prefs.syncLastPullAt
     val driveStatus: StateFlow<DriveSyncManager.Status> = sync.status
+    val driveNeedsSignIn: StateFlow<Boolean> = sync.needsSignIn
+    fun driveUnknownPending(): Boolean = setupSource.driveUnknownPending()
 
     /** Per-category progress for the onboarding restore screen; populated by
      *  [restoreFromDrive] (which routes through the tracked pull). */
@@ -119,6 +231,16 @@ class SyncSettingsViewModel @Inject constructor(
         _clearStatus.value = ActionStatus.Idle
         _pushStatus.value = ActionStatus.Idle
         _pullStatus.value = ActionStatus.Idle
+        clearManualStatuses()
+    }
+
+    /** Per-item sync choices (Sync Categories), by item id, as this device honors them. */
+    val syncScopes: Flow<Map<String, com.aeriotv.android.core.sync.SyncScope>> = prefs.syncScopes
+    val syncDeviceIsTv: Boolean get() = prefs.syncDeviceIsTv
+
+    /** Sets one item, or a whole group, to [scope] (data items: All = on, Off = off). */
+    fun setSyncScope(itemIds: List<String>, scope: com.aeriotv.android.core.sync.SyncScope) {
+        viewModelScope.launch { prefs.setSyncScope(itemIds, scope) }
     }
 
     fun categoryEnabled(category: SyncCategory): Flow<Boolean> =
@@ -400,3 +522,8 @@ class SyncSettingsViewModel @Inject constructor(
         return sync.pullAllTracked(token, wanted)
     }
 }
+
+internal const val PUSHED_TO_DISPATCHARR = "Pushed to Dispatcharr"
+internal const val PULLED_FROM_DISPATCHARR = "Pulled from Dispatcharr"
+internal const val PUSHED_TO_BOTH = "Pushed to both"
+internal const val DISPATCHARR_UNREACHABLE = "Could not reach your Dispatcharr server"

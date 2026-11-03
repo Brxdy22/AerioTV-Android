@@ -31,6 +31,8 @@ import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import androidx.navigation.navigation
 import com.aeriotv.android.core.data.SourceType
+import com.aeriotv.android.core.data.db.entity.isDispatcharrDirectConnect
+import kotlinx.coroutines.flow.first
 import com.aeriotv.android.core.data.db.entity.canRecordToServer
 import com.aeriotv.android.core.data.db.entity.dispatcharrEffectiveDvrAccess
 import com.aeriotv.android.ui.LocalDvrAccess
@@ -88,6 +90,8 @@ object Routes {
     const val BOOTSTRAP = "bootstrap"
     const val WELCOME = "welcome"
     const val CHOOSE_TYPE = "choose_type"
+    /** TV: "Set up from your phone" receiver (docs/DeviceSetupHandoff.md). */
+    const val TV_SETUP = "tv_setup"
     const val CONFIGURE = "configure/{type}"
     const val MAIN = "main"
     // Task #148 milestone B: optional cs* args put the LIVE player into
@@ -332,6 +336,12 @@ fun AerioTVNavHost(
             navHostContext.applicationContext, NavEntryPoint::class.java,
         ).castReceiver()
     }
+    // Set up a TV opened from a scanned aeriotv://setup link (docs/DeviceSetupHandoff.md).
+    var setupLink by remember { mutableStateOf<String?>(null) }
+    val dlIsTv = com.aeriotv.android.ui.settings.rememberIsTvDevice()
+    setupLink?.let { link ->
+        com.aeriotv.android.feature.devicesetup.SetUpTvDialog(playlistId = null, link = link, onDismiss = { setupLink = null })
+    }
     if (dlGraphEntry != null) {
         val dlVm: PlaylistViewModel = hiltViewModel(dlGraphEntry)
         val dlState by dlVm.state.collectAsStateWithLifecycle()
@@ -403,6 +413,11 @@ fun AerioTVNavHost(
                     dlVm.requestSettingsPage(target.page)
                     onDeepLinkConsumed()
                 }
+                is DeepLinkTarget.DeviceSetup -> {
+                    // A phone camera scanned a TV's setup QR code. TVs ignore it.
+                    if (!dlIsTv) setupLink = target.link
+                    onDeepLinkConsumed()
+                }
                 is DeepLinkTarget.OpenMultiview -> {
                     // Same end state as TV Play on the staging banner, with any
                     // live player popped first (the receiver stopped it).
@@ -471,6 +486,11 @@ fun AerioTVNavHost(
     androidx.compose.runtime.SideEffect {
         if (mainIsTopState.value != mainIsTopNow) mainIsTopState.value = mainIsTopNow
     }
+    // GH #162: the pushed Search route plays a live result through the SAME
+    // channel-tap path as the guide (play-where prompt, radio, mini), which is
+    // built inside MAIN. MAIN publishes its latest handler here; the player is
+    // pushed on top of Search, so Back returns to the results.
+    val mainChannelTap = remember { mutableStateOf<((M3UChannel) -> Unit)?>(null) }
     CompositionLocalProvider(LocalMainIsTopDestination provides mainIsTopState) {
     Box(modifier = Modifier.fillMaxSize()) {
     NavHost(navController = navController, startDestination = Routes.PLAYLIST_GRAPH) {
@@ -584,6 +604,14 @@ fun AerioTVNavHost(
                 var welcomeSyncChooser by remember { mutableStateOf(false) }
                 var welcomeSyncChoicesMade by remember { mutableStateOf(false) }
                 var pendingSignIn by remember { mutableStateOf(false) }
+                // Welcome Continue with Dispatcharr selected alongside Drive: the
+                // Dispatcharr part runs after the Drive restore (WelcomeSyncChain).
+                var chainDispatcharr by remember { mutableStateOf(false) }
+                val goDispatcharr: () -> Unit = {
+                    chainDispatcharr = false
+                    vm.enableDispatcharrSyncAfterConnect = true
+                    navController.navigate(Routes.CHOOSE_TYPE)
+                }
                 // Restore-progress screen state (replaces the old silent
                 // wait between sign-in success and the auto-advance to MAIN).
                 // While visible it REPLACES WelcomeScreen entirely -- an
@@ -591,6 +619,9 @@ fun AerioTVNavHost(
                 // on TV. BACK is swallowed inside the progress screen.
                 var restoreOverlayVisible by remember { mutableStateOf(false) }
                 var restoreActivatedPlaylist by remember { mutableStateOf(false) }
+                // "Your backup needs an update" after a restore that goes straight to MAIN.
+                var welcomeBackupPid by remember { mutableStateOf<String?>(null) }
+                var welcomeBackupBusy by remember { mutableStateOf(false) }
                 val restoreSteps by syncVm.restoreSteps.collectAsStateWithLifecycle()
                 // Shared restore closure: pulls all categories from Drive,
                 // then asks PlaylistViewModel to re-bootstrap from whatever
@@ -633,6 +664,7 @@ fun AerioTVNavHost(
                     restoreOverlayVisible = true
                     val pulled = runCatching { syncVm.restoreFromDrive() }
                         .getOrDefault(emptyMap())
+                    syncVm.armProvidersOffer()
                     val playlistsRestored = pulled[com.aeriotv.android.core.sync.SyncCategory.Playlists] == true
                     val activated = if (playlistsRestored) {
                         runCatching { vm.loadActivePlaylistIfAvailable() }.getOrDefault(false)
@@ -648,10 +680,12 @@ fun AerioTVNavHost(
                         restoreOverlayVisible = false
                         syncVm.clearRestoreProgress()
                     }
+                    // Both selected and nothing restored: Dispatcharr part next.
+                    if (!activated && chainDispatcharr) goDispatcharr()
                     val message = when {
                         activated -> "Signed in as ${signedInEmail.orEmpty()}. Restoring your data..."
-                        signedInEmail != null -> "Signed in as $signedInEmail. No playlists in Drive yet -- set one up below."
-                        else -> "Signed in. No playlists in Drive yet."
+                        signedInEmail != null -> "Signed in as $signedInEmail. Drive sync is on. No backup yet, so connect a server below."
+                        else -> "Signed in. Drive sync is on. No backup yet."
                     }
                     android.widget.Toast.makeText(
                         context,
@@ -679,7 +713,45 @@ fun AerioTVNavHost(
                 }
 
                 LaunchedEffect(state.phase) {
+                    // Cancel on "Which setup should this device start from?" came back
+                    // here on purpose: stay on Welcome with the selections kept.
+                    if (com.aeriotv.android.feature.onboarding.WelcomeSyncChain.consumeReturnedFromChoice()) return@LaunchedEffect
                     if (state.phase == PlaylistViewModel.Phase.ChannelsReady) {
+                        // A Drive restore that activated a Dispatcharr Direct
+                        // Connect playlist with Dispatcharr Sync off continues
+                        // to the same "Turn on Dispatcharr Sync?" step (then
+                        // Add Profiles) the connect path shows, never auto-on.
+                        val restored = vm.state.value.playlist
+                        val restoredIsD = restored?.isDispatcharrDirectConnect() == true
+                        if (restoreActivatedPlaylist && chainDispatcharr &&
+                            com.aeriotv.android.feature.onboarding.WelcomeSyncChain.connectAfterRestore(dispatcharr = true, restoredIsDispatcharr = restoredIsD)
+                        ) {
+                            // Both selected, restore brought a non-Dispatcharr playlist.
+                            goDispatcharr()
+                            return@LaunchedEffect
+                        }
+                        if (restoreActivatedPlaylist && chainDispatcharr && restoredIsD) {
+                            // Both selected: the sync step turns on without another tap.
+                            vm.enableDispatcharrSyncAfterConnect = true
+                        }
+                        chainDispatcharr = false
+                        if (restoreActivatedPlaylist && restored != null &&
+                            restored.isDispatcharrDirectConnect() &&
+                            !runCatching { syncVm.dispatcharrSyncEnabled.first() }.getOrDefault(false)
+                        ) {
+                            com.aeriotv.android.feature.onboarding.components.RestoreSyncStep.request(restored.id)
+                            navController.navigate(Routes.configure(SourceType.DispatcharrUserPass)) {
+                                popUpTo(Routes.PLAYLIST_GRAPH) { inclusive = false }
+                            }
+                            return@LaunchedEffect
+                        }
+                        if (restoreActivatedPlaylist && restored != null) {
+                            val bpid = runCatching { syncVm.backupUpdateFor(restored.id) }.getOrNull()
+                            if (bpid != null) {
+                                welcomeBackupPid = bpid
+                                return@LaunchedEffect
+                            }
+                        }
                         navController.navigate(Routes.MAIN) {
                             popUpTo(Routes.PLAYLIST_GRAPH) { inclusive = false }
                         }
@@ -741,6 +813,8 @@ fun AerioTVNavHost(
                         val email = syncVm.signInWithGoogle(activity)
                         if (email == null) {
                             googleSignInInFlight = false
+                            chainDispatcharr = false
+                            syncVm.releaseHeld()
                             android.widget.Toast.makeText(
                                 context,
                                 "Sign-in cancelled or failed.",
@@ -760,6 +834,8 @@ fun AerioTVNavHost(
                             }
                             com.aeriotv.android.core.sync.DriveSyncManager.RequestResult.Failed, null -> {
                                 googleSignInInFlight = false
+                                chainDispatcharr = false
+                                syncVm.releaseHeld()
                                 android.widget.Toast.makeText(
                                     context,
                                     "Drive authorization failed.",
@@ -779,7 +855,30 @@ fun AerioTVNavHost(
                     }
                 }
 
-                if (restoreOverlayVisible) {
+                val welcomeBpid = welcomeBackupPid
+                val afterWelcomeBackup: () -> Unit = {
+                    welcomeBackupPid = null
+                    welcomeBackupBusy = false
+                    navController.navigate(Routes.MAIN) {
+                        popUpTo(Routes.PLAYLIST_GRAPH) { inclusive = false }
+                    }
+                }
+                if (welcomeBpid != null) {
+                    com.aeriotv.android.feature.onboarding.BackupUpdateStepScreen(
+                        busy = welcomeBackupBusy,
+                        onUpdate = {
+                            welcomeBackupBusy = true
+                            scope.launch {
+                                runCatching { syncVm.acceptBackupUpdate(welcomeBpid) }
+                                afterWelcomeBackup()
+                            }
+                        },
+                        onNotNow = {
+                            syncVm.declineBackupUpdate(welcomeBpid)
+                            afterWelcomeBackup()
+                        },
+                    )
+                } else if (restoreOverlayVisible) {
                     com.aeriotv.android.feature.onboarding.OnboardingSyncProgressScreen(
                         steps = restoreSteps,
                         channelsState = when {
@@ -796,15 +895,44 @@ fun AerioTVNavHost(
                         vm.enableDispatcharrSyncAfterConnect = false
                         navController.navigate(Routes.CHOOSE_TYPE)
                     },
-                    onSyncViaDispatcharr = {
-                        vm.enableDispatcharrSyncAfterConnect = true
-                        vm.startNewSource(SourceType.DispatcharrUserPass)
-                        navController.navigate(Routes.configure(SourceType.DispatcharrUserPass))
+                    onSetUpFromPhone = { navController.navigate(Routes.TV_SETUP) },
+                    // Same flow as Connect a Server > Dispatcharr (Scan QR code or
+                    // Enter details), with Dispatcharr Sync turned on after connect.
+                    showDispatcharr = true,
+                    showDrive = true,
+                    // Logan, 2026-10-30: the cards toggle selection; Continue runs
+                    // Drive first (sign-in and restore), then the Dispatcharr part.
+                    onContinueSync = onCont@{ drive, dispatcharr ->
+                        if (googleSignInInFlight) return@onCont
+                        if (drive) com.aeriotv.android.feature.onboarding.WelcomeSyncChain.markAnswered(com.aeriotv.android.core.sync.SyncProviderId.GoogleDrive)
+                        if (dispatcharr) com.aeriotv.android.feature.onboarding.WelcomeSyncChain.markAnswered(com.aeriotv.android.core.sync.SyncProviderId.Dispatcharr)
+                        com.aeriotv.android.feature.onboarding.WelcomeSyncChain.keepSelection(drive, dispatcharr)
+                        // Rule 4: with both selected, Drive restores playlists and
+                        // credentials only; shared data waits for the setup choice.
+                        if (drive && dispatcharr && syncBuildConfigured) syncVm.holdSharedForChoice()
+                        if (!drive) {
+                            goDispatcharr()
+                            return@onCont
+                        }
+                        chainDispatcharr = dispatcharr
+                        if (!syncBuildConfigured) {
+                            chainDispatcharr = false
+                            welcomeNotConfiguredDialog = true
+                            return@onCont
+                        }
+                        // Logan 2026-08-10: ask what should come in BEFORE any
+                        // of it does (sync-category chooser, then sign-in).
+                        if (!welcomeSyncChoicesMade) {
+                            welcomeSyncChooser = true
+                            return@onCont
+                        }
+                        startGoogleSignIn()
                     },
                     // "Skip for now" is iOS parity. With no playlist saved the channel
                     // list is empty; user can reach Settings -> Change playlist later.
                     // The flag stops MAIN's NeedsUrl guard from bouncing right back.
                     onSkip = {
+                        syncVm.releaseHeld()
                         vm.onboardingSkipped = true
                         navController.navigate(Routes.MAIN) {
                             popUpTo(Routes.PLAYLIST_GRAPH) { inclusive = false }
@@ -812,25 +940,6 @@ fun AerioTVNavHost(
                     },
                     googleSignInInProgress = googleSignInInFlight,
                     googleSignedInEmail = welcomeGoogleEmail.takeIf { it.isNotBlank() },
-                    onSignInWithGoogle = {
-                        if (!syncBuildConfigured) {
-                            welcomeNotConfiguredDialog = true
-                            return@WelcomeScreen
-                        }
-                        // Logan 2026-08-10: ask what should come in BEFORE any
-                        // of it does. Apple's onboarding chooser, same idea:
-                        // the per-category toggles already existed in Settings,
-                        // but by the time a user goes looking for them the
-                        // restore has already landed (Discord: Glitzbr, whose
-                        // second Apple TV inherited a remote map meant for a
-                        // different remote). Deferring sign-in behind the sheet
-                        // means a declined category is never fetched at all.
-                        if (!welcomeSyncChoicesMade) {
-                            welcomeSyncChooser = true
-                            return@WelcomeScreen
-                        }
-                        startGoogleSignIn()
-                    },
                 )
 
                 if (welcomeSyncChooser) {
@@ -847,7 +956,7 @@ fun AerioTVNavHost(
                                 pendingSignIn = true
                             }
                         },
-                        onDismiss = { welcomeSyncChooser = false },
+                        onDismiss = { welcomeSyncChooser = false; chainDispatcharr = false },
                     )
                 }
 
@@ -874,15 +983,38 @@ fun AerioTVNavHost(
                 }
             }
 
+            composable(Routes.TV_SETUP) { entry ->
+                val parent = remember(entry) {
+                    navController.getBackStackEntry(Routes.PLAYLIST_GRAPH)
+                }
+                val vm: PlaylistViewModel = hiltViewModel(parent)
+                com.aeriotv.android.feature.devicesetup.TvSetupScreen(
+                    addPlaylist = { req -> vm.addFromSetup(req) },
+                    onCancel = { navController.popBackStack() },
+                    onDone = {
+                        navController.navigate(Routes.MAIN) {
+                            popUpTo(Routes.PLAYLIST_GRAPH) { inclusive = false }
+                        }
+                    },
+                )
+            }
+
             composable(Routes.CHOOSE_TYPE) { entry ->
                 val parent = remember(entry) {
                     navController.getBackStackEntry(Routes.PLAYLIST_GRAPH)
                 }
                 val vm: PlaylistViewModel = hiltViewModel(parent)
+                val chooseIsTv = com.aeriotv.android.ui.settings.rememberIsTvDevice()
                 ChooseSourceTypeScreen(
+                    onboarding = true,
+                    onSetUpFromPhone = if (chooseIsTv) ({ navController.navigate(Routes.TV_SETUP) }) else null,
                     onBack = { navController.popBackStack() },
                     onChoose = { type ->
-                        vm.enableDispatcharrSyncAfterConnect = false
+                        // Welcome's Sync with Dispatcharr card arrives here with the flag
+                        // on; it holds only for a Dispatcharr pick (Connect a Server clears it).
+                        if (type != SourceType.DispatcharrUserPass && type != SourceType.DispatcharrApiKey) {
+                            vm.enableDispatcharrSyncAfterConnect = false
+                        }
                         // Start a FRESH draft so the add creates a NEW row and
                         // never edits the active playlist (and so the form can't
                         // carry over the active server's API key).
@@ -905,11 +1037,61 @@ fun AerioTVNavHost(
                 val resolvedType = runCatching { SourceType.valueOf(typeName) }
                     .getOrElse { SourceType.M3uUrl }
 
-                // Dispatcharr only: "Add profiles for other users?" step
-                // between a successful connect and the advance to MAIN.
+                // Dispatcharr only, between a successful connect and MAIN:
+                // 1. "Who is this profile for?" (Standard server users only),
+                // 2. "Turn on Dispatcharr Sync?" (its first pull brings the
+                //    profiles roster), 3. "Add profiles for other users?"
+                //    with "From your other devices" (skipped for a Child).
+                var roleStepFor by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf<String?>(null) }
+                var childOnly by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(false) }
                 var profileStepFor by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf<String?>(null) }
-                // Then "Turn on Dispatcharr Sync?" (Direct Connect only).
-                var syncStepFor by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf<String?>(null) }
+                // Entered from a Welcome Drive restore: open straight on the
+                // sync step for the restored playlist; Back goes to MAIN.
+                val restorePid = androidx.compose.runtime.saveable.rememberSaveable {
+                    com.aeriotv.android.feature.onboarding.components.RestoreSyncStep.consume() ?: ""
+                }
+                val fromRestore = restorePid.isNotEmpty()
+                var syncStepFor by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf<String?>(restorePid.ifEmpty { null }) }
+                // Signed in from a Dispatcharr user QR: the sync step asks the
+                // server for existing AerioTV data (restore offer). Memory only.
+                var qrSignIn by remember { mutableStateOf<com.aeriotv.android.core.qr.QrImportBus.SignIn?>(null) }
+                val toMain = {
+                    navController.navigate(Routes.MAIN) {
+                        popUpTo(Routes.PLAYLIST_GRAPH) { inclusive = false }
+                    }
+                }
+                // "Also back up to Google Drive?" between the sync step and Add Profiles.
+                var driveOfferFor by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf<String?>(null) }
+                var driveOfferBusy by remember { mutableStateOf(false) }
+                val cfgSyncVm: com.aeriotv.android.feature.settings.SyncSettingsViewModel = hiltViewModel(parent)
+                val cfgScope = androidx.compose.runtime.rememberCoroutineScope()
+                val cfgContext = androidx.compose.ui.platform.LocalContext.current
+                // "Your backup needs an update" before the sync step after a Drive
+                // restore of an old-format backup (WelcomeSyncChain.Step.BackupUpdate).
+                var backupUpdateFor by remember { mutableStateOf<String?>(null) }
+                var backupChecking by remember { mutableStateOf(fromRestore) }
+                var backupBusy by remember { mutableStateOf(false) }
+                LaunchedEffect(restorePid) {
+                    if (fromRestore) {
+                        backupUpdateFor = runCatching { cfgSyncVm.backupUpdateFor(restorePid) }.getOrNull()
+                        backupChecking = false
+                    }
+                }
+                val afterDriveOffer: () -> Unit = {
+                    val pid = driveOfferFor
+                    driveOfferFor = null
+                    driveOfferBusy = false
+                    if (childOnly) toMain() else profileStepFor = pid
+                }
+                val driveOfferConsent = androidx.activity.compose.rememberLauncherForActivityResult(
+                    androidx.activity.result.contract.ActivityResultContracts.StartIntentSenderForResult(),
+                ) { result ->
+                    cfgScope.launch {
+                        cfgSyncVm.acceptConsentResultNow(result.data)
+                        if (result.resultCode == android.app.Activity.RESULT_OK) cfgSyncVm.setMasterEnabled(true)
+                        afterDriveOffer()
+                    }
+                }
                 LaunchedEffect(Unit) {
                     // Navigate on a one-shot "configured" EVENT, not on
                     // phase == ChannelsReady: when adding a second playlist the
@@ -918,7 +1100,8 @@ fun AerioTVNavHost(
                     vm.sourceConfigured.collect {
                         val pid = vm.state.value.playlist?.id
                         if ((resolvedType == SourceType.DispatcharrApiKey || resolvedType == SourceType.DispatcharrUserPass) && pid != null) {
-                            profileStepFor = pid
+                            qrSignIn = com.aeriotv.android.core.qr.QrImportBus.takeSignIn(vm.state.value.apiKey)
+                            roleStepFor = pid
                             return@collect
                         }
                         navController.navigate(Routes.MAIN) {
@@ -927,25 +1110,123 @@ fun AerioTVNavHost(
                     }
                 }
 
+                val rolePid = roleStepFor
                 val stepPid = profileStepFor
-                if (stepPid != null) {
+                androidx.activity.compose.BackHandler(enabled = fromRestore) {
+                    syncStepFor = null
+                    profileStepFor = null
+                    toMain()
+                }
+                if (rolePid != null) {
+                    com.aeriotv.android.feature.onboarding.ProfileRoleStepScreen(
+                        playlistId = rolePid,
+                        onDone = { child ->
+                            if (roleStepFor == null) return@ProfileRoleStepScreen
+                            childOnly = child
+                            syncStepFor = roleStepFor
+                            roleStepFor = null
+                        },
+                    )
+                } else if (stepPid != null) {
+                    var setUpTvOpen by remember { mutableStateOf(false) }
+                    val onboardingIsTv = com.aeriotv.android.ui.settings.rememberIsTvDevice()
                     com.aeriotv.android.feature.onboarding.AddProfilesStepScreen(
                         playlistId = stepPid,
                         onDone = {
                             if (profileStepFor == null) return@AddProfilesStepScreen
-                            syncStepFor = profileStepFor
                             profileStepFor = null
+                            toMain()
+                        },
+                        onSetUpTv = if (onboardingIsTv) null else ({ setUpTvOpen = true }),
+                        onboarding = true,
+                    )
+                    if (setUpTvOpen) {
+                        com.aeriotv.android.feature.devicesetup.SetUpTvDialog(
+                            playlistId = stepPid,
+                            onDismiss = { setUpTvOpen = false },
+                        )
+                    }
+                } else if (driveOfferFor != null) {
+                    com.aeriotv.android.feature.onboarding.DriveBackupOfferStepScreen(
+                        busy = driveOfferBusy,
+                        onNotNow = afterDriveOffer,
+                        onSignIn = signIn@{
+                            val activity = cfgContext.findActivity() ?: return@signIn
+                            driveOfferBusy = true
+                            cfgScope.launch {
+                                // Same sign-in as the Welcome Google card; the playlist
+                                // already exists, so turning Drive on is all that is needed.
+                                if (cfgSyncVm.signInWithGoogle(activity) == null) {
+                                    driveOfferBusy = false
+                                    return@launch
+                                }
+                                when (val r = cfgSyncVm.requestDriveScope()) {
+                                    is com.aeriotv.android.core.sync.DriveSyncManager.RequestResult.Authorized -> {
+                                        cfgSyncVm.setMasterEnabled(true)
+                                        afterDriveOffer()
+                                    }
+                                    is com.aeriotv.android.core.sync.DriveSyncManager.RequestResult.NeedsConsent ->
+                                        driveOfferConsent.launch(
+                                            androidx.activity.result.IntentSenderRequest.Builder(r.intentSender).build(),
+                                        )
+                                    else -> driveOfferBusy = false
+                                }
+                            }
+                        },
+                    )
+                } else if (backupChecking && syncStepFor != null) {
+                    androidx.compose.foundation.layout.Box(
+                        androidx.compose.ui.Modifier.fillMaxSize(),
+                        contentAlignment = androidx.compose.ui.Alignment.Center,
+                    ) { androidx.compose.material3.CircularProgressIndicator() }
+                } else if (backupUpdateFor != null && syncStepFor != null) {
+                    val bpid = backupUpdateFor!!
+                    com.aeriotv.android.feature.onboarding.BackupUpdateStepScreen(
+                        busy = backupBusy,
+                        onUpdate = {
+                            backupBusy = true
+                            cfgScope.launch {
+                                runCatching { cfgSyncVm.acceptBackupUpdate(bpid) }
+                                backupBusy = false
+                                backupUpdateFor = null
+                            }
+                        },
+                        onNotNow = {
+                            cfgSyncVm.declineBackupUpdate(bpid)
+                            backupUpdateFor = null
                         },
                     )
                 } else if (syncStepFor != null) {
                     com.aeriotv.android.feature.onboarding.DispatcharrSyncStepScreen(
                         autoEnable = vm.enableDispatcharrSyncAfterConnect,
+                        qrSignIn = qrSignIn,
+                        // Rule 4 prompt Cancel: back to Welcome, selections kept.
+                        onCancel = {
+                            syncStepFor = null
+                            qrSignIn = null
+                            vm.enableDispatcharrSyncAfterConnect = false
+                            com.aeriotv.android.feature.onboarding.WelcomeSyncChain.markReturnedFromChoice()
+                            navController.navigate(Routes.WELCOME) {
+                                popUpTo(Routes.PLAYLIST_GRAPH) { inclusive = false }
+                            }
+                        },
                         onDone = {
                             if (syncStepFor == null) return@DispatcharrSyncStepScreen
+                            val pid = syncStepFor
                             syncStepFor = null
+                            qrSignIn = null
                             vm.enableDispatcharrSyncAfterConnect = false
-                            navController.navigate(Routes.MAIN) {
-                                popUpTo(Routes.PLAYLIST_GRAPH) { inclusive = false }
+                            cfgScope.launch {
+                                val driveOn = runCatching { cfgSyncVm.masterEnabled.first() }.getOrDefault(true)
+                                val driveAvailable = com.aeriotv.android.core.sync.SyncConfig.isConfigured()
+                                if (com.aeriotv.android.feature.onboarding.WelcomeSyncChain.showDriveOffer(driveOn, driveAvailable)) {
+                                    com.aeriotv.android.feature.onboarding.WelcomeSyncChain.markAnswered(com.aeriotv.android.core.sync.SyncProviderId.GoogleDrive)
+                                    driveOfferFor = pid
+                                    return@launch
+                                }
+                                // A Child cannot add profiles; a parent adds theirs
+                                // later from Manage Profiles behind the device PIN.
+                                if (childOnly) toMain() else profileStepFor = pid
                             }
                         },
                     )
@@ -962,6 +1243,10 @@ fun AerioTVNavHost(
                 }
                 val vm: PlaylistViewModel = hiltViewModel(parent)
                 val state by vm.state.collectAsStateWithLifecycle()
+                // One-time "Keep your devices in sync" offer after onboarding's first restore or pull.
+                com.aeriotv.android.feature.onboarding.SyncProvidersOfferHost(
+                    syncVm = hiltViewModel(parent),
+                )
                 // Capability gates read the LIVE active row: the UiState snapshot
                 // predates the probe that writes the permissions (2026-10-05).
                 val livePlaylist by vm.activePlaylistLive.collectAsStateWithLifecycle(initialValue = null)
@@ -1180,8 +1465,7 @@ fun AerioTVNavHost(
                         launchSingleTop = true
                     }
                 }
-                MainScaffold(
-                    onChannelClick = { channel ->
+                val mainOnChannelClick: (M3UChannel) -> Unit = tap@{ channel ->
                         // Cast play-where prompt: with a Google Cast session
                         // active, ask Play Here / Play on <receiver>. The
                         // companion link keeps its direct behavior.
@@ -1208,7 +1492,7 @@ fun AerioTVNavHost(
                         ) {
                             tuneSettingsVm.setLastWatchedChannelId(channel.id)
                             tuneSettingsVm.recordRecentChannel(channel.id)
-                            return@MainScaffold
+                            return@tap
                         }
                         android.util.Log.i(
                             "AerioCast",
@@ -1224,7 +1508,10 @@ fun AerioTVNavHost(
                                 playOnReceiver = { channelPlay(channel, false) },
                             )
                         }
-                    },
+                }
+                androidx.compose.runtime.SideEffect { mainChannelTap.value = mainOnChannelClick }
+                MainScaffold(
+                    onChannelClick = mainOnChannelClick,
                     // Cast card flips / Switch and the Change Cast Device
                     // handoff already target the receiver: no prompt.
                     onCastChannel = { channel -> channelPlay(channel, false) },
@@ -1875,6 +2162,15 @@ fun AerioTVNavHost(
                     },
                     onMovieClick = { uuid -> navController.navigate(Routes.movieDetail(uuid)) },
                     onSeriesClick = { id -> navController.navigate(Routes.seriesDetail(id)) },
+                    onPlayChannel = { id ->
+                        val channel = playlistVm.state.value.channels.firstOrNull { it.id == id }
+                        val tap = mainChannelTap.value
+                        when {
+                            channel == null -> Unit
+                            tap != null -> tap(channel)
+                            else -> navController.navigate(Routes.player(channel.id)) { launchSingleTop = true }
+                        }
+                    },
                 )
             }
 
@@ -2218,11 +2514,8 @@ fun AerioTVNavHost(
         val updateBackStack by navController.currentBackStackEntryAsState()
         UpdateGate(currentRoute = updateBackStack?.destination?.route)
 
-        // Live Rewind one-time feature prompt (task #145). Renders only on
-        // the main tabs after What's New settles, so prompts never stack.
-        com.aeriotv.android.feature.whatsnew.LiveRewindPromptGate(
-            currentRoute = updateBackStack?.destination?.route,
-        )
+        // The one-time "New: Live Rewind" prompt was retired 2026-10-27: the
+        // feature is old news. Settings > Player > Live Rewind remains.
 
         // Mini-player overlay (Phase 139 / audit #22). The session ViewModel
         // is rooted here so the same instance is visible from PlayerScreen

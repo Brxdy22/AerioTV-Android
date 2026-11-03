@@ -58,6 +58,9 @@ class SearchViewModel @Inject constructor(
              *  Null when no channel matches the programme's key. */
             val channelName: String? = null,
             val channelLogo: String? = null,
+            /** [M3UChannel.id] of the matched channel (GH #162): a live
+             *  result plays this channel instead of jumping to the guide. */
+            val channelRowId: String? = null,
         ) : Result {
             override val key = "epg-${programme.channelId}-${programme.startMillis}"
             val isLive: Boolean
@@ -84,6 +87,18 @@ class SearchViewModel @Inject constructor(
     val state: StateFlow<UiState> = _state.asStateFlow()
 
     private var searchJob: Job? = null
+
+    /*
+     * GH #162 (Streamer): Back from an item opened out of the results must
+     * land on the same results. The query and results already live here; the
+     * list position and the opened row are kept here too, because the TV
+     * Search tab leaves composition while a detail or player route is on
+     * top and the remembered list state went with it.
+     */
+    var listIndex: Int = 0
+    var listOffset: Int = 0
+    /** [Result.key] of the row last opened; focus returns to it on TV. */
+    var lastOpenedKey: String? = null
 
     fun onQueryChange(value: String) {
         _state.update { it.copy(query = value) }
@@ -133,18 +148,38 @@ class SearchViewModel @Inject constructor(
                 compareByDescending<EPGProgramme> { now in it.startMillis until it.endMillis }
                     .thenBy { it.startMillis },
             )
-            .take(30)
             .map { prog ->
-                // Cached programmes already carry the canonical guideMatchKey as
-                // channelId (bridgeChannelIds runs at fetch), so a plain map hit
-                // resolves the channel for name + logo.
+                // Cached rows may carry either the canonical key or the raw feed
+                // key (tvg-id or uuid), so a canonical miss falls back to the
+                // guide's own match maps (Streamer 2026-11-02: live results had
+                // no channel and opened the guide instead of playing).
                 val ch = channels[prog.channelId.trim().lowercase()]
+                    ?: matchMaps(playlistId).resolve(prog.channelId).firstOrNull()
+                        ?.let { channels[it.value.trim().lowercase()] }
                 Result.Epg(
                     programme = prog,
                     channelName = ch?.name?.takeIf { it.isNotBlank() },
                     channelLogo = ch?.tvgLogo?.takeIf { it.isNotBlank() },
+                    channelRowId = ch?.id,
                 )
             }
+            // The same airing can be cached under more than one raw key (the
+            // canonical disp: id and a numeric feed key, measured on the
+            // Streamer 2026-11-02); show it once per channel and start time.
+            .distinctBy { (it.channelRowId ?: it.programme.channelId) to it.programme.startMillis }
+            .take(30)
+    }
+
+    private var matchMapsCache: Pair<String, com.aeriotv.android.core.guide.GuideMatchMaps>? = null
+    private suspend fun matchMaps(playlistId: String): com.aeriotv.android.core.guide.GuideMatchMaps {
+        matchMapsCache?.let { (cachedId, maps) -> if (cachedId == playlistId) return maps }
+        val channels = runCatching { playlistRepository.loadCachedChannels(playlistId) }
+            .getOrDefault(emptyList())
+        val maps = com.aeriotv.android.core.guide.GuideMatchMaps.build(channels)
+        // Never pin an empty read: a search typed before the channel cache
+        // landed kept every result unnamed and unplayable for the VM's life.
+        if (channels.isNotEmpty()) matchMapsCache = playlistId to maps
+        return maps
     }
 
     /** Channel lookup by canonical [guideMatchKey], cached per playlist so
@@ -156,8 +191,12 @@ class SearchViewModel @Inject constructor(
         val channels = runCatching { playlistRepository.loadCachedChannels(playlistId) }
             .getOrDefault(emptyList())
         val map = LinkedHashMap<String, M3UChannel>(channels.size * 2)
-        for (ch in channels) map.putIfAbsent(ch.guideMatchKey.trim().lowercase(), ch)
-        channelKeyCache = playlistId to map
+        for (ch in channels) {
+            map.putIfAbsent(ch.guideMatchKey.trim().lowercase(), ch)
+            // Row id too: a cached programme may carry it directly.
+            map.putIfAbsent(ch.id.trim().lowercase(), ch)
+        }
+        if (channels.isNotEmpty()) channelKeyCache = playlistId to map
         return map
     }
 

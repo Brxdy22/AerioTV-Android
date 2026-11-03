@@ -75,6 +75,8 @@ object TvChrome {
     fun dialogSurface(): Color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f)
 
     val circleSize: Dp = 30.dp
+    /** Glyph (icon or avatar) diameter inside a top-bar circle. */
+    fun circleGlyphSize(size: Dp = circleSize): Dp = size * 0.47f
     val pillHorizontalPadding: Dp = 13.dp
     val pillVerticalPadding: Dp = 6.dp
     val ringWidth: Dp = 2.dp
@@ -180,6 +182,49 @@ fun TvActionCircle(
     interactionSource: MutableInteractionSource = remember { MutableInteractionSource() },
     badge: (@Composable androidx.compose.foundation.layout.BoxScope.() -> Unit)? = null,
 ) {
+    TvActionCircleSurface(
+        onClick = onClick,
+        modifier = modifier,
+        selected = selected,
+        accentGlyph = accentGlyph,
+        enabled = !spinning,
+        size = size,
+        interactionSource = interactionSource,
+    ) { glyph ->
+        if (spinning) {
+            TvGatedSpinner(color = glyph, strokeWidth = 2.dp, modifier = Modifier.size(size * 0.5f), animate = spinAnimates && rememberSpinnerMayAnimate())
+        } else {
+            Icon(
+                imageVector = icon,
+                contentDescription = contentDescription,
+                tint = glyph,
+                modifier = Modifier.size(TvChrome.circleGlyphSize(size)),
+            )
+        }
+        badge?.invoke(this)
+    }
+}
+
+/**
+ * The shell every top-bar circle shares (Refresh, Search, kept-live, the
+ * profile avatar): diameter, 1.08 grow, translucent rest fill, white focus
+ * platter, accent fill while selected. [content] gets the glyph colour and
+ * should size its glyph with [TvChrome.circleGlyphSize].
+ */
+@Composable
+fun TvActionCircleSurface(
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    selected: Boolean = false,
+    accentGlyph: Boolean = false,
+    enabled: Boolean = true,
+    size: Dp = TvChrome.circleSize,
+    /** The content IS the button (the profile avatar disc): no rest or
+     *  focus platter; focus draws a white ring on the disc edge instead. */
+    bare: Boolean = false,
+    interactionSource: MutableInteractionSource = remember { MutableInteractionSource() },
+    content: @Composable androidx.compose.foundation.layout.BoxScope.(glyph: Color) -> Unit,
+) {
     val focused by interactionSource.collectIsFocusedAsState()
     val colors = MaterialTheme.colorScheme
     val fill by animateColorAsState(
@@ -188,6 +233,9 @@ fun TvActionCircle(
             selected -> colors.primary
             else -> colors.onSurface.copy(alpha = 0.12f)
         },
+        // Same 150 ms as the focus scale, so the button focus left is back
+        // to idle with the scale (the default spring lagged behind it).
+        animationSpec = androidx.compose.animation.core.tween(durationMillis = 150),
         label = "tvActionCircleFill",
     )
     val glyph by animateColorAsState(
@@ -197,6 +245,9 @@ fun TvActionCircle(
             accentGlyph -> colors.primary
             else -> colors.onSurface.copy(alpha = 0.85f)
         },
+        // Same 150 ms as the focus scale, so the button focus left is back
+        // to idle with the scale (the default spring lagged behind it).
+        animationSpec = androidx.compose.animation.core.tween(durationMillis = 150),
         label = "tvActionCircleGlyph",
     )
     Box(
@@ -204,26 +255,19 @@ fun TvActionCircle(
             .tvFocusScale(focused, focusedScale = 1.08f)
             .size(size)
             .clip(CircleShape)
-            .background(fill)
+            .then(if (bare) Modifier else Modifier.background(fill))
             .clickable(
                 interactionSource = interactionSource,
                 indication = null,
-                enabled = !spinning,
+                enabled = enabled,
                 onClick = onClick,
             ),
         contentAlignment = Alignment.Center,
     ) {
-        if (spinning) {
-            TvGatedSpinner(color = glyph, strokeWidth = 2.dp, modifier = Modifier.size(size * 0.5f), animate = spinAnimates && rememberSpinnerMayAnimate())
-        } else {
-            Icon(
-                imageVector = icon,
-                contentDescription = contentDescription,
-                tint = glyph,
-                modifier = Modifier.size(size * 0.47f),
-            )
+        content(glyph)
+        if (bare && focused) {
+            Box(Modifier.matchParentSize().border(2.dp, Color.White, CircleShape))
         }
-        badge?.invoke(this)
     }
 }
 

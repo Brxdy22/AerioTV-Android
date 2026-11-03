@@ -4,6 +4,9 @@ import com.aeriotv.android.ui.scale.subtext
 import com.aeriotv.android.ui.theme.textAccent
 import com.aeriotv.android.core.data.db.entity.sanitizeGuideDays
 import kotlinx.coroutines.launch
+import androidx.compose.foundation.relocation.bringIntoViewRequester
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -20,6 +23,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
@@ -122,6 +126,37 @@ fun ConfigureSourceScreen(
         )
     }
 
+    // Dispatcharr user QR (scanned, picked from Photos, or imported from a file):
+    // fill the server URL and API key, switch to API Key, then run the same
+    // Test Connection path as typing. The username is advisory, display only.
+    var scannedUser by remember(sourceType) { mutableStateOf<String?>(null) }
+    // After a scan, show the compact Playlist details step (name, guide days,
+    // recordings) instead of auto-submitting; "Edit all details" falls back
+    // to the full form with the scanned values filled.
+    var showScanDetails by remember(sourceType) { mutableStateOf(false) }
+    val applyUserKey: (com.aeriotv.android.core.qr.ScannedCode.Result.UserKey) -> Unit = { k ->
+        dispatcharrAuthMode = DispatcharrAuthMode.ApiKey
+        viewModel.onSourceTypeChange(SourceType.DispatcharrApiKey)
+        k.baseUrl?.let(viewModel::onUrlChange)
+        viewModel.onApiKeyChange(k.apiKey)
+        scannedUser = k.username
+        com.aeriotv.android.core.qr.QrImportBus.noteSignIn(
+            com.aeriotv.android.core.qr.QrImportBus.SignIn(
+                apiKey = k.apiKey,
+                baseUrl = k.baseUrl ?: com.aeriotv.android.feature.playlist.normalizeSchemedUrl(viewModel.state.value.url),
+                username = k.username,
+            ),
+        )
+        if (viewModel.state.value.name.isBlank()) {
+            val host = scannedHost(viewModel.state.value.url)
+            viewModel.onNameChange(host ?: "Dispatcharr")
+        }
+        showScanDetails = true
+        // Probe DVR access now so the recording row knows the account's
+        // access; Connect reuses the result.
+        viewModel.probeScannedDvrAccess()
+    }
+
     val cardIcon: ImageVector
     val cardTitle: String
     val cardSubtitle: String
@@ -146,26 +181,14 @@ fun ConfigureSourceScreen(
 
     TvKeyboardOnOkHost {
     Column(modifier = Modifier.fillMaxSize()) {
-        TopAppBar(
-            title = {
-                Text(
-                    "Configure",
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold,
-                    // See ChooseSourceTypeScreen: hiding the TV back arrow
-                    // collapses the nav-icon slot and leaves the title inside
-                    // the title-safe margin.
-                    modifier = if (rememberIsTvDevice()) {
-                        Modifier.padding(start = TvSettingsMetrics.topAppBarTitleOverscanPadding)
-                    } else {
-                        Modifier
-                    },
-                )
-            },
-            navigationIcon = {
-                // No back arrow on Android TV -- the remote BACK steps back to
-                // source-type pick. Phones/tablets keep it.
-                if (!rememberIsTvDevice()) {
+        // No page title (owner 2026-10-27): the source card names the step.
+        // Phones/tablets keep the back arrow; on Android TV the remote BACK
+        // steps back to the source-type pick, so the bar is dropped.
+        val isTv = rememberIsTvDevice()
+        if (!isTv) {
+            TopAppBar(
+                title = {},
+                navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(
                             imageVector = Icons.AutoMirrored.Filled.ArrowBack,
@@ -173,13 +196,13 @@ fun ConfigureSourceScreen(
                             tint = MaterialTheme.colorScheme.primary,
                         )
                     }
-                }
-            },
-            colors = TopAppBarDefaults.topAppBarColors(
-                containerColor = MaterialTheme.colorScheme.background,
-                titleContentColor = MaterialTheme.colorScheme.onBackground,
-            ),
-        )
+                },
+                colors = TopAppBarDefaults.topAppBarColors(
+                    containerColor = MaterialTheme.colorScheme.background,
+                    titleContentColor = MaterialTheme.colorScheme.onBackground,
+                ),
+            )
+        }
 
         val vp = com.aeriotv.android.ui.adaptive.rememberViewport()
         // TV: deadband spec stops the form's +/-1px per-frame jiggle when a
@@ -195,7 +218,15 @@ fun ConfigureSourceScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = vp.gutter, vertical = 12.dp),
+                // Bottom room so Test Connection never sits flush on the
+                // display edge when focus scrolls to it; TV adds top room
+                // for the overscan margin now that the bar is gone.
+                .padding(
+                    start = vp.gutter,
+                    end = vp.gutter,
+                    top = if (isTv) 32.dp else 12.dp,
+                    bottom = if (isTv) 64.dp else 32.dp,
+                ),
             contentAlignment = androidx.compose.ui.Alignment.TopCenter,
         ) {
         Column(
@@ -205,6 +236,32 @@ fun ConfigureSourceScreen(
                 Modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
+            if (showScanDetails && !isTv) {
+                ScannedPlaylistDetails(
+                    username = scannedUser,
+                    host = scannedHost(state.url),
+                    name = state.name,
+                    onNameChange = viewModel::onNameChange,
+                    isLoading = state.isLoading,
+                    error = state.error,
+                    guideRow = {
+                        GuideHistoryRow(
+                            selectedDays = state.epgRetentionDays,
+                            onSelect = viewModel::onEpgRetentionDaysChange,
+                        )
+                    },
+                    dvrRow = {
+                        DvrDestinationRow(
+                            server = state.dvrDestinationServer,
+                            onSelect = viewModel::onDvrDestinationChange,
+                            access = state.dvrManageAccess,
+                            checking = state.isCheckingDvrAccess,
+                        )
+                    },
+                    onConnect = { viewModel.loadPlaylist() },
+                    onEditAll = { showScanDetails = false },
+                )
+            } else {
             SourceTypeCard(icon = cardIcon, title = cardTitle, subtitle = cardSubtitle)
 
             when (sourceType) {
@@ -213,6 +270,8 @@ fun ConfigureSourceScreen(
                         state = state,
                         viewModel = viewModel,
                         authMode = dispatcharrAuthMode,
+                        scannedUser = scannedUser,
+                        onUserKey = applyUserKey,
                         onAuthModeChange = { mode ->
                             dispatcharrAuthMode = mode
                             viewModel.onSourceTypeChange(
@@ -254,6 +313,8 @@ fun ConfigureSourceScreen(
                 DvrDestinationRow(
                     server = state.dvrDestinationServer,
                     onSelect = viewModel::onDvrDestinationChange,
+                    access = state.dvrManageAccess,
+                    checking = state.isCheckingDvrAccess,
                 )
             }
 
@@ -282,13 +343,30 @@ fun ConfigureSourceScreen(
 
             Spacer(Modifier.height(8.dp))
 
+            // When D-pad focus lands on Test Connection, scroll so the page
+            // shows a strip below it instead of parking it on the edge.
+            val testBringer = remember { androidx.compose.foundation.relocation.BringIntoViewRequester() }
+            val testScope = androidx.compose.runtime.rememberCoroutineScope()
+            var testSize by remember { mutableStateOf(androidx.compose.ui.unit.IntSize.Zero) }
+            val testTail = with(androidx.compose.ui.platform.LocalDensity.current) { 48.dp.toPx() }
             Button(
                 onClick = { viewModel.loadPlaylist() },
                 enabled = !state.isLoading && validation == null,
                 modifier = Modifier
+                    .onSizeChanged { testSize = it }
+                    .bringIntoViewRequester(testBringer)
+                    .onFocusChanged { fs ->
+                        if (fs.isFocused) testScope.launch {
+                            testBringer.bringIntoView(
+                                androidx.compose.ui.geometry.Rect(
+                                    0f, 0f, testSize.width.toFloat(), testSize.height + testTail,
+                                ),
+                            )
+                        }
+                    }
                     .fillMaxWidth()
                     .heightIn(min = 54.dp)
-                    .dpadFocusRing(RoundedCornerShape(50)),
+                    .dpadFocusRing(RoundedCornerShape(50), onFilled = true),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = MaterialTheme.colorScheme.primary,
                     contentColor = MaterialTheme.colorScheme.onPrimary,
@@ -316,11 +394,20 @@ fun ConfigureSourceScreen(
             }
 
             Spacer(Modifier.height(24.dp))
+            }
         }
         }
         }
     }
     }
+}
+
+/** Host of a server URL for display, or null when it cannot be parsed. */
+internal fun scannedHost(url: String): String? {
+    val u = url.trim()
+    if (u.isEmpty()) return null
+    val withScheme = if (u.contains("://")) u else "http://$u"
+    return runCatching { android.net.Uri.parse(withScheme).host }.getOrNull()?.takeIf { it.isNotBlank() }
 }
 
 /** Shown under the Username & Password fields on onboarding and Edit Playlist. */
@@ -335,8 +422,11 @@ private fun DispatcharrFields(
     state: PlaylistViewModel.UiState,
     viewModel: PlaylistViewModel,
     authMode: DispatcharrAuthMode,
+    scannedUser: String?,
+    onUserKey: (com.aeriotv.android.core.qr.ScannedCode.Result.UserKey) -> Unit,
     onAuthModeChange: (DispatcharrAuthMode) -> Unit,
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
     LabeledField(label = "Name") {
         IconTextField(
             value = state.name,
@@ -364,6 +454,27 @@ private fun DispatcharrFields(
         onSelect = onAuthModeChange,
         enabled = !state.isLoading,
     )
+
+    // Phones and tablets (draws nothing on TV), in both sign-in modes: the
+    // Dispatcharr user QR fills the server and key in one step.
+    com.aeriotv.android.feature.qrscan.QrScanActions(
+        enabled = !state.isLoading,
+        onResult = { r ->
+            when (r) {
+                is com.aeriotv.android.core.qr.ScannedCode.Result.UserKey -> onUserKey(r)
+                is com.aeriotv.android.core.qr.ScannedCode.Result.SetupLink ->
+                    com.aeriotv.android.feature.qrscan.openSetupLink(context, r.link)
+                com.aeriotv.android.core.qr.ScannedCode.Result.Invalid -> Unit
+            }
+        },
+    )
+    scannedUser?.let {
+        Text(
+            text = "Signed in as $it",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.primary,
+        )
+    }
 
     when (authMode) {
         DispatcharrAuthMode.ApiKey -> {
@@ -754,9 +865,9 @@ private fun SegmentItem(
     val fg = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onBackground
     Box(
         modifier = modifier
+            .dpadFocusRing(RoundedCornerShape(18.dp), washTint = MaterialTheme.colorScheme.primary, onFilled = isSelected)
             .clip(RoundedCornerShape(18.dp))
             .background(bg)
-            .dpadFocusRing(RoundedCornerShape(18.dp), washTint = MaterialTheme.colorScheme.primary)
             .clickable(enabled = enabled, onClick = onClick)
             .padding(vertical = 10.dp),
         contentAlignment = Alignment.Center,
@@ -872,10 +983,15 @@ private fun VodEnabledRow(
  * bodySmall help paragraph the other rows use. Each pill carries the D-pad
  * focus wash so the choice is navigable on TV.
  */
+internal const val DVR_DENIED_LINE =
+    "Recordings save to this device. Server recording needs DVR Manage access in Dispatcharr."
+
 @Composable
-private fun DvrDestinationRow(
+internal fun DvrDestinationRow(
     server: Boolean,
     onSelect: (Boolean) -> Unit,
+    access: com.aeriotv.android.core.data.capability.CapabilityState? = null,
+    checking: Boolean = false,
 ) {
     Column(modifier = Modifier.padding(vertical = 4.dp)) {
         Text(
@@ -885,6 +1001,30 @@ private fun DvrDestinationRow(
             fontWeight = FontWeight.Medium,
         )
         Spacer(Modifier.height(8.dp))
+        if (checking) {
+            Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                androidx.compose.material3.CircularProgressIndicator(
+                    modifier = Modifier.size(16.dp),
+                    strokeWidth = 2.dp,
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    text = "Checking access",
+                    style = MaterialTheme.typography.bodySmall.subtext(),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            return@Column
+        }
+        if (access == com.aeriotv.android.core.data.capability.CapabilityState.Denied) {
+            // Denied: no choice; the add commits This Device.
+            Text(
+                text = DVR_DENIED_LINE,
+                style = MaterialTheme.typography.bodySmall.subtext(),
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            return@Column
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             listOf(true to "Server (Dispatcharr)", false to "This Device").forEach { (isServer, label) ->
                 val selected = isServer == server
@@ -894,8 +1034,10 @@ private fun DvrDestinationRow(
                     color = if (selected) MaterialTheme.colorScheme.onPrimary
                     else MaterialTheme.colorScheme.onBackground,
                     modifier = Modifier
+                        // Ring before the clip so the focused scale is not
+                        // cut off; white ring on the selected (filled) pill.
+                        .dpadFocusRing(RoundedCornerShape(50), washTint = MaterialTheme.colorScheme.primary, onFilled = selected)
                         .clip(RoundedCornerShape(50))
-                        .dpadFocusRing(RoundedCornerShape(50), washTint = MaterialTheme.colorScheme.primary)
                         .background(
                             if (selected) MaterialTheme.colorScheme.primary
                             else MaterialTheme.colorScheme.surface.copy(alpha = 0.6f),
@@ -906,7 +1048,7 @@ private fun DvrDestinationRow(
             }
         }
         Text(
-            text = "Where recordings are saved by default. Server recording requires a Dispatcharr admin account. You can change this later in Settings > DVR.",
+            text = "Where recordings are saved by default. Server recording needs DVR Manage access in Dispatcharr. You can change this later in Settings > DVR.",
             style = MaterialTheme.typography.bodySmall.subtext(),
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             modifier = Modifier.padding(top = 4.dp),
@@ -915,7 +1057,7 @@ private fun DvrDestinationRow(
 }
 
 @Composable
-private fun GuideHistoryRow(
+internal fun GuideHistoryRow(
     selectedDays: Int,
     onSelect: (Int) -> Unit,
 ) {
@@ -941,8 +1083,10 @@ private fun GuideHistoryRow(
                     color = if (selected) MaterialTheme.colorScheme.onPrimary
                     else MaterialTheme.colorScheme.onBackground,
                     modifier = Modifier
+                        // Ring before the clip so the focused scale is not
+                        // cut off; white ring on the selected (filled) pill.
+                        .dpadFocusRing(RoundedCornerShape(50), washTint = MaterialTheme.colorScheme.primary, onFilled = selected)
                         .clip(RoundedCornerShape(50))
-                        .dpadFocusRing(RoundedCornerShape(50), washTint = MaterialTheme.colorScheme.primary)
                         .background(
                             if (selected) MaterialTheme.colorScheme.primary
                             else MaterialTheme.colorScheme.surface.copy(alpha = 0.6f),

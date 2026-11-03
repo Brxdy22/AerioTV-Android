@@ -63,13 +63,17 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.aeriotv.android.core.pip.findActivity
 import com.aeriotv.android.core.sync.DriveSyncManager
 import com.aeriotv.android.core.sync.SyncCategory
+import com.aeriotv.android.core.sync.SyncItemCatalog
+import com.aeriotv.android.core.sync.SyncScope
 import com.aeriotv.android.core.sync.SyncConfig
 import com.aeriotv.android.ui.settings.settingsFormWidth
 import com.aeriotv.android.ui.settings.SettingsDetailTopBar
 import com.aeriotv.android.ui.settings.SettingsDialogTextButton
 import com.aeriotv.android.ui.settings.SettingsSection
-import com.aeriotv.android.ui.settings.SettingsPickerOption
 import com.aeriotv.android.ui.settings.SettingsPickerRow
+import com.aeriotv.android.ui.settings.SettingsPickerOption
+import com.aeriotv.android.ui.settings.SettingsToggleRow
+import com.aeriotv.android.ui.settings.SettingsSectionFooter
 import com.aeriotv.android.ui.settings.dpadFocusRing
 import com.aeriotv.android.ui.settings.settingsRowCard
 import com.aeriotv.android.ui.settings.settingsTvFocusableRow
@@ -129,14 +133,21 @@ fun SyncSettingsScreen(
     val lastPush by viewModel.lastPushAt.collectAsStateWithLifecycle(initialValue = 0L)
     val lastPull by viewModel.lastPullAt.collectAsStateWithLifecycle(initialValue = 0L)
     val statusObj by viewModel.driveStatus.collectAsState()
+    val driveNeedsSignIn by viewModel.driveNeedsSignIn.collectAsState()
     val clearStatus by viewModel.clearStatus.collectAsState()
     val pushStatus by viewModel.pushStatus.collectAsState()
     val pullStatus by viewModel.pullStatus.collectAsState()
     var pushConfirmOpen by remember { mutableStateOf(false) }
     var pullConfirmOpen by remember { mutableStateOf(false) }
     var clearConfirmOpen by remember { mutableStateOf(false) }
+    val dsyncPushStatus by viewModel.dsyncPushStatus.collectAsState()
+    val dsyncPullStatus by viewModel.dsyncPullStatus.collectAsState()
+    val bothPushStatus by viewModel.bothPushStatus.collectAsState()
+    var dsyncPushConfirmOpen by remember { mutableStateOf(false) }
+    var dsyncPullConfirmOpen by remember { mutableStateOf(false) }
+    var bothPushConfirmOpen by remember { mutableStateOf(false) }
     val configured = remember { SyncConfig.isConfigured() }
-    val provider by viewModel.syncProvider.collectAsStateWithLifecycle(initialValue = "off")
+    val dsyncOn by viewModel.dispatcharrSyncEnabled.collectAsStateWithLifecycle(initialValue = false)
     val dsyncAvailable by viewModel.dispatcharrAvailable.collectAsStateWithLifecycle(initialValue = false)
     val dsyncUi by viewModel.dispatcharrUi.collectAsState()
 
@@ -146,10 +157,71 @@ fun SyncSettingsScreen(
     val credsSyncDisclosed by viewModel.credentialsSyncDisclosed
         .collectAsStateWithLifecycle(initialValue = true)
     var credsSyncDisclosureOpen by remember { mutableStateOf(false) }
+    // Rule 4: turning on the SECOND provider while both hold differing data
+    // asks which setup to keep first; Cancel leaves the switch off.
+    val setupScope = rememberCoroutineScope()
+    var setupAsk by remember { mutableStateOf<Pair<com.aeriotv.android.core.sync.SetupSourceCoordinator.Probe, Boolean>?>(null) }
+    var setupProbing by remember { mutableStateOf(false) }
+    // "Your backup needs an update": on Sync screen open with Drive sync on, once per app session.
+    var backupUpdatePid by remember { mutableStateOf<String?>(null) }
+    var backupUpdateBusy by remember { mutableStateOf(false) }
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        backupUpdatePid = runCatching { viewModel.backupUpdateForSettings() }.getOrNull()
+    }
+    backupUpdatePid?.let { bpid ->
+        com.aeriotv.android.feature.onboarding.BackupUpdateDialog(
+            busy = backupUpdateBusy,
+            onUpdate = {
+                backupUpdateBusy = true
+                setupScope.launch {
+                    runCatching { viewModel.acceptBackupUpdate(bpid) }
+                    backupUpdateBusy = false
+                    backupUpdatePid = null
+                }
+            },
+            onNotNow = {
+                viewModel.declineBackupUpdate(bpid)
+                backupUpdatePid = null
+            },
+        )
+    }
+    val enableSecond: (Boolean, () -> Unit) -> Unit = { enablingDrive, plain ->
+        if (!setupProbing) {
+            setupProbing = true
+            setupScope.launch {
+                val p = runCatching { viewModel.probeSetupSource() }.getOrNull()
+                setupProbing = false
+                when (p?.decision) {
+                    is com.aeriotv.android.core.sync.SetupSourceChoice.Decision.Ask -> setupAsk = p to enablingDrive
+                    com.aeriotv.android.core.sync.SetupSourceChoice.Decision.UseDrive ->
+                        viewModel.applySetupSourceAndEnable(com.aeriotv.android.core.sync.SetupSourceChoice.Source.Drive, p.playlistId, enablingDrive)
+                    com.aeriotv.android.core.sync.SetupSourceChoice.Decision.UseDispatcharr ->
+                        viewModel.applySetupSourceAndEnable(com.aeriotv.android.core.sync.SetupSourceChoice.Source.Dispatcharr, p.playlistId, enablingDrive)
+                    null -> plain()
+                }
+            }
+        }
+    }
+    setupAsk?.let { (p, enablingDrive) ->
+        com.aeriotv.android.feature.onboarding.SetupSourceDialog(
+            drive = p.drive,
+            dsync = p.dsync,
+            onContinue = { source ->
+                setupAsk = null
+                viewModel.applySetupSourceAndEnable(source, p.playlistId, enablingDrive)
+            },
+            onCancel = { setupAsk = null },
+        )
+    }
 
     // Silently restore a persisted Drive session on open so the screen shows
     // signed-in (and Push/Pull work) without a manual re-login.
     LaunchedEffect(Unit) { viewModel.restoreSessionIfPossible() }
+    // Unknown-Drive setup choice (section 10a): once Drive answers, the probe
+    // decides here, or opens the prompt when both sides differ.
+    LaunchedEffect(statusObj, dsyncOn, masterEnabled) {
+        if (statusObj is DriveSyncManager.Status.SignedIn && dsyncOn && masterEnabled && viewModel.driveUnknownPending()) enableSecond(true) {}
+    }
 
     // Action results are point-in-time feedback; don't let a stale "Synced 5
     // categories" line greet the next visit (PlaylistDetailScreen pattern).
@@ -228,60 +300,7 @@ fun SyncSettingsScreen(
             ),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            item {
-                // Sync with: Off / Google Drive / Dispatcharr. Dispatcharr is
-                // offered only on a Dispatcharr Direct Connect playlist (or
-                // while it is the current choice, so it can be turned off).
-                val options = buildList {
-                    add(SettingsPickerOption("off", "Off"))
-                    add(SettingsPickerOption("drive", "Google Drive"))
-                    if (dsyncAvailable || provider == "dispatcharr") add(SettingsPickerOption("dispatcharr", "Dispatcharr"))
-                }
-                SettingsSection(
-                    header = "",
-                    footer = if (tvRows) null else "Dispatcharr keeps your favorites, progress, reminders, and settings on your Dispatcharr server, separately for each profile.",
-                ) {
-                    SettingsPickerRow(
-                        title = "Sync with",
-                        options = options,
-                        selected = provider,
-                        onSelect = { viewModel.setSyncProvider(it) },
-                        inlineTitle = true,
-                    )
-                }
-            }
-            if (provider == "dispatcharr") {
-                item {
-                    SettingsSection(
-                        header = "",
-                        footer = if (tvRows) null else "Each profile syncs as its own Dispatcharr user. Playlists and sign-in details never sync here. Admins on your Dispatcharr server can view synced data.",
-                    ) {
-                        SyncTileActionRow(
-                            icon = Icons.Filled.CloudSync,
-                            title = "Dispatcharr Sync",
-                            subtitle = when {
-                                !dsyncAvailable -> "Needs a Dispatcharr playlist"
-                                dsyncUi.message != null -> dsyncUi.message
-                                dsyncUi.running -> "Syncing"
-                                dsyncUi.lastSyncAt > 0L -> "Last synced ${lastSyncedAgo(dsyncUi.lastSyncAt)}"
-                                else -> "Not synced yet"
-                            },
-                            running = dsyncUi.running,
-                            status = SyncSettingsViewModel.ActionStatus.Idle,
-                            onClick = { if (dsyncAvailable && !dsyncUi.running) viewModel.dispatcharrSyncNow() },
-                        )
-                        SyncTileActionRow(
-                            icon = Icons.Filled.Tune,
-                            title = "Sync Categories",
-                            subtitle = "Choose what syncs across your devices",
-                            chevron = !tvRows,
-                            onClick = onOpenSyncCategories,
-                        )
-                    }
-                }
-            }
-            if (provider == "drive") {
-            if (!signedIn) {
+            if (!signedIn && !driveNeedsSignIn) {
                 item { SignedOutWelcomeBanner() }
             }
             item {
@@ -291,7 +310,7 @@ fun SyncSettingsScreen(
                 // account row stays first because Drive, unlike iCloud,
                 // needs an in-app sign-in.
                 SettingsSection(
-                    header = "",
+                    header = "Google Drive",
                     // Apple TV shows no footer under this card.
                     footer = if (tvRows) null else "Playlists, preferences, and VOD watch progress sync across all devices signed into the same Google account. Credentials are stored in your Drive app data, which only AerioTV can read.",
                 ) {
@@ -305,7 +324,8 @@ fun SyncSettingsScreen(
                         subtitle = "Sync playlists, preferences, and watch progress",
                         checked = masterEnabled,
                         onCheckedChange = { enabled ->
-                            viewModel.setMasterEnabled(enabled)
+                            if (enabled && dsyncOn) enableSecond(true) { viewModel.setMasterEnabled(true) }
+                            else viewModel.setMasterEnabled(enabled)
                             // First time sync is turned on, disclose that server
                             // credentials are part of the Drive snapshot.
                             if (enabled && !credsSyncDisclosed) {
@@ -348,15 +368,6 @@ fun SyncSettingsScreen(
                             },
                         )
                     }
-                    // Reachable even with sync off, as Apple: the Delete
-                    // actions there work for stale-state cleanup.
-                    SyncTileActionRow(
-                        icon = Icons.Filled.Tune,
-                        title = "Sync Categories",
-                        subtitle = "Choose what syncs across your devices",
-                        chevron = !tvRows,
-                        onClick = onOpenSyncCategories,
-                    )
                     // Always offered on Apple, even with sync off. Drive needs
                     // a token to delete anything, so it waits for sign-in.
                     if (signedIn) {
@@ -378,7 +389,31 @@ fun SyncSettingsScreen(
             // Sign-in / sign-out lives in its own row below the card so the
             // button has breathing room instead of getting squeezed into the
             // right edge of a multi-line description row.
+            // Drive rejected the token and a silent refresh failed: one line
+            // under the Drive section, with the sign-in and Sign Out controls.
+            if (driveNeedsSignIn) {
+                item {
+                    Text(
+                        text = DRIVE_SIGN_IN_AGAIN,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.error,
+                        maxLines = 1,
+                        modifier = Modifier.padding(horizontal = 4.dp),
+                    )
+                }
+            }
             item {
+                if (driveNeedsSignIn && !signedIn) {
+                    SignOutButton(
+                        busy = inFlight,
+                        onClick = {
+                            if (inFlight) return@SignOutButton
+                            viewModel.signOut()
+                            Toast.makeText(context, "Signed out of Drive.", Toast.LENGTH_SHORT).show()
+                        },
+                    )
+                    Spacer(Modifier.height(8.dp))
+                }
                 if (signedIn) {
                     SignOutButton(
                         // Stays focusable while in flight (a disabled button
@@ -413,6 +448,109 @@ fun SyncSettingsScreen(
                     }
                 }
             }
+            // Dispatcharr Sync: independent of Drive Sync, both can be on
+            // (owner decision 2026-10-29). Offered on a Dispatcharr Direct
+            // Connect playlist, or while on so it can be turned off.
+            if (dsyncAvailable || dsyncOn) {
+                item {
+                    SettingsSection(
+                        header = "Dispatcharr Sync",
+                        footer = when {
+                            dsyncOn && masterEnabled -> "Dispatcharr Sync takes precedence for shared data on this server. Google Drive keeps a backup."
+                            tvRows -> null
+                            else -> "Each profile syncs as its own Dispatcharr user. Playlists and sign-in details never sync here. Admins on your Dispatcharr server can view synced data."
+                        },
+                    ) {
+                        SyncTileToggleRow(
+                            icon = Icons.Filled.CloudSync,
+                            title = "Dispatcharr Sync",
+                            subtitle = if (dsyncAvailable) "Store sync data on your Dispatcharr server under each profile"
+                            else "Needs a Dispatcharr playlist",
+                            checked = dsyncOn,
+                            onCheckedChange = { on ->
+                                if (on && masterEnabled) enableSecond(false) { viewModel.setDispatcharrSyncEnabled(true) }
+                                else viewModel.setDispatcharrSyncEnabled(on)
+                            },
+                        )
+                        if (dsyncOn) {
+                            SyncTileActionRow(
+                                icon = Icons.Filled.CloudSync,
+                                title = "Sync Now",
+                                subtitle = when {
+                                    !dsyncAvailable -> "Needs a Dispatcharr playlist"
+                                    dsyncUi.message != null -> dsyncUi.message
+                                    dsyncUi.running -> "Syncing"
+                                    dsyncUi.lastSyncAt > 0L -> "Last synced ${lastSyncedAgo(dsyncUi.lastSyncAt)}"
+                                    else -> "Not synced yet"
+                                },
+                                running = dsyncUi.running,
+                                status = SyncSettingsViewModel.ActionStatus.Idle,
+                                onClick = { if (dsyncAvailable && !dsyncUi.running) viewModel.dispatcharrSyncNow() },
+                            )
+                        }
+                        // Manual push and pull (section 10a, 2026-11-02): rows
+                        // mirror the Drive ones; Push to both needs Drive on too.
+                        val manualRows = com.aeriotv.android.core.sync.dsync.DsyncManual.rows(
+                            dispatcharrOn = dsyncOn, dispatcharrPlaylist = dsyncAvailable,
+                            driveOn = masterEnabled, driveSignedIn = signedIn,
+                        )
+                        val manualRunning = dsyncUi.running ||
+                            dsyncPushStatus is SyncSettingsViewModel.ActionStatus.Running ||
+                            dsyncPullStatus is SyncSettingsViewModel.ActionStatus.Running ||
+                            bothPushStatus is SyncSettingsViewModel.ActionStatus.Running
+                        if (manualRows.pushPullDispatcharr) {
+                            val dLast = dsyncUi.lastSyncAt
+                            SyncTileActionRow(
+                                icon = Icons.Filled.CloudSync,
+                                title = if (tvRows && dLast > 0L) {
+                                    "Push to Dispatcharr  ·  Last synced ${lastSyncedAgo(dLast)}"
+                                } else {
+                                    "Push to Dispatcharr"
+                                },
+                                subtitle = if (tvRows) null else if (dLast > 0L) {
+                                    "Send this device's data up  ·  Last synced ${lastSyncedAgo(dLast)}"
+                                } else {
+                                    "Send this device's data up"
+                                },
+                                running = dsyncPushStatus is SyncSettingsViewModel.ActionStatus.Running,
+                                status = dsyncPushStatus,
+                                onClick = { if (!manualRunning) dsyncPushConfirmOpen = true },
+                            )
+                            SyncTileActionRow(
+                                icon = Icons.Filled.CloudDownload,
+                                title = "Pull from Dispatcharr",
+                                subtitle = if (tvRows) null else "Replace this device's data with the Dispatcharr copy",
+                                running = dsyncPullStatus is SyncSettingsViewModel.ActionStatus.Running,
+                                status = dsyncPullStatus,
+                                onClick = { if (!manualRunning) dsyncPullConfirmOpen = true },
+                            )
+                        }
+                        if (manualRows.pushToBoth) {
+                            SyncTileActionRow(
+                                icon = Icons.Filled.CloudSync,
+                                title = "Push to both",
+                                subtitle = if (tvRows) null else "Send this device's data to Dispatcharr and Google Drive",
+                                running = bothPushStatus is SyncSettingsViewModel.ActionStatus.Running,
+                                status = bothPushStatus,
+                                onClick = { if (!manualRunning && !actionRunning) bothPushConfirmOpen = true },
+                            )
+                        }
+                    }
+                }
+            }
+            // One shared Sync Categories list for both Drive and Dispatcharr
+            // Sync. Reachable with sync off, as Apple: the Delete actions
+            // there work for stale-state cleanup.
+            item {
+                SettingsSection(header = "Sync Categories") {
+                    SyncTileActionRow(
+                        icon = Icons.Filled.Tune,
+                        title = "Sync Categories",
+                        subtitle = "Choose what syncs across your devices",
+                        chevron = !tvRows,
+                        onClick = onOpenSyncCategories,
+                    )
+                }
             }
         }
         }
@@ -440,6 +578,68 @@ fun SyncSettingsScreen(
             },
             dismissButton = {
                 SettingsDialogTextButton(label = "Cancel", onClick = { pushConfirmOpen = false })
+            },
+        )
+    }
+
+    if (dsyncPushConfirmOpen) {
+        com.aeriotv.android.ui.scale.AlertDialog(
+            onDismissRequest = { dsyncPushConfirmOpen = false },
+            title = { Text("Push to Dispatcharr?") },
+            text = {
+                Text(
+                    "Replaces the shared data on your Dispatcharr server with this device's copy for the categories you sync. " +
+                        "Other devices receive it on their next sync.",
+                )
+            },
+            confirmButton = {
+                SettingsDialogTextButton(label = "Push", onClick = {
+                    dsyncPushConfirmOpen = false
+                    viewModel.runDispatcharrPush()
+                })
+            },
+            dismissButton = {
+                SettingsDialogTextButton(label = "Cancel", onClick = { dsyncPushConfirmOpen = false })
+            },
+        )
+    }
+
+    if (dsyncPullConfirmOpen) {
+        com.aeriotv.android.ui.scale.AlertDialog(
+            onDismissRequest = { dsyncPullConfirmOpen = false },
+            title = { Text("Pull from Dispatcharr?") },
+            text = {
+                Text("Replaces this device's shared data with the copy on your Dispatcharr server for the categories you sync.")
+            },
+            confirmButton = {
+                SettingsDialogTextButton(label = "Pull", onClick = {
+                    dsyncPullConfirmOpen = false
+                    viewModel.runDispatcharrPull()
+                })
+            },
+            dismissButton = {
+                SettingsDialogTextButton(label = "Cancel", onClick = { dsyncPullConfirmOpen = false })
+            },
+        )
+    }
+
+    if (bothPushConfirmOpen) {
+        com.aeriotv.android.ui.scale.AlertDialog(
+            onDismissRequest = { bothPushConfirmOpen = false },
+            title = { Text("Push to both?") },
+            text = {
+                Text(
+                    "Replaces the shared data on your Dispatcharr server and in your Google Drive backup with this device's copy for the categories you sync.",
+                )
+            },
+            confirmButton = {
+                SettingsDialogTextButton(label = "Push", onClick = {
+                    bothPushConfirmOpen = false
+                    viewModel.runPushToBoth()
+                })
+            },
+            dismissButton = {
+                SettingsDialogTextButton(label = "Cancel", onClick = { bothPushConfirmOpen = false })
             },
         )
     }
@@ -963,13 +1163,16 @@ fun SyncCategoriesScreen(
 ) {
     val isTv = rememberIsTvDevice()
     val driveEnabled by viewModel.masterEnabled.collectAsStateWithLifecycle(initialValue = false)
-    val provider by viewModel.syncProvider.collectAsStateWithLifecycle(initialValue = "off")
-    // Dispatcharr Sync reuses these toggles; Playlists and Credentials never
-    // sync through Dispatcharr, and the per-category Delete is Drive only.
-    val dsync = provider == "dispatcharr"
-    val masterEnabled = if (dsync) true else driveEnabled
+    val dsyncOn by viewModel.dispatcharrSyncEnabled.collectAsStateWithLifecycle(initialValue = false)
+    // One shared list for both providers. Dispatcharr Sync reuses these
+    // toggles; Playlists and Credentials never sync through Dispatcharr, and
+    // the per-category Delete is Drive only, so Drive-only rows hide only
+    // while Dispatcharr Sync is the sole provider on.
+    val dsync = dsyncOn && !driveEnabled
+    val masterEnabled = driveEnabled || dsyncOn
     val categories = if (dsync) SyncCategory.entries.filter { it != SyncCategory.Playlists && it != SyncCategory.Credentials } else SyncCategory.entries
     val clearStatuses by viewModel.categoryClearStatus.collectAsState()
+    val scopes by viewModel.syncScopes.collectAsStateWithLifecycle(initialValue = emptyMap())
     var pendingDelete by remember { mutableStateOf<SyncCategory?>(null) }
 
     // Delete needs a live token; restore it silently as the Sync page does.
@@ -981,10 +1184,10 @@ fun SyncCategoriesScreen(
     // true on Android (DriveSyncWorker runs every 6 hours; the toggles are
     // per-device), so those sentences state what Android actually does.
     val footer = if (dsync) {
-        "Each toggle controls whether this device sends and receives that category through your Dispatcharr server. The toggles apply to this device only."
-    } else if (masterEnabled) {
+        "Each choice controls whether this device sends and receives that item through your Dispatcharr server: on all devices, only on devices like this one, or not at all. The choices apply to this device only."
+    } else if (driveEnabled) {
         "Syncing is automatic: AerioTV syncs about every 6 hours while you are on Wi-Fi and the battery is not low. Push to Drive on the previous screen just forces that round trip immediately.\n\n" +
-            "Each toggle controls whether this device pushes and pulls that category. The toggles apply to this device only. Use the Delete buttons to remove a category's cloud copy without affecting local data."
+            "Each choice controls whether this device pushes and pulls that item: on all devices, only on devices like this one, or not at all. The choices apply to this device only. Use the Delete buttons to remove a category's cloud copy without affecting local data."
     } else {
         "Drive Sync is off. Per-category toggles take effect when you re-enable Sync at the top. The Delete buttons still work: useful for scrubbing stale Drive state before re-enabling Sync."
     }
@@ -1002,56 +1205,55 @@ fun SyncCategoriesScreen(
                 ),
                 verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
-                item {
-                    SettingsSection(header = "Categories", footer = if (isTv) null else footer) {
-                        categories.forEach { category ->
-                            val enabled by viewModel.categoryEnabled(category)
-                                .collectAsStateWithLifecycle(initialValue = true)
-                            SyncTileToggleRow(
-                                icon = settingsCategoryIcon(category),
-                                title = settingsCategoryTitle(category),
-                                subtitle = settingsCategorySubtitle(category),
-                                checked = enabled,
-                                onCheckedChange = { viewModel.setCategoryEnabled(category, it) },
-                                enabled = masterEnabled,
-                            )
-                            if (!isTv && !dsync) {
-                                CategoryDeleteButton(
-                                    status = clearStatuses[category],
-                                    onClick = { pendingDelete = category },
+                // Every synced option is its own row (owner decision 2026-10-27).
+                // Settings rows take a scope from this device's class only
+                // (All devices, TVs only or Phones and tablets only, Off); a group
+                // row sets its whole group and reads "Mixed" when rows differ.
+                // Data rows are plain on/off toggles.
+                val choices = SyncScope.choices(viewModel.syncDeviceIsTv)
+                val scopeOptions = choices.map { SettingsPickerOption(it, it.title) }
+                SyncItemCatalog.groups.forEach { group ->
+                    val items = group.items.filter { (!dsync || !it.driveOnly) && (dsyncOn || !it.dsyncOnly) }
+                    if (items.isEmpty()) return@forEach
+                    item(key = "sync-group-${group.id}") {
+                        SettingsSection(header = group.title) {
+                            val settingsItems = items.filterNot { it.isData }
+                            if (settingsItems.size > 1) {
+                                val values = settingsItems.map { scopes[it.id] ?: SyncScope.All }.distinct()
+                                SettingsPickerRow(
+                                    title = "All ${group.title} Settings",
+                                    options = scopeOptions,
+                                    selected = values.singleOrNull() ?: SyncScope.All,
+                                    onSelect = { sc -> viewModel.setSyncScope(settingsItems.map { it.id }, sc) },
+                                    pageKey = "sync-group-${group.id}",
+                                    choiceSheet = true,
+                                    summaryOverride = if (values.size > 1) "Mixed" else null,
                                 )
                             }
-                            // Slice of App Preferences rather than a category of
-                            // its own: the map rides preferences.v1.json and each
-                            // SyncCategory owns exactly one Drive file, so it has
-                            // no Delete of its own. Sits under its parent so the
-                            // nesting reads.
-                            if (category == SyncCategory.Preferences) {
-                                val shareRemoteMap by viewModel.syncRemoteControlMap
-                                    .collectAsStateWithLifecycle(initialValue = true)
-                                SyncTileToggleRow(
-                                    icon = Icons.Filled.SettingsRemote,
-                                    title = "Remote Button Map",
-                                    subtitle = "Your customized remote button assignments. Turn this off on a TV whose remote is a different model from your others.",
-                                    checked = shareRemoteMap,
-                                    onCheckedChange = { viewModel.setSyncRemoteControlMap(it) },
-                                    enabled = masterEnabled,
-                                )
-                                val shareRadioDefault by viewModel.syncRadioModeByDefault
-                                    .collectAsStateWithLifecycle(initialValue = false)
-                                SyncTileToggleRow(
-                                    icon = Icons.Filled.Radio,
-                                    title = "Radio Mode by Default",
-                                    subtitle = "Whether every channel opens in Radio Mode. Off by default, so each device keeps its own choice.",
-                                    checked = shareRadioDefault,
-                                    onCheckedChange = { viewModel.setSyncRadioModeByDefault(it) },
-                                    enabled = masterEnabled,
-                                )
+                            items.forEach { syncItem ->
+                                val sc = scopes[syncItem.id] ?: SyncScope.All
+                                if (syncItem.isData) {
+                                    SettingsToggleRow(
+                                        title = syncItem.label,
+                                        checked = sc != SyncScope.Off,
+                                        onCheckedChange = { on -> viewModel.setSyncScope(listOf(syncItem.id), if (on) SyncScope.All else SyncScope.Off) },
+                                        enabled = masterEnabled,
+                                    )
+                                } else {
+                                    SettingsPickerRow(
+                                        title = syncItem.label,
+                                        options = scopeOptions,
+                                        selected = sc,
+                                        onSelect = { v -> viewModel.setSyncScope(listOf(syncItem.id), v) },
+                                        pageKey = "sync-item-${syncItem.id}",
+                                        choiceSheet = true,
+                                    )
+                                }
                             }
                         }
                     }
                 }
-                if (isTv && !dsync) {
+                if (!dsync) {
                     item {
                         SettingsSection(header = "Delete from Drive", footer = footer) {
                             SyncCategory.entries.forEach { category ->
@@ -1068,6 +1270,8 @@ fun SyncCategoriesScreen(
                             }
                         }
                     }
+                } else {
+                    item { SettingsSectionFooter(footer) }
                 }
             }
         }
@@ -1152,3 +1356,6 @@ private fun CategoryDeleteButton(
         }
     }
 }
+
+/** One-line notice under the Drive section when Drive needs the user to sign in again. */
+const val DRIVE_SIGN_IN_AGAIN = "Sign in to Google Drive again"

@@ -1,3 +1,5 @@
+@file:OptIn(kotlinx.coroutines.FlowPreview::class)
+
 package com.aeriotv.android.core.sync.dsync
 
 import android.app.AlarmManager
@@ -50,6 +52,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.filter
@@ -90,6 +93,10 @@ class DispatcharrSyncManager @Inject constructor(
     private val pinStore: ProfilePinStore,
     private val profileManager: Provider<ProfileManager>,
     private val vodIds: VodIdResolver,
+    private val held: DsyncHeldStore,
+    private val providersStore: com.aeriotv.android.core.sync.SyncProvidersStore,
+    /** Rule 5: Drive follows and converges with Dispatcharr Sync (Provider: the two reference each other). */
+    private val drive: Provider<com.aeriotv.android.core.sync.DriveSyncManager>,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val state = context.getSharedPreferences("aerio_dsync", Context.MODE_PRIVATE)
@@ -127,9 +134,21 @@ class DispatcharrSyncManager @Inject constructor(
      * the API key captured at its start. Nothing it queued may ever go out
      * under another profile (2026-10-18 cross-profile write on switch).
      */
-    private inner class Session(val playlistId: String, val profileKey: String, val token: String) {
+    private inner class Session(val playlistId: String, val profileKey: String, val token: String, val peek: Boolean = false) {
         val mutex = Mutex()
+        /** The live session, or a picker peek while no session runs (one writer at a time). */
+        fun live(): Boolean = session === this || (peek && session == null)
         @Volatile var bound: Conn? = null
+        /** Keys deferred because their id cache was not built (DsyncReadiness), with the local row count waiting. */
+        val awaitingCache = java.util.concurrent.ConcurrentHashMap<DsyncKey, Int>()
+        /** Deferred keys already retried once mid-sweep after a clean probe. */
+        val sweepRetried = java.util.concurrent.ConcurrentHashMap.newKeySet<DsyncKey>()
+        /** Keys whose last build pushed with untranslated rows after the sweep (stay dirty). */
+        val partial = java.util.concurrent.ConcurrentHashMap.newKeySet<DsyncKey>()
+        /** Untranslated progress counts already broken down this session (one diagnostic line per count). */
+        val progressDiag = java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()
+        /** Whether the cache was built when a deferred key's push finally went out. */
+        val readyAtPush = java.util.concurrent.ConcurrentHashMap<DsyncKey, Boolean>()
         /** No key is written before this session's first complete pull. */
         @Volatile var firstPullDone = false
         /** The last list call answered (false while offline). */
@@ -143,13 +162,28 @@ class DispatcharrSyncManager @Inject constructor(
         var serverFull = false
         var paused = false
         val serverBytes = HashMap<String, Long>()
+        /** Bucket wire name -> list `bytes` when that bucket was last fetched. */
+        val fetchedBytes = HashMap<String, Long>()
         /** Categories present inside their v2 key on the server. */
         val present = java.util.Collections.synchronizedSet(HashSet<DsyncKey>())
         val pending = HashMap<DsyncKey, Job>()
+        /** Keys already checked by [healIfLocalDiffers] this session. */
+        val healed = java.util.Collections.synchronizedSet(HashSet<DsyncKey>())
+        /** Keys a Settings > Sync manual push is sending (log as manual push). */
+        val manual = java.util.concurrent.ConcurrentHashMap.newKeySet<DsyncKey>()
         val retries = HashMap<DsyncKey, Int>()
+        /** Keys converge skipped as dirty with no write queued: converge again once their write settles. */
+        val convergeAfterWrite = java.util.concurrent.ConcurrentHashMap.newKeySet<DsyncKey>()
         val suppressUntil = HashMap<DsyncKey, Long>()
         var users: List<DispatcharrUserSummary>? = null
         var lastPullAt = 0L
+        /** Setup choice pull (section 10a): apply shared keys even when the stamp is "not newer". */
+        @Volatile var forceApply = false
+        /** A forced apply could not run (channel list not loaded, apply failed). */
+        @Volatile var forceApplyFailed = false
+        /** The last pullAll read the list and every bucket it needed. */
+        @Volatile var pullComplete = false
+        @Volatile var bucketFailed = false
     }
 
     @Volatile private var session: Session? = null
@@ -178,18 +212,22 @@ class DispatcharrSyncManager @Inject constructor(
                 }
             })
         }
-        profileManager.get().onProfilesMutated = { pid, user, what -> onProfilesMutated(pid, user, what) }
+        profileManager.get().onProfilesMutated = { pid, user, what, at -> onProfilesMutated(pid, user, what, at) }
+        profileManager.get().onPickerOpened = { pid, reason -> onPickerOpened(pid, reason) }
         registerNetworkCallback()
+        watchBetweenSessions()
         scope.launch {
             combine(
-                prefs.syncProvider,
+                prefs.dispatcharrSyncEnabled,
                 playlistDao.observeActive().map { rows -> rows.firstOrNull()?.takeIf { it.isDispatcharrDirectConnect() }?.id },
                 ProfileScope.token,
-                kotlinx.coroutines.flow.combine(profileManager.get().switching, profileManager.get().launchPicker) { sw, pk -> sw || pk != null },
-            ) { provider, pid, token, switching ->
+                // The picker reason only: an in-app PIN pad (Set Admin PIN, Add Profile)
+                // used to end the session here, and edits made under the pad had no session.
+                kotlinx.coroutines.flow.combine(profileManager.get().switching, com.aeriotv.android.core.app.LaunchWorkHold.pickerHold) { sw, held -> sw || held },
+            ) { dsyncOn, pid, token, switching ->
                 // A profile switch (or the TV launch picker) is in flight: hold until its sign-in and
                 // permissions are in place (the scrim drops), then start.
-                if (switching) HOLD else if (provider == PROVIDER && pid != null) Target(pid, token) else null
+                if (switching) HOLD else if (dsyncOn && pid != null) Target(pid, token) else null
             }
                 .distinctUntilChanged()
                 .collectLatest { t ->
@@ -200,6 +238,7 @@ class DispatcharrSyncManager @Inject constructor(
                         Log.i(TAG, "[DSYNC] session end user=${old.profileKey.take(8)} (${if (t === HOLD) "switch" else "change"})")
                         runCatching { flush(old) }
                         synchronized(old.pending) { old.pending.values.forEach { it.cancel() }; old.pending.clear() }
+                        lastEnded = old
                     }
                     session = null
                     if (t === HOLD) return@collectLatest
@@ -210,12 +249,45 @@ class DispatcharrSyncManager @Inject constructor(
                     val prev = lastTarget
                     lastTarget = t
                     val why = if (prev != null && prev.playlistId == t.playlistId && prev.profileToken != t.profileToken) "profile" else "launch"
+                    com.aeriotv.android.core.app.LaunchWorkHold.awaitStage(com.aeriotv.android.core.app.LaunchWorkHold.STAGE_NETWORK, com.aeriotv.android.core.app.LaunchWorkHold.STAGE_NETWORK_NAME, "Dispatcharr Sync session", com.aeriotv.android.core.app.LaunchWorkHold.IDLE_NETWORK_MS)
                     runSession(t, why)
                 }
         }
     }
 
     @Volatile private var lastTarget: Target? = null
+
+    /** The last session that ended; edits made before the next one starts are marked on its keys. */
+    @Volatile private var lastEnded: Session? = null
+
+    /**
+     * Local changes with no session (between sessions, offline start, a hold)
+     * used to be dropped: the per-session collectors skip their first value.
+     * Mark them dirty on the last session's persisted keys so the next session
+     * for the same playlist and profile sends them. A changed profile token
+     * (switch re-keys every flow) is never marked.
+     */
+    private fun watchBetweenSessions() {
+        DsyncKey.entries.filter { it != DsyncKey.Profiles }.forEach { key ->
+            scope.launch {
+                sourceFor(key, null).distinctUntilChanged().drop(1).collect {
+                    if (session != null) return@collect
+                    val old = lastEnded ?: return@collect
+                    if (profileManager.get().switching.value) return@collect
+                    if (ProfileScope.token.value != old.token) return@collect
+                    if (!isDirty(old, key)) Log.i(TAG, "[DSYNC] ${key.suffix} dirty; no session (kept for the next one)")
+                    setDirty(old, key, true)
+                }
+            }
+        }
+    }
+
+    private fun profilesPendingKey(playlistId: String) = "pdirty|$playlistId"
+    private fun profilesPushedKey(playlistId: String) = "ppushed|$playlistId"
+    private fun newestRowStamp(playlistId: String): Long {
+        val prefix = "prow|$playlistId|"
+        return state.all.entries.filter { it.key.startsWith(prefix) }.maxOfOrNull { (it.value as? Long) ?: 0L } ?: 0L
+    }
 
     private fun registerNetworkCallback() {
         val cm = context.getSystemService(android.net.ConnectivityManager::class.java) ?: return
@@ -249,31 +321,306 @@ class DispatcharrSyncManager @Inject constructor(
     }
 
     /** ProfileManager mutation hook: stamp the row and re-send `profiles` from an admin session. */
-    private fun onProfilesMutated(playlistId: String, username: String, what: String) {
+    /** Roster adds by row key, wall-clock ms: the push guard's 60 s window. */
+    private val rosterAdds = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    private fun onProfilesMutated(playlistId: String, username: String, what: String, stampAt: Long = 0L) {
         // Called from UI actions on the main thread: all disk work happens on IO.
-        val now = System.currentTimeMillis() / 1000
+        // A roster add keeps the row's own stamp (stampAt); every real edit stamps now.
+        if (what == "undo-add") {
+            // Roster undo: local only. No tombstone, no pending mark, no push;
+            // the server row the add came from stays as other devices wrote it.
+            rosterAdds.remove(rowKey(playlistId, username))
+            state.edit().remove(rowKey(playlistId, username)).remove(customKey(playlistId, username)).commit()
+            Log.i(TAG, "[DSYNC] profiles: undo add $username; server row left as is")
+            return
+        }
+        val now = if (stampAt > 0) stampAt else System.currentTimeMillis() / 1000
+        if (what == "roster-add") rosterAdds[rowKey(playlistId, username)] = System.currentTimeMillis()
+        // Stamp synchronously (apply() writes to disk in the background): the
+        // caller drops the local profile right after this returns, and a pull
+        // racing that removal must already see the removed stamp.
+        val e = state.edit().putLong(rowKey(playlistId, username), now)
+        if (what == "remove") e.putLong(removedKey(playlistId, username), now) else e.remove(removedKey(playlistId, username))
+        // Only an explicit rename or avatar change claims name and avatar;
+        // a profile that never had one takes the synced row's (schema 4.12).
+        if (what == "rename" || what == "avatar") e.putBoolean(customKey(playlistId, username), true)
+        if (what == "remove") e.remove(customKey(playlistId, username))
+        // Playlist-level pending mark: survives no session, a non-admin
+        // session, and process death; cleared only by a successful PUT.
+        e.putBoolean(profilesPendingKey(playlistId), true)
+        e.commit()
+        if (what == "remove") Log.i(TAG, "[DSYNC] profiles: stamped removed ${removedKey(playlistId, username)}=$now read=${state.getLong(removedKey(playlistId, username), 0L)}")
         scope.launch {
-            val e = state.edit().putLong(rowKey(playlistId, username), now)
-            if (what == "remove") e.putLong(removedKey(playlistId, username), now) else e.remove(removedKey(playlistId, username))
-            e.apply()
             val s = session?.takeIf { it.playlistId == playlistId }
             Log.i(TAG, "[DSYNC] profiles dirty ($what ${username})${if (s == null) "; no session" else ""}")
-            if (s == null) return@launch
+            if (s == null) { schedulePeekPush(playlistId, what); return@launch }
             if (!isAdmin(s)) return@launch
             setDirty(s, DsyncKey.Profiles, true)
-            schedule(s, DsyncKey.Profiles, DEBOUNCE_MS)
+            schedule(s, DsyncKey.Profiles, PEEK_PUSH_DEBOUNCE_MS)
         }
+    }
+
+    // ---- picker-open profiles pull (2026-10-29) ----
+
+    /** Playlist id -> elapsedRealtime of the last picker-open pull. */
+    private val pickerPullAt = HashMap<String, Long>()
+
+    /** Serializes picker-open pulls made while no session runs (picker hold). */
+    private val profilesPeekMutex = Mutex()
+
+    /**
+     * A profile picker surface opened: pull the `profiles` key only (never
+     * the other lanes), then send a pending local profile change when a live
+     * session can. At most one per [PICKER_PULL_MIN_MS] per playlist. The UI
+     * already painted from local state; the merge updates it in place.
+     */
+    private fun onPickerOpened(playlistId: String, reason: String) {
+        val now = android.os.SystemClock.elapsedRealtime()
+        val allowed = synchronized(pickerPullAt) {
+            val last = pickerPullAt[playlistId]
+            if (last != null && now - last < PICKER_PULL_MIN_MS) false else { pickerPullAt[playlistId] = now; true }
+        }
+        if (!allowed) {
+            Log.i(TAG, "[DSYNC] profiles: picker-open pull skipped (reason=$reason, last under ${PICKER_PULL_MIN_MS / 1000}s ago)")
+            return
+        }
+        Log.i(TAG, "[DSYNC] profiles: picker-open pull (reason=$reason)")
+        scope.launch { runCatching { pickerPull(playlistId, reason) }.onFailure { Log.w(TAG, "[DSYNC] profiles: picker-open pull failed (reason=$reason): ${it.javaClass.simpleName}") } }
+    }
+
+    private suspend fun pickerPull(playlistId: String, reason: String) {
+        if (!prefs.dispatcharrSyncEnabledOnce()) return
+        // Never fight the hold: a PIN pad pauses everything, and a switch in
+        // flight is about to start its own session pull. The picker itself
+        // (pickerHold) is the stage this pull is for, so it runs under it.
+        if (com.aeriotv.android.core.app.LaunchWorkHold.pinPadOpen.value || profileManager.get().switching.value) {
+            Log.i(TAG, "[DSYNC] profiles: picker-open pull waiting (reason=$reason, pin pad or switch in flight)")
+            com.aeriotv.android.core.app.LaunchWorkHold.pinPadOpen.first { !it }
+            profileManager.get().switching.first { !it }
+        }
+        val token = ProfileScope.token.value
+        val live = session?.takeIf { it.playlistId == playlistId && it.token == token }
+        if (live != null) {
+            live.mutex.withLock { if (session === live) pullProfilesOnly(live, reason, "live") }
+            scope.launch {
+                // Read once more 2 s later (see the no-session path below).
+                delay(PICKER_REPULL_MS)
+                live.mutex.withLock { if (session === live) pullProfilesOnly(live, "$reason-repull", "live") }
+            }
+            // Push a pending local change now instead of at the next debounce.
+            if (isDirty(live, DsyncKey.Profiles) || state.getBoolean(profilesPendingKey(playlistId), false)) {
+                if (isAdmin(live)) {
+                    setDirty(live, DsyncKey.Profiles, true)
+                    Log.i(TAG, "[DSYNC] profiles: picker-open push of pending local change (reason=$reason)")
+                    schedule(live, DsyncKey.Profiles, 0L)
+                }
+            }
+            return
+        }
+        // No session (the picker hold ends it): a read-only peek under this
+        // playlist and profile's own keys. Writes stay with the next session
+        // (its start re-sends the pending mark), one sync writer at a time.
+        val profileKey = currentProfileId(playlistId) ?: token.ifEmpty { "default" }
+        val peek = Session(playlistId, profileKey, token)
+        profilesPeekMutex.withLock { pullProfilesOnly(peek, reason, "none") }
+        // A write from another device a moment before can still read back old
+        // (2026-10-29 00:43:18 to 00:43:19): read once more, 2 s later.
+        delay(PICKER_REPULL_MS)
+        val live2 = session?.takeIf { it.playlistId == playlistId && it.token == ProfileScope.token.value }
+        if (live2 != null) live2.mutex.withLock { if (session === live2) pullProfilesOnly(live2, "$reason-repull", "live") }
+        else profilesPeekMutex.withLock { pullProfilesOnly(Session(playlistId, profileKey, ProfileScope.token.value), "$reason-repull", "none") }
+        if (state.getBoolean(profilesPendingKey(playlistId), false)) {
+            Log.i(TAG, "[DSYNC] profiles: pending local change kept for the next session (reason=$reason)")
+        }
+    }
+
+    /**
+     * One GET of the main key (always on the wire: no list-bytes shortcut, no
+     * cached copy, no conditional request), then the `profiles` category
+     * only, through the normal merge. True when the key was read.
+     */
+    private suspend fun pullProfilesOnly(s: Session, reason: String, sessionKind: String): Boolean {
+        val c = freshConn(s) ?: return false
+        if (!enabled(DsyncKey.Profiles, s)) {
+            Log.i(TAG, "[DSYNC] profiles: picker-open pull not applied (reason=$reason, profile cannot write profiles)")
+            return false
+        }
+        var ok = false
+        when (val f = fetchBucket(c, DsyncBucket.of(DsyncKey.Profiles))) {
+            is Fetched.Got -> when (val d = DsyncV2.category(f.bucket, DsyncKey.Profiles)) {
+                is DsyncDecode.Ok -> {
+                    val env = d.envelope
+                    // What the server answered, so a stale read is provable from the log.
+                    Log.i(
+                        TAG,
+                        "[DSYNC] profiles: server copy (reason=$reason) bytes=${f.bytes} updatedAt=${env.updatedAt} " +
+                            "device=${env.deviceId.take(8)} rows=${DsyncPayloads.decodeProfiles(env.data)?.size ?: -1} " +
+                            "removed=${DsyncPayloads.decodeProfileTombstones(env.data).joinToString { "${it.username}@${it.removedAt}" }.ifEmpty { "none" }}",
+                    )
+                    s.present += DsyncKey.Profiles
+                    processCategory(s, DsyncKey.Profiles, env, f.bytes)
+                    ok = true
+                }
+                null -> { s.read += DsyncKey.Profiles; ok = true }
+                else -> Log.w(TAG, "[DSYNC] malformed profiles category")
+            }
+            Fetched.Absent -> { s.read += DsyncKey.Profiles; ok = true }
+            else -> Unit
+        }
+        Log.i(TAG, "[DSYNC] profiles: picker-open pull done (reason=$reason, session=$sessionKind)")
+        return ok
+    }
+
+    /** Playlist id -> the debounced no-session push. */
+    private val peekPushJobs = HashMap<String, Job>()
+
+    /**
+     * A profile add or remove made with no live session (at the launch
+     * picker): push `profiles` within about a second under the playlist's
+     * last-active profile, when that profile may write profiles. A burst of
+     * edits is one put. Serialized with the picker peek; a session start
+     * waits for it, so there is one writer at a time.
+     */
+    private fun schedulePeekPush(playlistId: String, what: String) {
+        synchronized(peekPushJobs) {
+            peekPushJobs.remove(playlistId)?.cancel()
+            peekPushJobs[playlistId] = scope.launch {
+                delay(PEEK_PUSH_DEBOUNCE_MS)
+                synchronized(peekPushJobs) { peekPushJobs.remove(playlistId) }
+                runCatching { peekPush(playlistId, what) }
+                    .onFailure { Log.w(TAG, "[DSYNC] profiles: no-session push failed ($what): ${it.javaClass.simpleName}") }
+            }
+        }
+    }
+
+    private suspend fun peekPush(playlistId: String, what: String) {
+        if (!prefs.dispatcharrSyncEnabledOnce()) return
+        val active = playlistDao.observeActive().first().firstOrNull()?.takeIf { it.isDispatcharrDirectConnect() }?.id
+        if (active != playlistId) return
+        if (com.aeriotv.android.core.app.LaunchWorkHold.pinPadOpen.value) {
+            com.aeriotv.android.core.app.LaunchWorkHold.pinPadOpen.first { !it }
+        }
+        if (profileManager.get().switching.value || session != null) {
+            Log.i(TAG, "[DSYNC] profiles: no-session push left to the session ($what)")
+            return
+        }
+        val token = ProfileScope.token.value
+        val profileKey = currentProfileId(playlistId) ?: token.ifEmpty { "default" }
+        profilesPeekMutex.withLock {
+            if (session != null) {
+                Log.i(TAG, "[DSYNC] profiles: no-session push left to the session ($what)")
+                return@withLock
+            }
+            val peek = Session(playlistId, profileKey, token, peek = true)
+            if (!isAdmin(peek)) {
+                Log.i(TAG, "[DSYNC] profiles: no-session push skipped ($what): last-active profile cannot write profiles; kept for the next session")
+                return@withLock
+            }
+            Log.i(TAG, "[DSYNC] profiles: no-session push ($what) under the last-active profile")
+            if (!pullProfilesOnly(peek, "push-$what", "none")) {
+                Log.i(TAG, "[DSYNC] profiles: no-session push deferred ($what): server not read; kept for the next session")
+                return@withLock
+            }
+            peek.firstPullDone = true
+            setDirty(peek, DsyncKey.Profiles, true)
+            writeLocked(peek, DsyncKey.Profiles, retry413 = true)
+            if (state.getBoolean(profilesPendingKey(playlistId), false)) {
+                Log.i(TAG, "[DSYNC] profiles: no-session push not confirmed ($what); kept for the next session")
+            }
+        }
+    }
+
+    /** The local removed stamps (`pgone|`), a cache of this device's
+     *  removals until the payload `removed` list carries them (schema 4.12). */
+    private fun localTombstones(playlistId: String): List<ProfileTombstone> {
+        val prefix = "pgone|$playlistId|"
+        return state.all.entries.filter { it.key.startsWith(prefix) }
+            .mapNotNull { e -> (e.value as? Long)?.takeIf { it > 0 }?.let { ProfileTombstone(e.key.removePrefix(prefix), it) } }
+    }
+
+    /** Server `removed` plus local stamps, newest per username, minus expired ones. */
+    private fun tombstonesFor(playlistId: String, data: JsonObject?): List<ProfileTombstone> =
+        ProfileTombstones.expire(
+            ProfileTombstones.union(DsyncPayloads.decodeProfileTombstones(data), localTombstones(playlistId)),
+            System.currentTimeMillis() / 1000,
+        )
+
+    /** Local profiles a tombstone beats (removedAt >= the local row stamp). */
+    private fun tombstonedLocal(playlistId: String, tombs: List<ProfileTombstone>): List<String> =
+        profileStore.forPlaylist(playlistId).filter { !it.isDefault }
+            .filter { ProfileTombstones.kills(tombs, it.username, state.getLong(rowKey(playlistId, it.username), 0L)) }
+            .map { it.username }
+
+    /** Delete [users] locally (same cleanup as a user remove, no new tombstone).
+     *  Launched off the sync mutex: a removal of the active profile switches profiles. */
+    private fun removeSynced(playlistId: String, users: List<String>, tombs: List<ProfileTombstone>) {
+        if (users.isEmpty()) return
+        scope.launch {
+            users.forEach { u ->
+                val at = ProfileTombstones.find(tombs, u)?.removedAt ?: 0L
+                if (profileManager.get().removeFromSync(playlistId, u)) {
+                    state.edit().remove(rowKey(playlistId, u)).remove(customKey(playlistId, u)).apply()
+                    Log.i(TAG, "[DSYNC] profiles: removed local $u (tombstone removedAt=$at)")
+                }
+            }
+        }
+    }
+
+    /** After a 200 (or an identical server copy): a local removed stamp clears
+     *  once the payload's `removed` list carries it, a row edited after it
+     *  revived the profile, or it expired. */
+    private fun clearAckedRemovals(playlistId: String, data: JsonObject) {
+        val sent = DsyncPayloads.decodeProfileTombstones(data)
+        val rows = DsyncPayloads.decodeProfiles(data).orEmpty()
+        val now = System.currentTimeMillis() / 1000
+        val prefix = "pgone|$playlistId|"
+        val e = state.edit()
+        var any = false
+        localTombstones(playlistId).forEach { t ->
+            val why = when {
+                (ProfileTombstones.find(sent, t.username)?.removedAt ?: 0L) >= t.removedAt -> "written to the server payload"
+                rows.any { it.username.equals(t.username, ignoreCase = true) && it.updatedAt > t.removedAt } -> "superseded by a newer row"
+                now - t.removedAt > ProfileTombstones.WINDOW_S -> "expired"
+                else -> return@forEach
+            }
+            e.remove(prefix + t.username)
+            any = true
+            Log.i(TAG, "[DSYNC] profiles: removal of ${t.username} $why; local stamp cleared")
+        }
+        if (any) e.apply()
     }
 
     private fun rowKey(playlistId: String, username: String) = "prow|$playlistId|${username.lowercase()}"
     private fun removedKey(playlistId: String, username: String) = "pgone|$playlistId|${username.lowercase()}"
+    /** Set by a local rename or avatar change: this device claims name and avatar. */
+    private fun customKey(playlistId: String, username: String) = "pcust|$playlistId|${username.lowercase()}"
+
+    /**
+     * Name/avatar claim. Profiles from before the flag existed count as
+     * customized only while an unsent local change is pending and they carry
+     * a name or avatar of their own (their pushed edits are on the server).
+     */
+    private fun nameCustomized(playlistId: String, username: String, displayName: String, avatar: com.aeriotv.android.core.profiles.AvatarSpec?): Boolean =
+        state.getBoolean(customKey(playlistId, username), false) ||
+            (state.getBoolean(profilesPendingKey(playlistId), false) &&
+                !com.aeriotv.android.core.profiles.ProfileRoster.isStripped(displayName, username, avatar))
 
     private suspend fun runSession(t: Target, trigger: String) {
+        // A picker peek write in flight finishes first: one writer at a time.
+        profilesPeekMutex.withLock { }
         val profileKey = currentProfileId(t.playlistId) ?: t.profileToken.ifEmpty { "default" }
         val s = Session(t.playlistId, profileKey, t.profileToken)
         session = s
         s.bound = conn(s)
         _ui.value = Ui(active = true, lastSyncAt = state.getLong(k("last", s), 0L))
+        if (state.getBoolean(profilesPendingKey(s.playlistId), false)) {
+            Log.i(TAG, "[DSYNC] profiles: pending local change from between sessions, re-sending")
+            setDirty(s, DsyncKey.Profiles, true)
+        } else if (newestRowStamp(s.playlistId) > state.getLong(profilesPushedKey(s.playlistId), 0L)) {
+            Log.i(TAG, "[DSYNC] profiles: local roster newer than last push, re-sending")
+            setDirty(s, DsyncKey.Profiles, true)
+        }
         var who = profileStore.byId(profileKey)
         if (who != null && who.userId <= 0) {
             // Not read yet (a default profile never switched to): ask /me/ once.
@@ -292,7 +639,7 @@ class DispatcharrSyncManager @Inject constructor(
         kotlinx.coroutines.coroutineScope {
             DsyncKey.entries.forEach { key ->
                 launch {
-                    sourceFor(key).distinctUntilChanged().drop(1).collect { onLocalChange(s, key) }
+                    sourceFor(key, s.playlistId, s.token).distinctUntilChanged().drop(1).collect { onLocalChange(s, key) }
                 }
             }
             launch {
@@ -301,18 +648,254 @@ class DispatcharrSyncManager @Inject constructor(
                     if (foreground) pullAll(s, "periodic")
                 }
             }
+            // Deferred keys go out as soon as their id cache is built.
+            launch {
+                while (isActive) {
+                    delay(CACHE_POLL_MS)
+                    if (s.awaitingCache.isEmpty()) continue
+                    for (key in s.awaitingCache.keys.toList()) {
+                        if (!cacheReady(s, key)) continue
+                        if (isForced(s, key)) retryForced(s, key, "catalog") else schedule(s, key, 0L)
+                    }
+                }
+            }
+            // Mid-sweep: each catalog page write (at most every 3 s) re-checks the
+            // waiting VOD keys locally and pushes one as soon as every row translates.
+            launch {
+                VodIdSink.pageWritten.collect {
+                    for (key in s.awaitingCache.keys.toList()) {
+                        if (key in s.sweepRetried) continue
+                        val misses = probeMovieMisses(s, key) ?: continue
+                        if (DsyncReadiness.retryDuringSweep(key, cacheReady(s, key), misses)) {
+                            s.sweepRetried += key
+                            schedule(s, key, 0L)
+                        }
+                    }
+                    delay(DsyncReadiness.PAGE_RECHECK_MS)
+                }
+            }
+            // Rule 4: a forced key deferred on the id cache goes out seconds
+            // after the catalog sweep ends (the same quiet-period hook the
+            // Drive id migration retry uses), not only on the 5 s cache poll.
+            launch {
+                VodIdSink.pageWritten.debounce(DsyncReadiness.PAGE_RECHECK_MS).collect {
+                    for (key in s.awaitingCache.keys.toList()) {
+                        if (isForced(s, key)) retryForced(s, key, "catalog", cacheReady(s, key))
+                    }
+                }
+            }
         }
+    }
+
+    /**
+     * Rule 4: re-send an armed key that deferred on its id cache. The armed
+     * flag (persisted) stays set until a send succeeds, so a pull keeps
+     * skipping the key meanwhile (processCategory).
+     */
+    private fun retryForced(s: Session, key: DsyncKey, why: String, ready: Boolean = true) {
+        // The cycle retry passes ready=true even before the cache is built: the
+        // build re-decides and defers again quietly while the catalog is missing.
+        if (!DsyncCoexistence.forcedRetryDue(isForced(s, key), s.awaitingCache.containsKey(key), ready)) return
+        if (synchronized(s.pending) { s.pending.containsKey(key) }) return
+        Log.i(TAG, "[DSYNC] force push ${key.suffix} retry ($why) rows=${s.awaitingCache[key] ?: 0}")
+        schedule(s, key, 0L)
     }
 
     /**
      * Onboarding Turn On: wait (bounded) until the session the provider change
      * starts has finished its first complete pull. False on timeout.
      */
+    private val PROGRESS_LOCAL_WAIT_MS = 45_000L
+
     suspend fun awaitFirstPull(timeoutMs: Long = 20_000L): Boolean =
         kotlinx.coroutines.withTimeoutOrNull(timeoutMs) {
             while (session?.firstPullDone != true) delay(200)
             true
         } ?: false
+
+    // ---- Rule 4: choosing a source when both hold data (SetupSourceChoice) ----
+
+    private fun forceKey(playlistId: String, key: DsyncKey) = "force|$playlistId|${key.suffix}"
+
+    /** Base user only: a sub-profile never takes part in the replace. */
+    private fun isForced(s: Session, key: DsyncKey): Boolean =
+        isBase(s) && key in DsyncCoexistence.FORCE_KEYS && state.getBoolean(forceKey(s.playlistId, key), false)
+
+    private fun clearForced(s: Session, key: DsyncKey) {
+        state.edit().remove(forceKey(s.playlistId, key)).commit()
+    }
+
+    /**
+     * The user chose Google Drive: every shared key of [playlistId]'s base
+     * user goes up whole from this device, bypassing remoteWins and the
+     * consumed-stamp check, until each one has been sent (persisted, so a
+     * deferred key survives a restart). Profiles are excluded (per-row merge).
+     */
+    fun requestForceReplace(playlistId: String, keys: Collection<DsyncKey> = DsyncCoexistence.FORCE_KEYS) {
+        val arm = keys.filter { it in DsyncCoexistence.FORCE_KEYS }
+        if (arm.isEmpty()) return
+        val e = state.edit()
+        arm.forEach { e.putBoolean(forceKey(playlistId, it), true) }
+        e.commit()
+        Log.i(TAG, "[DSYNC] force replace armed for playlist=${playlistId.take(8)} keys=${arm.size} (user chose Google Drive)")
+        val s = session ?: return
+        if (s.playlistId != playlistId || !isBase(s)) return
+        arm.forEach { setDirty(s, it, true) }
+        if (s.firstPullDone && !choiceHeld()) arm.forEach { if (it in s.read) schedule(s, it, 0L) }
+    }
+
+    /**
+     * Rule 4: while the chosen Drive backup applies, no shared key is pulled
+     * or pushed, so nothing reaches the server (or local) before the forced
+     * replace is armed per category. Time-bounded so a crash mid-apply never
+     * blocks sync for good. Writes skipped meanwhile stay dirty and go out on
+     * [releaseChoiceHold].
+     */
+    @Volatile private var choiceHoldUntil = 0L
+
+    fun holdForChoice() {
+        choiceHoldUntil = System.currentTimeMillis() + CHOICE_HOLD_MS
+        Log.i(TAG, "[DSYNC] shared keys held while the Google Drive backup applies")
+    }
+
+    fun releaseChoiceHold() {
+        if (choiceHoldUntil == 0L) return
+        choiceHoldUntil = 0L
+        Log.i(TAG, "[DSYNC] shared key hold released")
+        val s = session ?: return
+        if (s.firstPullDone) DsyncCoexistence.FORCE_KEYS.forEach { if (it in s.read && isDirty(s, it)) schedule(s, it, 0L) }
+    }
+
+    private fun choiceHeld(): Boolean = DsyncCoexistence.choiceHeld(choiceHoldUntil, System.currentTimeMillis())
+
+    /** Disarm the forced replace for [keys] (the Drive backup did not apply for them). */
+    fun cancelForceReplace(playlistId: String, keys: Collection<DsyncKey>) {
+        if (keys.isEmpty()) return
+        val e = state.edit()
+        keys.forEach { e.remove(forceKey(playlistId, it)) }
+        e.commit()
+    }
+
+    /**
+     * Read-only probe: the base user's App Data for [playlistId], summarized per
+     * shared category. Nothing is applied or stored. Null when the server
+     * could not be read; an absent key reads as an empty summary.
+     */
+    suspend fun serverSummary(playlistId: String): com.aeriotv.android.core.sync.SetupSourceChoice.Summary? =
+        kotlinx.coroutines.withContext(ProfileScope.defaultOnly()) {
+            val row = playlistDao.byId(playlistId) ?: return@withContext null
+            val apiKey = row.apiKey?.takeIf { it.isNotBlank() } ?: return@withContext null
+            val base = repository.get().effectiveBaseUrl(row)
+            val r = runCatching { client.appDataGet(base, apiKey, DsyncBucket.Main.wire) }.getOrNull()
+                ?: return@withContext null
+            if (r.status == 404) return@withContext com.aeriotv.android.core.sync.SetupSourceChoice.Summary.EMPTY
+            if (!r.ok) {
+                Log.w(TAG, "[DSYNC] setup probe status=${r.status}")
+                return@withContext null
+            }
+            val root = runCatching { json.parseToJsonElement(r.body.orEmpty()) as? JsonObject }.getOrNull()
+            val bucket = (root?.let { DsyncV2.decode(it) } as? DsyncV2.Decode.Ok)?.bucket
+                ?: return@withContext com.aeriotv.android.core.sync.SetupSourceChoice.Summary.EMPTY
+            val out = deviceSummary(row, bucket)
+            Log.i(TAG, "[DSYNC] setup probe ${out.categories.entries.joinToString { "${it.key}=${it.value.rows}" }.ifEmpty { "empty" }}")
+            out
+        }
+
+    // ---- Rule 5: convergence with Google Drive ----
+
+    /**
+     * Drive follows Dispatcharr Sync in the same foreground session (Rule 5):
+     * a shared key applied from a pull, or changed on this device, queues the
+     * debounced one-shot Drive push (DriveSyncWorker, 15 s, REPLACE). Base
+     * user only (the Drive backup is the base profile's), Drive Sync on, and
+     * the key's Sync Categories item on.
+     */
+    private suspend fun driveFollow(s: Session, key: DsyncKey, why: String) {
+        if (!isBase(s) || key.category !in DsyncCoexistence.SHARED_CATEGORIES) return
+        if (!enabled(key, s)) return
+        val on = runCatching { kotlinx.coroutines.withContext(ProfileScope.defaultOnly()) { prefs.syncMasterEnabled.first() } }.getOrDefault(false)
+        if (!on) return
+        Log.i(TAG, "[SYNC] drive follow ${key.suffix} ($why)")
+        // The Drive FILE that carries the key (recents and collections ride in Preferences), not its toggle category.
+        DsyncCoexistence.driveFileFor(key)?.let { com.aeriotv.android.core.sync.DriveSyncWorker.noteFollow(it, "${key.suffix} $why") }
+        com.aeriotv.android.core.sync.DriveSyncWorker.enqueueOneShotPush(context)
+    }
+
+    @Volatile private var convergeRunning = false
+
+    /**
+     * What the Drive fresh-device order (DriveSyncManager, section 10a) needs
+     * from this side: the shared keys the pull applied on this device this
+     * session ([read], suffixes) and the server copy as last fetched
+     * ([server], canonical rows). Null when no base-user session runs.
+     * [read] is null until the session's first complete pull.
+     */
+    data class DriveOrderState(val read: Set<String>?, val server: com.aeriotv.android.core.sync.SetupSourceChoice.Summary)
+
+    suspend fun driveOrderState(): DriveOrderState? {
+        val s = session ?: return null
+        if (!isBase(s) || s.peek) return null
+        if (!s.firstPullDone) return DriveOrderState(null, com.aeriotv.android.core.sync.SetupSourceChoice.Summary.EMPTY)
+        val read = synchronized(s.read) { s.read.toSet() }.filter { it in DsyncCoexistence.FORCE_KEYS }.map { it.suffix }.toSet()
+        val bucket = bucketRaw(s, DsyncBucket.Main)?.let { (DsyncV2.decode(it) as? DsyncV2.Decode.Ok)?.bucket }
+        val row = playlistDao.byId(s.playlistId)
+        val server = bucket?.let { b -> row?.let { deviceSummary(it, b) } } ?: com.aeriotv.android.core.sync.SetupSourceChoice.Summary.EMPTY
+        return DriveOrderState(read, server)
+    }
+
+    /** The data the server held for [key] as of the last fetch of its bucket (refreshBeforePut saves it), or null. */
+    private fun serverDataOf(s: Session, b: DsyncBucket, key: DsyncKey): JsonObject? {
+        val bucket = bucketRaw(s, b)?.let { (DsyncV2.decode(it) as? DsyncV2.Decode.Ok)?.bucket } ?: return null
+        return (DsyncV2.category(bucket, key) as? DsyncDecode.Ok)?.envelope?.data
+    }
+
+    /**
+     * Rule 5 self-heal, once per complete pull: compare the Drive copy with
+     * the Dispatcharr copy this pull just read (the saved bucket, no extra
+     * server read) and push the differing categories to Drive. Only once the
+     * setup choice is settled: never while a Rule 4 hold, forced replace, or
+     * prompt is pending, and never for a sub-profile.
+     */
+    private fun maybeConverge(s: Session) {
+        if (!isBase(s) || choiceHeld() || convergeRunning) return
+        if (DsyncCoexistence.FORCE_KEYS.any { isForced(s, it) }) return
+        val raw = bucketRaw(s, DsyncBucket.Main) ?: return
+        val bucket = (DsyncV2.decode(raw) as? DsyncV2.Decode.Ok)?.bucket ?: return
+        // A key with an unsent local change is on its way to the server; the
+        // follow push carries it to Drive, so it is not compared now.
+        // A key dirty only because untranslatable rows stayed local (PushPartial)
+        // is compared: both summaries count canonical-id rows only (section 10a).
+        val skip = DsyncCoexistence.FORCE_KEYS.mapNotNull { k ->
+            val pending = synchronized(s.pending) { s.pending.containsKey(k) }
+            when {
+                isForced(s, k) -> "armed"
+                s.awaitingCache.containsKey(k) -> "deferred"
+                pending -> "dirty"
+                k !in s.read -> "unread"
+                isDirty(s, k) && k !in s.partial -> "dirty"
+                else -> null
+            }?.let { k.suffix to it }
+        }.toMap()
+        // A key dirty with no write queued is either an unsent local change or
+        // a stale flag (the server already equals local). Queue its write: the
+        // build compares with the fetched server copy, so an equal key ends as
+        // status=unchanged and clears, and converge runs again after it.
+        DsyncCoexistence.FORCE_KEYS.filter { skip[it.suffix] == "dirty" && synchronized(s.pending) { !s.pending.containsKey(it) } }.forEach {
+            s.convergeAfterWrite += it
+            schedule(s, it, 0L)
+        }
+        convergeRunning = true
+        scope.launch {
+            try {
+                val x = deviceSummary(playlistDao.byId(s.playlistId) ?: return@launch, bucket)
+                drive.get().converge(s.playlistId, x, skip)
+            } catch (t: Throwable) {
+                Log.w(TAG, "[SYNC] converge failed: ${t.javaClass.simpleName}")
+            } finally {
+                convergeRunning = false
+            }
+        }
+    }
 
     /** Settings > Sync Now: pull, then flush anything waiting. */
     fun syncNow() {
@@ -324,6 +907,23 @@ class DispatcharrSyncManager @Inject constructor(
         }
     }
 
+    /**
+     * Coexistence Rule 1: true when Drive must not apply [category] on pull,
+     * because Dispatcharr Sync owns it for the active Dispatcharr playlist's
+     * active user and this device has finished a Dispatcharr pull for them.
+     */
+    suspend fun ownsCategory(category: com.aeriotv.android.core.sync.SyncCategory): Boolean {
+        if (category !in DsyncCoexistence.SHARED_CATEGORIES) return false
+        val on = runCatching { prefs.dispatcharrSyncEnabledOnce() }.getOrDefault(false)
+        val active = runCatching { playlistDao.allOnce().firstOrNull { it.isActive } }.getOrNull()
+        val isD = active?.isDispatcharrDirectConnect() == true
+        val done = if (on && isD) {
+            val profileKey = currentProfileId(active!!.id) ?: ProfileScope.token.value.ifEmpty { "default" }
+            state.getBoolean("fpdone|${active.id}|$profileKey", false)
+        } else false
+        return DsyncCoexistence.owns(category, isD, on, done)
+    }
+
     private fun currentProfileId(playlistId: String): String? =
         profileStore.activeProfileId(playlistId)?.takeIf { profileStore.byId(it) != null }
             ?: profileStore.forPlaylist(playlistId).firstOrNull { it.isDefault }?.id
@@ -331,11 +931,14 @@ class DispatcharrSyncManager @Inject constructor(
     // ---- per-key enablement ----
 
     private suspend fun enabled(key: DsyncKey, s: Session): Boolean {
-        val cat = key.category
-        if (cat != null && !prefs.syncCategoryEnabledOnce(cat)) return false
+        // Per-item choices (Sync Categories): data keys follow their item's
+        // on/off; `settings` is gated per name by scope (lanes), so it is
+        // always considered and an all-Off device simply writes nothing.
+        if (key == DsyncKey.Settings) return true
+        val item = com.aeriotv.android.core.sync.SyncItemCatalog.itemForDsync(key.suffix)
+        val on = item == null || prefs.syncScopesOnce()[item.id] != com.aeriotv.android.core.sync.SyncScope.Off
+        if (!on) return false
         return when (key) {
-            DsyncKey.RemoteMap -> prefs.syncRemoteControlMapOnce()
-            DsyncKey.RadioDefault -> prefs.syncRadioModeByDefaultOnce()
             DsyncKey.Profiles -> isAdmin(s)
             else -> true
         }
@@ -429,8 +1032,14 @@ class DispatcharrSyncManager @Inject constructor(
 
     private suspend fun pullAll(s: Session, reason: String) = s.mutex.withLock {
         if (session !== s) return@withLock
+        if (choiceHeld()) {
+            Log.i(TAG, "[DSYNC] pull ($reason) held while the Google Drive backup applies")
+            return@withLock
+        }
         val c = conn(s) ?: return@withLock
         s.listOk = false
+        s.pullComplete = false
+        s.bucketFailed = false
         _ui.value = _ui.value.copy(running = true)
         try {
             val list = runCatching { client.appDataList(c.base, c.apiKey) }.getOrNull()
@@ -466,7 +1075,9 @@ class DispatcharrSyncManager @Inject constructor(
                 if (keys.isNotEmpty()) pullBucket(s, c, b, keys)
             }
             s.lastPullAt = System.currentTimeMillis()
+            s.pullComplete = !s.bucketFailed
             s.firstPullDone = true
+            state.edit().putBoolean(k("fpdone", s), true).apply()
             stampLast(s)
             Log.i(TAG, "[DSYNC] pull done ($reason) read=${s.read.size} server=${s.serverBytes.size}")
             // A category absent on the server, or changed here before this
@@ -474,8 +1085,10 @@ class DispatcharrSyncManager @Inject constructor(
             for (key in s.read.toList()) {
                 val dirty = isDirty(s, key)
                 if (dirty && (reason == "reconnect" || reason == "launch" || reason == "profile")) s.resend += key
-                if (dirty || key !in s.present) schedule(s, key, 0L)
+                if (isForced(s, key) && s.awaitingCache.containsKey(key)) retryForced(s, key, "cycle")
+                else if (dirty || key !in s.present) schedule(s, key, 0L)
             }
+            maybeConverge(s)
         } finally {
             _ui.value = _ui.value.copy(running = false)
             refreshMessage(s)
@@ -514,16 +1127,28 @@ class DispatcharrSyncManager @Inject constructor(
             keys.forEach { s.present -= it; s.read += it }
             return
         }
+        // No HEAD / ETag on App Data, so the list's `bytes` is the only
+        // change signal. A pull under BUCKET_REFETCH_MIN_MS after the last
+        // one that sees the same size skips the GET (review 2026-10-27);
+        // anything older, or any size change, fetches as before.
+        val listed = s.serverBytes[b.wire]
+        if (!s.forceApply && shouldSkipBucketGet(s.lastPullAt, System.currentTimeMillis(), s.fetchedBytes[b.wire], listed)) {
+            Log.d(TAG, "[DSYNC] skip get ${b.wire}: unchanged ${listed}B, last pull under ${BUCKET_REFETCH_MIN_MS / 1000}s ago")
+            return
+        }
         when (val f = fetchBucket(c, b)) {
             Fetched.Absent -> keys.forEach { s.present -= it; s.read += it }
-            Fetched.Failed -> Unit
-            Fetched.Malformed -> Log.w(TAG, "[DSYNC] malformed ${b.wire}")
+            Fetched.Failed -> s.bucketFailed = true
+            Fetched.Malformed -> { s.bucketFailed = true; Log.w(TAG, "[DSYNC] malformed ${b.wire}") }
             is Fetched.TooNew -> {
+                s.bucketFailed = true
                 s.blocked += keys
                 Log.w(TAG, "[DSYNC] skip ${b.wire} v${f.version} > v${DsyncV2.SCHEMA}")
             }
             is Fetched.Got -> {
+                listed?.let { s.fetchedBytes[b.wire] = it }
                 saveBucketRaw(s, b, f.bucket.raw)
+                foldProviders(s, f.bucket)
                 keys.forEach { key ->
                     when (val d = DsyncV2.category(f.bucket, key)) {
                         null -> { s.present -= key; s.read += key }
@@ -632,8 +1257,29 @@ class DispatcharrSyncManager @Inject constructor(
     /** One pulled category (v1 rules per category, section 6). */
     private suspend fun processCategory(s: Session, key: DsyncKey, env: DsyncEnvelope, bytes: Int) {
         val raw = env.raw
+        // Rule 4 (Coexistence): the user chose Google Drive for this base user.
+        // The server copy is recorded as consumed without applying it, and the
+        // key goes up whole from local (writeLocked force path).
+        if (isForced(s, key)) {
+            saveAfter(s, key, raw, env.updatedAt, env.deviceId, env.data)
+            setDirty(s, key, true)
+            Log.i(TAG, "[DSYNC] pull ${key.suffix} bytes=$bytes not applied: replacing with this device's copy (user chose Google Drive)")
+            s.read += key
+            return
+        }
         val localAt = state.getLong(k("at", s, key), 0L)
         val localDev = state.getString(k("dev", s, key), "").orEmpty()
+        // Rule 2 (Coexistence): the first time this device reads this key for
+        // this user, an empty server copy never clears local. Record the
+        // envelope as consumed without applying it and mark the key dirty, so
+        // the post-pull flush and refreshBeforePut push local up.
+        if (DsyncCoexistence.seedFromLocal(key, localAt > 0L || state.contains(k("at", s, key)), env.data)) {
+            saveAfter(s, key, raw, env.updatedAt, env.deviceId, env.data)
+            setDirty(s, key, true)
+            Log.i(TAG, "[DSYNC] pull ${key.suffix} bytes=$bytes empty on server, first pull: seeding from local")
+            s.read += key
+            return
+        }
         val wins = DsyncEnvelopeCodec.remoteWins(localAt, localDev, env.updatedAt, env.deviceId)
         // profiles merges per row on every pull; the rows carry their own updatedAt.
         val decision = if (key == DsyncKey.Profiles) DsyncGate.DirtyPull.Merge
@@ -649,12 +1295,34 @@ class DispatcharrSyncManager @Inject constructor(
             }
             s.suppressUntil[key] = System.currentTimeMillis() + SUPPRESS_MS
             saveAfter(s, key, raw, env.updatedAt, env.deviceId, env.data)
+            driveFollow(s, key, "pull")
             if (key != DsyncKey.Profiles) {
                 setDirty(s, key, true)
                 Log.i(TAG, "[DSYNC] pull ${key.suffix} bytes=$bytes merged with local change")
             } else {
                 Log.i(TAG, "[DSYNC] pull ${key.suffix} bytes=$bytes merged per row")
             }
+            s.read += key
+            return
+        }
+        // Setup choice (section 10a, pull before replace): the user chose
+        // Dispatcharr, so its copy is applied whole before Drive is replaced,
+        // even when this device already consumed the stamp ("not newer" hid a
+        // recent the probe counted; field run 2026-11-01 recents 14 vs 13).
+        // A key with an unsent local change keeps it (that change is newer).
+        val forceWin = DsyncCoexistence.choiceApplies(wins, s.forceApply, key, isDirty(s, key))
+        if (forceWin) {
+            val applied = runCatching { apply(s, key, env) }
+                .onFailure { Log.w(TAG, "[DSYNC] apply ${key.suffix} failed: ${it.javaClass.simpleName}") }
+                .getOrDefault(ApplyResult.Failed)
+            if (applied != ApplyResult.Applied) {
+                s.forceApplyFailed = true
+                Log.i(TAG, "[DSYNC] pull ${key.suffix} bytes=$bytes setup choice apply did not run")
+                return
+            }
+            s.suppressUntil[key] = System.currentTimeMillis() + SUPPRESS_MS
+            saveAfter(s, key, raw, env.updatedAt, env.deviceId, env.data)
+            Log.i(TAG, "[DSYNC] pull ${key.suffix} bytes=$bytes applied (setup choice, stamp not newer)")
             s.read += key
             return
         }
@@ -674,20 +1342,102 @@ class DispatcharrSyncManager @Inject constructor(
                     s.suppressUntil[key] = System.currentTimeMillis() + SUPPRESS_MS
                     saveAfter(s, key, raw, env.updatedAt, env.deviceId, env.data)
                     Log.i(TAG, "[DSYNC] pull ${key.suffix} bytes=$bytes applied")
+                    driveFollow(s, key, "pull")
                 }
                 ApplyResult.Malformed -> {
                     Log.w(TAG, "[DSYNC] malformed category ${key.suffix}")
                     return
                 }
                 // The channel list is not loaded yet: do not count as read.
-                ApplyResult.NotReady, ApplyResult.Failed -> return
+                ApplyResult.NotReady, ApplyResult.Failed -> {
+                    if (s.forceApply) s.forceApplyFailed = true
+                    return
+                }
             }
         } else {
             // Keep the newest raw for round-trip and the row merges.
             state.edit().putString(k("raw", s, key), raw.toString()).apply()
             Log.i(TAG, "[DSYNC] pull ${key.suffix} bytes=$bytes not newer")
+            if (key == DsyncKey.Progress) runCatching { retryHeldProgress(s, env) }
+                .onFailure { Log.w(TAG, "[DSYNC] progress held retry failed: ${it.javaClass.simpleName}") }
+            if (healIfLocalDiffers(s, key, env) == ApplyResult.NotReady) return
         }
         s.read += key
+    }
+
+    /**
+     * Self-heal, once per session per key: a stamp this device already
+     * consumed skips the apply ("not newer"), so a pull that once applied
+     * into the wrong scope or mapped nothing (2026-10-28 roster add + switch:
+     * Jordan's favorites never appeared) would stay wrong forever. When the
+     * session's own local copy is empty or differs from a non-empty server
+     * copy and there is no unsent local change, apply the server copy anyway.
+     */
+    private suspend fun healIfLocalDiffers(s: Session, key: DsyncKey, env: DsyncEnvelope): ApplyResult? {
+        if (key !in HEAL_KEYS || isDirty(s, key) || key in s.healed) return null
+        val d = env.data
+        val check: Pair<Boolean, Int>? = runCatching {
+            when (key) {
+                DsyncKey.Favorites -> {
+                    val ids = DsyncPayloads.decodeFavorites(d).orEmpty()
+                    val m = channelMap(s)
+                    if (ids.isEmpty() || m.toInt.isEmpty()) null else {
+                        val local = favoriteDao.allOnceIn(s.token).map { it.channelId }.filter { it in m.toInt }.toSet()
+                        val server = ids.mapNotNull { m.toLocal[it] }.toSet()
+                        if (server.isEmpty() || local == server) null else (local.isEmpty() to ids.size)
+                    }
+                }
+                DsyncKey.Recents -> {
+                    val remote = DsyncPayloads.decodeRecents(d).orEmpty()
+                    val m = channelMap(s)
+                    if (remote.isEmpty() || m.toInt.isEmpty()) null else {
+                        val local = prefs.recentChannelIdsIn(s.token).filter { it in m.toInt }.toSet()
+                        val server = remote.mapNotNull { m.toLocal[it.channelId] }.toSet()
+                        if (server.isEmpty() || local.containsAll(server)) null else (local.isEmpty() to remote.size)
+                    }
+                }
+                DsyncKey.Collections -> {
+                    val remote = DsyncPayloads.decodeCollections(d).orEmpty()
+                    val m = channelMap(s)
+                    if (remote.isEmpty() || m.toInt.isEmpty()) null else {
+                        val local = prefs.channelCollectionsIn(s.token)
+                        val l = local.associate { it.id to (it.name to it.memberIds.filter { id -> id in m.toInt }.toSet()) }
+                        val r = remote.associate { it.id to (it.name to it.members.mapNotNull { id -> m.toLocal[id] }.toSet()) }
+                        if (l == r) null else (local.isEmpty() to remote.size)
+                    }
+                }
+                DsyncKey.HiddenGroups -> {
+                    val g = DsyncPayloads.decodeHiddenGroups(d)
+                    if (g == null || (g.live.isEmpty() && g.movies.isEmpty() && g.series.isEmpty())) null else {
+                        val l = Triple(prefs.hiddenGroupsIn(s.token), prefs.hiddenMovieGroupsIn(s.token), prefs.hiddenSeriesGroupsIn(s.token))
+                        if (l == Triple(g.live.toSet(), g.movies.toSet(), g.series.toSet())) null
+                        else ((l.first.isEmpty() && l.second.isEmpty() && l.third.isEmpty()) to (g.live.size + g.movies.size + g.series.size))
+                    }
+                }
+                DsyncKey.GroupOrder -> {
+                    val g = DsyncPayloads.decodeGroupOrder(d)
+                    if (g == null || (g.order.isEmpty() && g.mode == "default")) null else {
+                        val mode = prefs.groupSortModeIn(s.token).lowercase()
+                        val order = prefs.groupOrderIn(s.token)
+                        if (mode == g.mode && order == g.order) null else (order.isEmpty() to g.order.size)
+                    }
+                }
+                else -> null
+            }
+        }.getOrNull()
+        if (check == null) {
+            s.healed += key
+            return null
+        }
+        val applied = runCatching { apply(s, key, env) }.getOrDefault(ApplyResult.Failed)
+        if (applied == ApplyResult.NotReady) return applied // channel list not loaded: try again next pull
+        s.healed += key
+        if (applied == ApplyResult.Applied) {
+            s.suppressUntil[key] = System.currentTimeMillis() + SUPPRESS_MS
+            driveFollow(s, key, "pull")
+            Log.i(TAG, "[DSYNC] ${key.suffix} in: re-applied after ${if (check.first) "empty local" else "local differs"} (${check.second})")
+        }
+        return applied
     }
 
     // ---- write (section 7.3 to 7.8) ----
@@ -699,10 +1449,15 @@ class DispatcharrSyncManager @Inject constructor(
         if ((s.suppressUntil[key] ?: 0L) > System.currentTimeMillis()) return
         s.tooLarge -= key
         setDirty(s, key, true)
-        schedule(s, key, DEBOUNCE_MS)
+        scope.launch { driveFollow(s, key, "local") }
+        // The profiles lane goes out fast so other devices' pickers see it;
+        // a later emission must not stretch it back to the general debounce.
+        schedule(s, key, if (key == DsyncKey.Profiles) PEEK_PUSH_DEBOUNCE_MS else DEBOUNCE_MS)
     }
 
     private fun schedule(s: Session, key: DsyncKey, delayMs: Long) {
+        // A peek writes only from peekPush, under profilesPeekMutex.
+        if (s.peek) return
         synchronized(s.pending) {
             s.pending.remove(key)?.cancel()
             s.pending[key] = scope.launch {
@@ -736,7 +1491,11 @@ class DispatcharrSyncManager @Inject constructor(
     }
 
     private suspend fun writeLocked(s: Session, key: DsyncKey, retry413: Boolean) {
-        if (session !== s || s.paused) return
+        if (!s.live() || s.paused) return
+        if (key in DsyncCoexistence.FORCE_KEYS && choiceHeld()) {
+            setDirty(s, key, true)
+            return
+        }
         if (!DsyncGate.mayWrite(s.token, ProfileScope.token.value, s.firstPullDone, key in s.read)) {
             // Section 7.2 and the switch rule: the dirty flag stays set for this profile's next session.
             if (ProfileScope.token.value != s.token) Log.i(TAG, "[DSYNC] drop ${key.suffix}: profile changed before send")
@@ -749,20 +1508,55 @@ class DispatcharrSyncManager @Inject constructor(
         // Every PUT reads the key first: row categories merge, whole-value
         // categories keep the newer side, and every other category in the key
         // is re-emitted at its current server value.
-        when (refreshBeforePut(s, c, b, key)) {
+        val force = isForced(s, key)
+        when (refreshBeforePut(s, c, b, key, force)) {
             Refresh.Unreachable -> { retryLater(s, key); return }
             Refresh.RemoteTook -> return
             Refresh.Ok -> Unit
         }
         val raw = rawOf(s, key)
-        val base = raw?.get("data") as? JsonObject
+        // A forced replace builds row categories from local alone: no server
+        // rows are merged in or kept. Whole-value categories keep their base,
+        // which only round-trips names and members this device does not own.
+        val base = if (force && key in DsyncCoexistence.FORCE_ROW_KEYS) null else raw?.get("data") as? JsonObject
         val now = System.currentTimeMillis() / 1000
         val data = runCatching { build(s, key, base, now) }
             .onFailure { Log.w(TAG, "[DSYNC] build ${key.suffix} failed: ${it.javaClass.simpleName}") }
             .getOrNull() ?: return
-        if (session !== s || ProfileScope.token.value != s.token) return
-        if (data.toString() == lastDataOf(s, key) && key in s.present) {
-            setDirty(s, key, false)
+        if (!s.live() || ProfileScope.token.value != s.token) return
+        // Rule 4: a forced replace writes every category, an empty one included,
+        // so the server mirrors the chosen Google Drive setup exactly.
+        if (force && key in s.manual) {
+            Log.i(TAG, "[DSYNC] manual push ${key.suffix} rows=${DsyncCoexistence.rowCount(key, data)}")
+        } else if (DsyncCoexistence.forcedWritesEmpty(force, key) && DsyncCoexistence.isEmptyData(key, data)) {
+            Log.i(TAG, "[DSYNC] force push ${key.suffix} rows=0 (empty, mirrors Google Drive)")
+        } else if (force && key == DsyncKey.Settings) {
+            // Non-blank values across the v, tv, and mobile lanes this device
+            // writes: the same count the Drive probe reports for settings.
+            Log.i(TAG, "[DSYNC] force push settings rows=${DsyncCoexistence.rowCount(key, data)} (mirrors Google Drive)")
+        } else if (force) Log.i(TAG, "[DSYNC] force push ${key.suffix} rows=${DsyncCoexistence.rowCount(key, data)} (user chose Google Drive)")
+        // Compare with the server copy refreshBeforePut just fetched, not the
+        // last copy this device saved: a forced refresh saves the bucket but
+        // not the key's data, so the saved copy could be stale (field run
+        // 2026-11-01: "status=unchanged rows=1" while the server held 9).
+        val held = serverDataOf(s, b, key)?.toString() ?: lastDataOf(s, key)
+        if (data.toString() == held && key in s.present) {
+            // No PUT: the server already holds exactly this copy. Logged for a
+            // forced key (every force push ends in a status line) and for a
+            // dirty shared key (the flag clears here).
+            if (force || (isDirty(s, key) && key in DsyncCoexistence.FORCE_KEYS)) {
+                Log.i(TAG, "[DSYNC] put ${b.wire} (${key.suffix}) status=unchanged rows=${DsyncCoexistence.rowCount(key, data)} (server already holds this copy)")
+            }
+            if (force) clearForced(s, key)
+            markSent(s, key)
+            clearAwaiting(s, key)
+            if (key == DsyncKey.Profiles) {
+                state.edit()
+                    .remove(profilesPendingKey(s.playlistId))
+                    .putLong(profilesPushedKey(s.playlistId), newestRowStamp(s.playlistId))
+                    .apply()
+                clearAckedRemovals(s.playlistId, data)
+            }
             return
         }
         if (s.serverFull && b.wire !in s.serverBytes) {
@@ -772,12 +1566,22 @@ class DispatcharrSyncManager @Inject constructor(
         val sub = DsyncV2.encodeCategory(raw, deviceId, now, data)
         // No byte guard before the PUT: send the full value; trim only on a 413.
         var value = DsyncV2.encodeBucket(bucketRaw(s, b), deviceId, BuildConfig.VERSION_NAME, now, mapOf(key to sub))
+        value = withProviders(s, value)
         var step = 0
         while (true) {
             when (put(s, c, b, key, value, data)) {
                 PutStatus.Ok -> {
                     s.resend -= key
-                    setDirty(s, key, false)
+                    if (force) clearForced(s, key)
+                    markSent(s, key)
+                    clearAwaiting(s, key)
+                    if (key == DsyncKey.Profiles) {
+                        state.edit()
+                            .remove(profilesPendingKey(s.playlistId))
+                            .putLong(profilesPushedKey(s.playlistId), newestRowStamp(s.playlistId))
+                            .apply()
+                        clearAckedRemovals(s.playlistId, data)
+                    }
                     s.retries.remove(key)
                     s.tooLarge -= key
                 }
@@ -801,6 +1605,38 @@ class DispatcharrSyncManager @Inject constructor(
         refreshMessage(s)
     }
 
+    // ---- syncProviders record (schema section 10b) ----
+
+    /** The base (signed-in) user only: a sub-profile's key never feeds the owner's record. */
+    private fun isBase(s: Session) = s.token.isEmpty()
+
+    private fun foldProviders(s: Session, b: DsyncV2.Bucket) {
+        if (!isBase(s)) return
+        val rec = com.aeriotv.android.core.sync.SyncProvidersRules.fromJson(
+            b.categories[com.aeriotv.android.core.sync.SyncProvidersRules.DSYNC_CATEGORY]?.get("data"),
+        )
+        providersStore.fold(com.aeriotv.android.core.sync.SyncProvidersStore.dsyncScope(s.playlistId), rec)
+    }
+
+    /** Every PUT by the base user re-emits the union record; other users round-trip theirs untouched. */
+    private suspend fun withProviders(s: Session, value: JsonObject): JsonObject {
+        if (!isBase(s)) return value
+        val rec = providersStore.forPush(
+            com.aeriotv.android.core.sync.SyncProvidersStore.dsyncScope(s.playlistId),
+            isBaseProfile = true,
+            dispatcharrOn = true,
+            driveOn = runCatching { prefs.syncMasterEnabled.first() }.getOrDefault(false),
+            deviceId = deviceId,
+        ) ?: return value
+        val cats = LinkedHashMap(value[DsyncV2.CATEGORIES] as? JsonObject ?: JsonObject(emptyMap()))
+        val name = com.aeriotv.android.core.sync.SyncProvidersRules.DSYNC_CATEGORY
+        cats[name] = DsyncV2.encodeCategory(
+            cats[name] as? JsonObject, rec.deviceId.ifEmpty { deviceId }, rec.updatedAt / 1000,
+            com.aeriotv.android.core.sync.SyncProvidersRules.toJson(rec),
+        )
+        return JsonObject(LinkedHashMap(value).apply { put(DsyncV2.CATEGORIES, JsonObject(cats)) })
+    }
+
     private enum class PutStatus { Ok, TooLarge, Full, Auth, Retry, Rejected }
     private enum class Refresh { Ok, Unreachable, RemoteTook }
 
@@ -810,7 +1646,7 @@ class DispatcharrSyncManager @Inject constructor(
      * this device last read or wrote it, rows merge into local state first,
      * and a newer whole value is taken instead of overwriting it.
      */
-    private suspend fun refreshBeforePut(s: Session, c: Conn, b: DsyncBucket, key: DsyncKey): Refresh {
+    private suspend fun refreshBeforePut(s: Session, c: Conn, b: DsyncBucket, key: DsyncKey, force: Boolean = false): Refresh {
         val f = fetchBucket(c, b)
         val got = when (f) {
             Fetched.Failed -> return Refresh.Unreachable
@@ -820,9 +1656,14 @@ class DispatcharrSyncManager @Inject constructor(
         }
         saveBucketRaw(s, b, got.bucket.raw)
         s.serverBytes[b.wire] = got.bytes.toLong()
+        foldProviders(s, got.bucket)
         val d = DsyncV2.category(got.bucket, key) as? DsyncDecode.Ok ?: return Refresh.Ok
         val env = d.envelope
         s.present += key
+        // Forced replace (Rule 4): the bucket is saved so the PUT round-trips
+        // every other category, but this key's server copy is neither merged
+        // nor taken, whatever its stamp (no remoteWins, no consumed check).
+        if (force) return Refresh.Ok
         val at = state.getLong(k("at", s, key), 0L)
         val dev = state.getString(k("dev", s, key), "").orEmpty()
         if (env.updatedAt == at && env.deviceId == dev && (rawOf(s, key)?.get("data") as? JsonObject) == env.data) return Refresh.Ok
@@ -888,8 +1729,10 @@ class DispatcharrSyncManager @Inject constructor(
 
     // ---- local sources (change detection) ----
 
-    private fun sourceFor(key: DsyncKey): Flow<Any?> = when (key) {
-        DsyncKey.Favorites -> favoriteDao.observeAll().map { rows -> rows.map { it.channelId to it.displayOrder } }
+    private fun sourceFor(key: DsyncKey, playlistId: String?, token: String? = null): Flow<Any?> = when (key) {
+        // A session watches its own scope; the between-sessions watcher follows the active one.
+        DsyncKey.Favorites -> (if (token != null) favoriteDao.observeAllIn(token) else favoriteDao.observeAll())
+            .map { rows -> rows.map { it.channelId to it.displayOrder } }
         DsyncKey.Recents -> prefs.recentChannelIds.map { it.also { ids -> stampRecents(ids) } }
         DsyncKey.Progress -> watchProgressDao.observeRecent(1000).map { rows -> rows.map { listOf(it.videoId, it.positionMs, it.updatedAt, it.isFinished) } }
         DsyncKey.Reminders -> reminderDao.observeAll().map { rows -> rows.map { it.reminderKey } }
@@ -897,7 +1740,8 @@ class DispatcharrSyncManager @Inject constructor(
         DsyncKey.HiddenTitles -> hiddenTitlesStore.observe(null)
         DsyncKey.HiddenGroups -> combine(prefs.hiddenGroups, prefs.hiddenMovieGroups, prefs.hiddenSeriesGroups) { a, b, c -> Triple(a, b, c) }
         DsyncKey.GroupOrder -> combine(prefs.groupOrder, prefs.groupSortMode) { a, b -> a to b }
-        DsyncKey.Settings -> prefs.dsyncSettings
+        DsyncKey.Settings -> if (playlistId != null) combine(prefs.dsyncSettings(playlistId), prefs.syncScopes) { a, b -> a to b }
+        else combine(prefs.dsyncSettings(null), prefs.defaultGroupTokensAll, prefs.syncScopes) { a, b, c -> Triple(a, b, c) }
         DsyncKey.RemoteMap -> prefs.remoteControlMap
         DsyncKey.RadioDefault -> prefs.radioModeByDefault
         DsyncKey.Collections -> prefs.channelCollections
@@ -913,8 +1757,16 @@ class DispatcharrSyncManager @Inject constructor(
         val intByName: Map<String, Int>,
     )
 
+    /**
+     * The channel snapshot key of the session's own profile (the same shape
+     * ProfileScope.cacheKey writes: bare playlist id for the default profile,
+     * "<playlistId>@<profileId>" for another). Never the global current scope.
+     */
+    private fun snapshotKey(s: Session): String =
+        if (s.token.isEmpty()) s.playlistId else "${s.playlistId}@${s.token}"
+
     private suspend fun channelMap(s: Session): ChannelMap {
-        val rows = channelSnapshotDao.forPlaylist(s.playlistId)
+        val rows = channelSnapshotDao.forPlaylistKey(snapshotKey(s))
         val toInt = HashMap<String, Int>()
         val toLocal = HashMap<Int, String>()
         val nameOf = HashMap<Int, String>()
@@ -954,33 +1806,123 @@ class DispatcharrSyncManager @Inject constructor(
     private suspend fun scopeHost(s: Session): String? =
         playlistDao.byId(s.playlistId)?.let { WatchlistStore.scopeFor(it) }
 
+    // ---- id cache readiness (DsyncReadiness) ----
+
+    private suspend fun cacheReady(s: Session, key: DsyncKey): Boolean = when (DsyncReadiness.cacheFor(key)) {
+        null -> true
+        DsyncReadiness.Cache.Channels -> channelMap(s).toInt.isNotEmpty()
+        DsyncReadiness.Cache.VodCatalog -> conn(s)?.let { vodIds.moviesReady(it.row) } ?: false
+    }
+
+    /**
+     * Gate one build: true = defer. A deferred key stays dirty (never an
+     * empty list over local rows that could not be translated) and the
+     * cache poll in [runSession] re-pushes it once the cache is built.
+     */
+    private suspend fun deferForCache(s: Session, key: DsyncKey, localRows: Int, unresolvedRows: Int, ready: Boolean? = null): Boolean {
+        val isReady = ready ?: cacheReady(s, key)
+        val decision = DsyncReadiness.decide(key, isReady, unresolvedRows)
+        if (decision == DsyncReadiness.Decision.PushPartial) {
+            if (s.partial.add(key)) {
+                if (isForced(s, key)) {
+                    // Rule 4: the catalog is built and these rows are not in it;
+                    // the forced push goes without them (counts only).
+                    Log.i(TAG, "[DSYNC] force push ${key.suffix} drops untranslated=$unresolvedRows sent=${localRows - unresolvedRows} (not in this catalog)")
+                } else {
+                    Log.i(TAG, "[DSYNC] push ${key.suffix} partial after sweep: translated=${localRows - unresolvedRows} untranslated=$unresolvedRows (kept local; key stays dirty)")
+                }
+            }
+        } else s.partial -= key
+        if (decision != DsyncReadiness.Decision.Defer) {
+            if (s.awaitingCache.containsKey(key)) s.readyAtPush[key] = isReady
+            return false
+        }
+        setDirty(s, key, DsyncReadiness.dirtyAfter(DsyncReadiness.Decision.Defer, putOk = false, dirtyBefore = isDirty(s, key)))
+        if (s.awaitingCache.put(key, localRows) == null) {
+            Log.i(TAG, "[DSYNC] push ${key.suffix} deferred: id cache not ready (rows=$localRows, untranslated=$unresolvedRows)")
+        }
+        return true
+    }
+
+    private fun clearAwaiting(s: Session, key: DsyncKey) {
+        val ready = s.readyAtPush.remove(key) ?: true
+        s.sweepRetried -= key
+        s.awaitingCache.remove(key)?.let { n ->
+            Log.i(TAG, "[DSYNC] ${key.suffix} re-pushed after cache ready rows=$n${if (ready) "" else " during sweep"}")
+        }
+    }
+
+    /** After a successful send: clean, unless untranslated rows stayed local (PushPartial keeps it dirty). */
+    private fun markSent(s: Session, key: DsyncKey) {
+        if (key in s.partial) {
+            // Keep dirtyAt: the rows did not change locally, so pulls are not outvoted by this flag.
+            state.edit().putBoolean(k("dirty", s, key), true).commit()
+        } else setDirty(s, key, false)
+        if (s.convergeAfterWrite.remove(key) && s.convergeAfterWrite.isEmpty()) maybeConverge(s)
+    }
+
+    /**
+     * Local-only probe (no network): how many movie rows of [key] do not
+     * translate yet, or null for keys outside the VOD catalog. Episodes are
+     * left to the real build, which re-decides on every row.
+     */
+    private suspend fun probeMovieMisses(s: Session, key: DsyncKey): Int? {
+        if (DsyncReadiness.cacheFor(key) != DsyncReadiness.Cache.VodCatalog) return null
+        val c = conn(s) ?: return null
+        val movieIds: List<String> = when (key) {
+            DsyncKey.Progress -> watchProgressDao.allOnce()
+                .filter { (it.playlistId == null || it.playlistId == s.playlistId) && !it.videoId.contains("://") && it.vodType == "movie" }
+                .map { it.videoId }
+            DsyncKey.Watchlist, DsyncKey.HiddenTitles -> {
+                val host = scopeHost(s)
+                val keys = if (key == DsyncKey.Watchlist) {
+                    watchlistStore.allOnce().filter { it.isLive && (it.playlistId == host || it.playlistId == null) }.map { it.key }
+                } else {
+                    hiddenTitlesStore.allOnce().filter { it.isLive && (it.playlistId == host || it.playlistId == null) }.map { it.key }
+                }
+                keys.filter { it.startsWith("m:") }.map { it.substring(2) }
+            }
+            else -> return null
+        }
+        return movieIds.count { vodIds.movieId(c.row, it) == null }
+    }
+
     // ---- build (local -> data), section 4 and 6.2 ----
 
     private suspend fun build(s: Session, key: DsyncKey, base: JsonObject?, now: Long): JsonObject? = when (key) {
         DsyncKey.Favorites -> {
             val m = channelMap(s)
-            if (m.toInt.isEmpty()) null else {
-                val local = favoriteDao.allOnce().sortedBy { it.displayOrder }.mapNotNull { m.toInt[it.channelId] }
+            val rows = favoriteDao.allOnceIn(s.token).sortedBy { it.displayOrder }
+            if (deferForCache(s, key, rows.size, rows.size, ready = m.toInt.isNotEmpty())) null else {
+                val local = rows.mapNotNull { m.toInt[it.channelId] }
                 // Remote ids this device cannot map (another channel set) are kept.
                 val keep = base?.let(DsyncPayloads::decodeFavorites).orEmpty().filter { it !in m.toLocal }
-                DsyncPayloads.encodeFavorites(base, (local + keep).distinct())
+                val out = (local + keep).distinct()
+                Log.i(TAG, DsyncFavorites.logLine("out", rows.size, local.size, out.size, s.token, s.playlistId))
+                DsyncPayloads.encodeFavorites(base, out)
             }
         }
         DsyncKey.Recents -> {
             val m = channelMap(s)
-            if (m.toInt.isEmpty()) null else {
+            val n = prefs.recentChannelIdsIn(s.token).size
+            if (deferForCache(s, key, n, n, ready = m.toInt.isNotEmpty())) null else {
                 val stamps = recentStamps(s)
-                val ids = prefs.recentChannelIds.first()
+                val ids = prefs.recentChannelIdsIn(s.token)
                 val local = ids.mapIndexedNotNull { i, id -> m.toInt[id]?.let { RecentRow(it, stamps[id] ?: (now - i)) } }
                 val remote = base?.let(DsyncPayloads::decodeRecents).orEmpty()
-                DsyncPayloads.encodeRecents(base, DsyncMerge.recents(local, remote))
+                val out = DsyncPayloads.encodeRecents(base, DsyncMerge.recents(local, remote))
+                // Counts only: the local store, the rows with a Dispatcharr id, the
+                // server rows merged in, and what goes up (the rowCount definition).
+                Log.i(TAG, "[DSYNC] recents out local=${ids.size} canonical=${local.map { it.channelId }.distinct().size} server=${remote.size} out=${DsyncCoexistence.rowCount(key, out)}")
+                out
             }
         }
         DsyncKey.Progress -> {
             val c = conn(s) ?: return null
-            val local = watchProgressDao.allOnce()
+            val candidates = watchProgressDao.allOnce()
                 .filter { (it.playlistId == null || it.playlistId == s.playlistId) && !it.videoId.contains("://") }
                 .filter { it.vodType == "movie" || it.vodType == "episode" }
+            val local = candidates
                 .mapNotNull { p ->
                     val ep = p.vodType == "episode"
                     val sid = p.seriesId?.toIntOrNull()
@@ -996,12 +1938,26 @@ class DispatcharrSyncManager @Inject constructor(
                         title = p.title,
                     )
                 }
+            if (candidates.size > local.size && s.progressDiag.add(candidates.size - local.size)) {
+                // Counts only: which kind of row did not translate (step 1 diagnostic, 2026-11-01).
+                val miss = candidates.filter { p ->
+                    if (p.vodType == "episode") vodIds.episodeIdCached(p.videoId) == null else vodIds.movieId(c.row, p.videoId) == null
+                }
+                val movies = miss.count { it.vodType == "movie" }
+                val eps = miss.count { it.vodType == "episode" && it.seriesId?.toIntOrNull() != null }
+                Log.i(TAG, "[DSYNC] progress drops untranslated: movies=$movies episodes=$eps other=${miss.size - movies - eps} catalogReady=${cacheReady(s, key)}")
+            }
+            if (deferForCache(s, key, candidates.size, candidates.size - local.size)) return null
             val remote = base?.let(DsyncPayloads::decodeProgress).orEmpty()
-            DsyncPayloads.encodeProgress(base, DsyncMerge.progress(local, remote), now)
+            // Held rows (section 10a) carry their canonical id: a forced push keeps them too.
+            val have = local.map { it.type to it.vodId }.toSet()
+            val heldRows = if (isBase(s)) held.progress(s.playlistId).filter { (it.type to it.vodId) !in have } else emptyList()
+            DsyncPayloads.encodeProgress(base, DsyncMerge.progress(local + heldRows, remote), now)
         }
         DsyncKey.Reminders -> {
             val m = channelMap(s)
-            if (m.toInt.isEmpty()) null else {
+            val n = reminderDao.allOnce().size
+            if (deferForCache(s, key, n, n, ready = m.toInt.isNotEmpty())) null else {
                 val local = reminderDao.allOnce()
                     .filter { it.playlistId == null || it.playlistId == s.playlistId }
                     .mapNotNull { r ->
@@ -1016,16 +1972,18 @@ class DispatcharrSyncManager @Inject constructor(
         }
         DsyncKey.Watchlist -> {
             val host = scopeHost(s)
-            val local = watchlistStore.allOnce().filter { it.isLive && (it.playlistId == host || it.playlistId == null) }
-                .mapNotNull { e -> markRow(s, "watchlist", e.key, e.addedAt / 1000) }
+            val live = watchlistStore.allOnce().filter { it.isLive && (it.playlistId == host || it.playlistId == null) }
+            val local = live.mapNotNull { e -> markRow(s, "watchlist", e.key, e.addedAt / 1000) }
+            if (deferForCache(s, key, live.size, live.size - local.size)) return null
             val remote = base?.let(DsyncPayloads::decodeVodMarks).orEmpty()
             val rows = DsyncPayloads.carryTails(local, remote, { it.type to it.vodId }, { it.tail }) { r, t -> r.copy(tail = t) }
             DsyncPayloads.encodeVodMarks(base, rows + unknownMovieRows(s, remote, rows), DsyncLimits.WATCHLIST)
         }
         DsyncKey.HiddenTitles -> {
             val host = scopeHost(s)
-            val local = hiddenTitlesStore.allOnce().filter { it.isLive && (it.playlistId == host || it.playlistId == null) }
-                .mapNotNull { e -> markRow(s, "hiddenTitles", e.key, e.hiddenAt / 1000) }
+            val live = hiddenTitlesStore.allOnce().filter { it.isLive && (it.playlistId == host || it.playlistId == null) }
+            val local = live.mapNotNull { e -> markRow(s, "hiddenTitles", e.key, e.hiddenAt / 1000) }
+            if (deferForCache(s, key, live.size, live.size - local.size)) return null
             val remote = base?.let(DsyncPayloads::decodeVodMarks).orEmpty()
             val rows = DsyncPayloads.carryTails(local, remote, { it.type to it.vodId }, { it.tail }) { r, t -> r.copy(tail = t) }
             DsyncPayloads.encodeVodMarks(base, rows + unknownMovieRows(s, remote, rows), DsyncLimits.HIDDEN_TITLES)
@@ -1033,16 +1991,36 @@ class DispatcharrSyncManager @Inject constructor(
         DsyncKey.HiddenGroups -> DsyncPayloads.encodeHiddenGroups(
             base,
             DsyncPayloads.HiddenGroups(
-                prefs.hiddenGroups.first().sorted(),
-                prefs.hiddenMovieGroups.first().sorted(),
-                prefs.hiddenSeriesGroups.first().sorted(),
+                prefs.hiddenGroupsIn(s.token).sorted(),
+                prefs.hiddenMovieGroupsIn(s.token).sorted(),
+                prefs.hiddenSeriesGroupsIn(s.token).sorted(),
             ),
         )
         DsyncKey.GroupOrder -> {
-            val mode = prefs.groupSortMode.first().lowercase().takeIf { it in DsyncPayloads.GROUP_MODES } ?: "default"
-            DsyncPayloads.encodeGroupOrder(base, DsyncPayloads.GroupOrder(mode, prefs.groupOrder.first()))
+            val mode = prefs.groupSortModeIn(s.token).lowercase().takeIf { it in DsyncPayloads.GROUP_MODES } ?: "default"
+            DsyncPayloads.encodeGroupOrder(base, DsyncPayloads.GroupOrder(mode, prefs.groupOrderIn(s.token)))
         }
-        DsyncKey.Settings -> DsyncPayloads.encodeSettings(base, SETTINGS_OWNED, prefs.dsyncSettingsOnce())
+        // A manual push (Settings > Sync) sends this device's own lanes; only the
+        // setup-choice replace mirrors the Drive lanes it just applied.
+        DsyncKey.Settings -> if (isForced(s, key) && key !in s.manual) {
+            // Rule 4 mirror: the forced push sends exactly the Drive copy just
+            // applied (its v, tv, and mobile lanes), not local values over the
+            // server's previous lanes (field run 2026-11-01: Drive 7, sent 11).
+            val mirror = prefs.driveMirrorDsyncLanes(s.playlistId)
+            Log.i(TAG, "[DSYNC] settings: mirror lanes ${mirror.entries.joinToString { "${it.key}=${it.value.size}" }.ifEmpty { "none" }}")
+            DsyncPayloads.encodeSettingsLanes(base?.let { b -> JsonObject(b.filterKeys { it !in DsyncPayloads.SETTINGS_LANES }) }, mirror)
+        } else {
+            val v = prefs.dsyncSettingsOnce(s.playlistId, s.token)
+            Log.i(TAG, "[DSYNC] settings: defaultGroup=${v["defaultGroup"]?.content ?: ""}")
+            // Each name goes to the lane its item's scope picks on this device
+            // (v, or this device class's own lane); Off writes nothing.
+            val scopes = prefs.syncScopesOnce()
+            val lanes = com.aeriotv.android.core.sync.laneValues(
+                v.filterKeys { DsyncSettingsValidator.isOwned(it) }, { prefs.syncScopeForName(scopes, it) }, isTv,
+            )
+            Log.i(TAG, "[DSYNC] settings: lanes ${lanes.entries.joinToString { "${it.key}=${it.value.size}" }}")
+            DsyncPayloads.encodeSettingsLanes(base, lanes)
+        }
         DsyncKey.RemoteMap -> {
             // Phones and tablets round-trip the TV map untouched: never write it.
             if (!isTv) null else {
@@ -1052,12 +2030,13 @@ class DispatcharrSyncManager @Inject constructor(
                 DsyncPayloads.encodeRemoteMap(base, tv)
             }
         }
-        DsyncKey.RadioDefault -> DsyncPayloads.encodeRadioDefault(base, prefs.radioModeByDefault.first())
+        DsyncKey.RadioDefault -> DsyncPayloads.encodeRadioDefault(base, prefs.radioModeByDefaultIn(s.token))
         DsyncKey.Collections -> {
             val m = channelMap(s)
-            if (m.toInt.isEmpty()) null else {
+            val n = prefs.channelCollectionsIn(s.token).size
+            if (deferForCache(s, key, n, n, ready = m.toInt.isNotEmpty())) null else {
                 val remote = base?.let(DsyncPayloads::decodeCollections).orEmpty().associateBy { it.id }
-                val rows = prefs.channelCollections.first().map { c ->
+                val rows = prefs.channelCollectionsIn(s.token).map { c ->
                     val r = remote[c.id]
                     val stale = r?.members.orEmpty().filter { it !in m.toLocal }
                     CollectionRow(
@@ -1071,6 +2050,256 @@ class DispatcharrSyncManager @Inject constructor(
             }
         }
         DsyncKey.Profiles -> buildProfiles(s, base)
+    }
+
+    /**
+     * Server progress rows into the local store. Returns the rows this device
+     * cannot map to a local uuid yet (section 10a: held by canonical id, not dropped).
+     */
+    private suspend fun applyProgressRows(s: Session, c: Conn, rows: List<ProgressRow>, written: IntArray? = null): List<ProgressRow> {
+        val unresolved = ArrayList<ProgressRow>()
+        val movieUuids = vodIds.movieUuids(c.row, rows.filter { it.type == "m" }.map { it.vodId }.toSet())
+        rows.forEach { r ->
+            // Integer id back to the local uuid; a row this device cannot map is held.
+            val uuid = if (r.type == "e") vodIds.episodeUuid(c.base, c.apiKey, r.vodId, r.seriesId) else movieUuids[r.vodId]
+            if (uuid == null) { unresolved += r; unresolvedOnce(s, "progress in", "${r.type}${r.vodId}"); return@forEach }
+            val local = watchProgressDao.getOnce(uuid)
+            if (local != null && r.updatedAt * 1000 <= local.updatedAt) return@forEach
+            val ep = r.type == "e"
+            val baseRow = local ?: WatchProgressEntity(
+                videoId = uuid, title = r.title, posterUrl = null,
+                positionMs = 0, durationMs = 0, updatedAt = 0, playlistId = s.playlistId,
+            )
+            watchProgressDao.upsert(
+                baseRow.copy(
+                    title = if (local != null && local.title.length > r.title.length && local.title.startsWith(r.title)) local.title else r.title,
+                    positionMs = r.position * 1000,
+                    durationMs = if (r.duration > 0) r.duration * 1000 else baseRow.durationMs,
+                    updatedAt = r.updatedAt * 1000,
+                    vodType = if (ep) "episode" else "movie",
+                    seriesId = r.seriesId?.toString() ?: baseRow.seriesId,
+                    seasonNumber = if (r.season > 0) r.season else baseRow.seasonNumber,
+                    episodeNumber = if (r.episode > 0) r.episode else baseRow.episodeNumber,
+                    isFinished = r.finished,
+                ),
+            )
+            written?.let { it[0]++ }
+        }
+        return unresolved
+    }
+
+    /**
+     * Base user only (the Drive backup is the base profile's): the rows that
+     * did not map are held by canonical id, so the Drive snapshot and summary
+     * carry them (section 10a). Counts only.
+     */
+    private suspend fun holdProgress(s: Session, c: Conn, unresolved: List<ProgressRow>, why: String) {
+        if (!isBase(s)) return
+        held.setProgress(s.playlistId, unresolved)
+        if (unresolved.isNotEmpty() || why != "retry") {
+            Log.i(TAG, "[DSYNC] progress $why held=${unresolved.size} movies=${unresolved.count { it.type == "m" }} " +
+                "episodes=${unresolved.count { it.type == "e" }} catalogReady=${vodIds.moviesReady(c.row)}")
+        }
+    }
+
+    /** Held rows a newer catalog or episode map now resolves become local rows (no server read). */
+    private suspend fun retryHeldProgress(s: Session, env: DsyncEnvelope) {
+        if (!isBase(s)) return
+        val c = conn(s) ?: return
+        val written = IntArray(1)
+        if (!held.has(s.playlistId)) {
+            // First run of this build: the stamp was consumed before rows were held.
+            val rows = DsyncPayloads.decodeProgress(env.data) ?: return
+            holdProgress(s, c, applyProgressRows(s, c, rows, written), "in (held set rebuilt)")
+        } else if (!isDirty(s, DsyncKey.Progress)) {
+            // Every server row, not only the held ones (section 10a): a row the
+            // stamp check skipped ("not newer") while local lacked it (removed
+            // here by an earlier replace, or never written) is written now when
+            // it resolves, else held. applyProgressRows never lowers a newer
+            // local row, and the server copy is a per-row union, so nothing a
+            // later push would undo is written.
+            val before = held.progress(s.playlistId)
+            val rows = DsyncPayloads.decodeProgress(env.data) ?: return
+            val left = applyProgressRows(s, c, DsyncHeld.merge(rows, before), written)
+            if (left.map(DsyncHeld::item).toSet() != before.map(DsyncHeld::item).toSet()) holdProgress(s, c, left, "retry")
+        } else {
+            val before = held.progress(s.playlistId)
+            if (before.isEmpty()) return
+            val left = applyProgressRows(s, c, before, written)
+            if (left.size != before.size) holdProgress(s, c, left, "retry")
+        }
+        // Rows that became local here change what the Drive copy should carry:
+        // the follow push writes them, so converge never keeps a stale mark.
+        if (written[0] > 0) {
+            Log.i(TAG, "[DSYNC] progress held rows resolved=${written[0]}")
+            driveFollow(s, DsyncKey.Progress, "held resolved")
+        }
+    }
+
+    /**
+     * The representable filter for the setup probe and converge (section
+     * 10a): a Dispatcharr VOD row counts only when this device resolves it,
+     * holds it, or the Drive copy carries it with a canonical id.
+     */
+    private suspend fun representable(row: PlaylistEntity, bucket: DsyncV2.Bucket): (String, Int) -> Boolean {
+        fun data(k: DsyncKey) = (DsyncV2.category(bucket, k) as? DsyncDecode.Ok)?.envelope?.data
+        val prog = data(DsyncKey.Progress)?.let { DsyncPayloads.decodeProgress(it) }.orEmpty()
+        val marks = listOf(DsyncKey.Watchlist, DsyncKey.HiddenTitles).flatMap { k -> data(k)?.let { DsyncPayloads.decodeVodMarks(it) }.orEmpty() }
+        val movieIds = (prog.filter { it.type == "m" }.map { it.vodId } + marks.filter { it.type == "m" }.map { it.vodId }).toSet()
+        val movies = runCatching { vodIds.movieUuids(row, movieIds).keys }.getOrDefault(emptySet())
+        val episodes = prog.filter { it.type == "e" && vodIds.episodeUuidCached(it.vodId) != null }.map { it.vodId }.toSet()
+        val h = held.items(row.id)
+        val drive = held.driveItems(row.id)
+        val channels = runCatching { channelSnapshotDao.forPlaylistKey(row.id).mapNotNull { it.dispatcharrChannelId }.toSet() }.getOrNull()
+        return { t, id -> DsyncHeld.representable(t, id, movies, episodes, h, drive, channels) }
+    }
+
+    /** Summary of the Dispatcharr copy restricted to representable rows, with the exclusion lines. */
+    private suspend fun deviceSummary(row: PlaylistEntity, bucket: DsyncV2.Bucket): com.aeriotv.android.core.sync.SetupSourceChoice.Summary {
+        val scopes = kotlinx.coroutines.withContext(ProfileScope.defaultOnly()) { prefs.syncScopesOnce() }
+        val gone = LinkedHashMap<String, Int>()
+        val out = DsyncCoexistence.summarize(bucket, scopes, representable(row, bucket), gone)
+        gone.filterKeys { it in out.categories }.forEach { (n, c) -> Log.i(TAG, DsyncHeld.excludeLine(n, c)) }
+        return out
+    }
+
+    /** The canonical VOD items the Drive copy carries (setup probe), for the representable filter. */
+    fun noteDriveItems(playlistId: String, items: Set<String>) = held.noteDriveItems(playlistId, items)
+
+    /** Held progress rows for the Drive snapshot of [playlistId] (base user). */
+    fun heldProgress(playlistId: String): List<ProgressRow> = held.progress(playlistId)
+
+    /**
+     * The Dispatcharr rows the Drive WatchProgress snapshot must carry
+     * (DsyncHeld.driveSnapshot, section 10a): the held rows plus the progress
+     * rows of the server copy this device last read, for the active base-user
+     * session of Dispatcharr Sync. Held rows only when no such session runs,
+     * progress is off, or the user chose Google Drive (forced: Drive is the
+     * source, so the server copy is about to be replaced).
+     */
+    suspend fun driveProgressRows(): Pair<String?, List<ProgressRow>> {
+        val s = session?.takeIf { isBase(it) && !it.peek } ?: return null to emptyList()
+        val h = held.progress(s.playlistId)
+        if (isForced(s, DsyncKey.Progress) || !enabled(DsyncKey.Progress, s)) return s.playlistId to h
+        val server = bucketRaw(s, DsyncBucket.Main)
+            ?.let { (DsyncV2.decode(it) as? DsyncV2.Decode.Ok)?.bucket }
+            ?.let { (DsyncV2.category(it, DsyncKey.Progress) as? DsyncDecode.Ok)?.envelope?.data }
+            ?.let { DsyncPayloads.decodeProgress(it) }.orEmpty()
+        return s.playlistId to DsyncHeld.merge(h, server)
+    }
+
+    /** Saved reverse id (no catalog scan, no network): canonical row to local uuid. */
+    fun cachedUuid(type: String, id: Int): String? =
+        if (type == "e") vodIds.episodeUuidCached(id) else if (type == "m") vodIds.movieUuidCached(id) else null
+
+    /**
+     * Pull before replace (section 10a): the user chose Dispatcharr, so a full
+     * pull applies every shared key (stamp check forced) before the Drive
+     * backup is overwritten with this device's copy. True only when the list
+     * and the bucket were read and every forced apply ran; false means Drive
+     * must not be replaced yet.
+     */
+    suspend fun pullForChoice(): Boolean = forcedPull("setup choice")
+
+    private suspend fun forcedPull(reason: String): Boolean {
+        val s = session?.takeIf { isBase(it) && !it.peek } ?: return false
+        s.paused = false
+        s.forceApply = true
+        s.forceApplyFailed = false
+        try {
+            pullAll(s, reason)
+        } finally {
+            s.forceApply = false
+        }
+        val ok = s.listOk && s.pullComplete && !s.forceApplyFailed
+        Log.i(TAG, "[DSYNC] $reason pull ok=$ok")
+        return ok
+    }
+
+    /**
+     * Settings > Sync "Push to Dispatcharr" (section 10a, Manual push and
+     * pull): a forced replace of every enabled shared key from this device,
+     * empty keys included, sent now. Base user only. True when every key's
+     * PUT (or "unchanged") went through; a key that could not be sent stays
+     * armed and dirty and goes out on a later cycle.
+     */
+    suspend fun manualPush(): Boolean {
+        val s = session?.takeIf { isBase(it) && !it.peek } ?: return false
+        s.paused = false
+        if (!s.firstPullDone) pullAll(s, "manual push")
+        if (!s.firstPullDone) return false
+        val scopes = runCatching { prefs.syncScopesOnce() }.getOrDefault(emptyMap())
+        val keys = DsyncManual.keys(scopes).filter { enabled(it, s) }
+        if (keys.isEmpty()) return true
+        val e = state.edit()
+        keys.forEach { e.putBoolean(forceKey(s.playlistId, it), true) }
+        e.commit()
+        keys.forEach { setDirty(s, it, true) }
+        synchronized(s.pending) { keys.forEach { s.pending.remove(it)?.cancel() } }
+        s.manual.addAll(keys)
+        try {
+            keys.forEach { write(s, it) }
+        } finally {
+            s.manual.removeAll(keys.toSet())
+        }
+        val failed = keys.filter { isForced(s, it) }
+        Log.i(TAG, "[DSYNC] manual push done keys=${keys.size} failed=${failed.size}")
+        return failed.isEmpty()
+    }
+
+    /**
+     * Settings > Sync "Pull from Dispatcharr": the setup-choice pull (server
+     * copy applied as a replace for every enabled shared key, stamp check
+     * forced). Applied keys queue the usual Drive follow pushes.
+     */
+    suspend fun manualPull(): Boolean {
+        val s = session?.takeIf { isBase(it) && !it.peek } ?: return false
+        val ok = forcedPull("manual")
+        if (!ok) return false
+        val scopes = runCatching { prefs.syncScopesOnce() }.getOrDefault(emptyMap())
+        DsyncManual.keys(scopes).filter { enabled(it, s) }.forEach { key ->
+            val rows = serverDataOf(s, DsyncBucket.of(key), key)?.let { DsyncCoexistence.rowCount(key, it) } ?: 0
+            Log.i(TAG, "[DSYNC] manual pull ${key.suffix} rows=$rows")
+            // The forced apply skips the per-key follow (the setup choice
+            // replaces Drive itself), so a manual pull queues it here.
+            driveFollow(s, key, "manual pull")
+        }
+        flush(s)
+        return true
+    }
+
+    /**
+     * Setup-choice ordering (section 10a): after [pullForChoice], wait
+     * (bounded) until the held progress rows can be written locally (movie
+     * catalog built), write them, and only then return, so the replace
+     * push's first WatchProgress snapshot already counts them as local. On
+     * timeout the rows stay held (placeholders) and the "held resolved"
+     * follow push carries them later. Counts only.
+     */
+    suspend fun awaitProgressLocal(timeoutMs: Long = PROGRESS_LOCAL_WAIT_MS) {
+        val s = session?.takeIf { isBase(it) && !it.peek } ?: return
+        val c = conn(s) ?: return
+        if (held.progress(s.playlistId).isEmpty()) return
+        val settled = kotlinx.coroutines.withTimeoutOrNull(timeoutMs) {
+            while (!DsyncHeld.progressSettled(held.progress(s.playlistId).size, vodIds.moviesReady(c.row))) delay(500)
+            true
+        } ?: false
+        if (!settled) {
+            Log.i(TAG, "[DSYNC] progress held=${held.progress(s.playlistId).size} catalog not ready; replace goes ahead with placeholders")
+            return
+        }
+        val before = held.progress(s.playlistId)
+        if (before.isEmpty()) return
+        val written = IntArray(1)
+        val left = applyProgressRows(s, c, before, written)
+        if (left.size != before.size) holdProgress(s, c, left, "retry")
+        Log.i(TAG, "[DSYNC] progress before replace resolved=${written[0]} held=${left.size}")
+    }
+
+    /** A Drive apply carried placeholder rows: hold them (replace when the user chose Google Drive). */
+    fun holdFromDrive(playlistId: String, rows: List<ProgressRow>, replace: Boolean) {
+        val next = if (replace) rows else DsyncHeld.merge(held.progress(playlistId), rows)
+        held.setProgress(playlistId, next)
     }
 
     /** A local "m:<uuid>" / "s:<id>" key as a row with the integer id, or null (kept local, logged once). */
@@ -1121,7 +2350,11 @@ class DispatcharrSyncManager @Inject constructor(
         val users = adminUsers(s)
         if (users.isEmpty()) return null
         val remote = base?.let(DsyncPayloads::decodeProfiles).orEmpty()
-        val rows = profileStore.forPlaylist(s.playlistId).mapNotNull { p ->
+        val tombs = tombstonesFor(s.playlistId, base)
+        // Tombstoned local profiles are deleted, never re-sent (schema 4.12).
+        val gone = tombstonedLocal(s.playlistId, tombs).map { it.lowercase() }.toSet()
+        removeSynced(s.playlistId, gone.toList(), tombs)
+        val rows = profileStore.forPlaylist(s.playlistId).filter { it.username.lowercase() !in gone }.withIndex().mapNotNull { (index, p) ->
             val user = users.firstOrNull { it.username.equals(p.username, ignoreCase = true) } ?: return@mapNotNull null
             val prev = remote.firstOrNull { it.userId == user.id }
             val rec = pinStore.syncRecord(p.id)
@@ -1136,18 +2369,40 @@ class DispatcharrSyncManager @Inject constructor(
                 at = prev?.updatedAt?.takeIf { it > 0 } ?: (System.currentTimeMillis() / 1000)
                 state.edit().putLong(rowKey(s.playlistId, p.username), at).apply()
             }
-            ProfileRow(
+            val out = ProfileRow(
                 user.id, user.username, p.displayName, type, hash, salt,
                 role = p.effectiveRole().wire,
                 updatedAt = at,
+                avatar = p.avatar ?: com.aeriotv.android.core.profiles.AvatarSpec(),
+                order = index,
                 tail = prev?.tail ?: Tail(),
             )
+            val fresh = (rosterAdds[rowKey(s.playlistId, p.username)] ?: 0L) > System.currentTimeMillis() - 60_000L
+            com.aeriotv.android.core.profiles.ProfileRoster.guardFreshRosterAdd(out, prev, fresh)?.also {
+                Log.i(TAG, "[DSYNC] profiles: row ${p.username} kept server name/avatar (fresh roster add)")
+            } ?: com.aeriotv.android.core.profiles.ProfileRoster.guardUncustomized(
+                out, prev, nameCustomized(s.playlistId, p.username, p.displayName, p.avatar),
+            )?.also {
+                Log.i(TAG, "[DSYNC] profiles: row ${p.username} kept server name/avatar (not customized here)")
+            } ?: out
         }
-        // Rows for users this device has no profile for stay, unless this
-        // device removed that profile (then the row leaves the list).
+        // Stale-device guard: a local row the server list lacks, with no
+        // unsent local change, older than the server roster is not re-sent.
+        val serverAt = state.getLong(k("at", s, DsyncKey.Profiles), 0L)
+        val pushedAt = state.getLong(profilesPushedKey(s.playlistId), 0L)
+        val localNewest = rows.maxOfOrNull { it.updatedAt } ?: 0L
+        val sent = rows.filter { r ->
+            val stale = ProfileTombstones.staleLocal(r, remote, serverAt, localNewest, pushedAt)
+            if (stale) Log.i(TAG, "[DSYNC] profiles: local row ${r.username} older than server roster, not re-sent")
+            !stale
+        }
+        // Rows for users this device has no profile for stay, unless a
+        // tombstone covers them (removed here or on any other device).
         val mine = rows.map { it.userId }.toSet()
-        val kept = remote.filter { it.userId !in mine && state.getLong(removedKey(s.playlistId, it.username), 0L) <= it.updatedAt }
-        return DsyncPayloads.encodeProfiles(base, rows + kept)
+        val kept = remote.filter { it.userId !in mine }
+        val resolved = ProfileTombstones.resolve(sent + kept, tombs)
+        resolved.dropped.forEach { Log.i(TAG, "[DSYNC] profiles: row ${it.username} updatedAt=${it.updatedAt} tombstoned; left out") }
+        return DsyncPayloads.encodeProfiles(base, resolved.rows, resolved.removed)
     }
 
     // ---- apply (data -> local), section 6.1 full replace ----
@@ -1178,7 +2433,7 @@ class DispatcharrSyncManager @Inject constructor(
             if (m.toInt.isEmpty()) null else {
                 val remote = DsyncPayloads.decodeFavorites(env.data)
                 if (remote == null) null else {
-                    val local = favoriteDao.allOnce().sortedBy { it.displayOrder }.mapNotNull { m.toInt[it.channelId] }
+                    val local = favoriteDao.allOnceIn(s.token).sortedBy { it.displayOrder }.mapNotNull { m.toInt[it.channelId] }
                     env.copy(data = DsyncPayloads.encodeFavorites(env.data, DsyncGate.favoritesUnion(local, remote)))
                 }
             }
@@ -1187,7 +2442,7 @@ class DispatcharrSyncManager @Inject constructor(
             val m = channelMap(s)
             val remote = DsyncPayloads.decodeCollections(env.data)
             if (m.toInt.isEmpty() || remote == null) null else {
-                val local = prefs.channelCollections.first().map { c ->
+                val local = prefs.channelCollectionsIn(s.token).map { c ->
                     CollectionRow(
                         id = c.id, name = c.name,
                         placement = if (c.placement == ChannelCollection.PLACEMENT_BEGINNING) "b" else "e",
@@ -1216,34 +2471,38 @@ class DispatcharrSyncManager @Inject constructor(
 
     private suspend fun apply(s: Session, key: DsyncKey, env: DsyncEnvelope): ApplyResult {
         val d = env.data
+        // Every write below names the session's scope (s.token). The keys whose
+        // stores still read the global scope (progress, reminders, VOD marks)
+        // are held back once the active profile is no longer this session's.
+        if (ProfileScope.token.value != s.token) {
+            Log.i(TAG, "[DSYNC] apply ${key.suffix}: profile changed; skipped (scope=${s.token.take(8).ifEmpty { "default" }})")
+            return ApplyResult.NotReady
+        }
         when (key) {
             DsyncKey.Favorites -> {
                 val ids = DsyncPayloads.decodeFavorites(d) ?: return ApplyResult.Malformed
                 val m = channelMap(s)
-                if (m.toInt.isEmpty()) return ApplyResult.NotReady
-                val wanted = ids.mapNotNull { m.toLocal[it] }
-                val local = favoriteDao.allOnce()
-                val now = System.currentTimeMillis()
-                local.filter { it.channelId in m.toInt && it.channelId !in wanted }.forEach { favoriteDao.delete(it.channelId) }
-                wanted.forEachIndexed { i, lid ->
-                    val cur = local.firstOrNull { it.channelId == lid }
-                    val name = m.nameOf[m.toInt[lid]] ?: cur?.channelName.orEmpty()
-                    favoriteDao.upsert(
-                        FavoriteChannelEntity(channelId = lid, channelName = name, displayOrder = i.toLong(), addedAt = cur?.addedAt ?: now),
-                    )
+                if (m.toInt.isEmpty()) {
+                    Log.i(TAG, "[DSYNC] favorites in: ${ids.size} ids, snapshot ${snapshotKey(s).take(8)} not loaded; retry next pull")
+                    return ApplyResult.NotReady
                 }
+                val plan = DsyncFavorites.plan(
+                    ids, m.toLocal, m.toInt, m.nameOf, favoriteDao.allOnceIn(s.token), s.token, System.currentTimeMillis(),
+                )
+                val written = favoriteDao.applySyncIn(s.token, plan.deletes, plan.upserts)
+                Log.i(TAG, DsyncFavorites.logLine("in", ids.size, plan.wanted.size, written, s.token, s.playlistId))
             }
             DsyncKey.Recents -> {
                 val remote = DsyncPayloads.decodeRecents(d) ?: return ApplyResult.Malformed
                 val m = channelMap(s)
                 if (m.toInt.isEmpty()) return ApplyResult.NotReady
                 val stamps = recentStamps(s)
-                val ids = prefs.recentChannelIds.first()
+                val ids = prefs.recentChannelIdsIn(s.token)
                 val nowS = System.currentTimeMillis() / 1000
                 val local = ids.mapIndexedNotNull { i, id -> m.toInt[id]?.let { RecentRow(it, stamps[id] ?: (nowS - i)) } }
                 val merged = DsyncMerge.recents(local, remote).mapNotNull { r -> m.toLocal[r.channelId]?.let { it to r.watchedAt } }
                 val others = ids.filter { it !in m.toInt }
-                prefs.setRecentChannels(merged.map { it.first } + others)
+                prefs.setRecentChannelsIn(merged.map { it.first } + others, s.token)
                 val st = stamps.toMutableMap().apply { merged.forEach { (id, at) -> put(id, at) } }
                 state.edit()
                     .putString(k("rstamp", s), JsonObject(st.mapValues { kotlinx.serialization.json.JsonPrimitive(it.value) }).toString())
@@ -1253,32 +2512,8 @@ class DispatcharrSyncManager @Inject constructor(
             DsyncKey.Progress -> {
                 val rows = DsyncPayloads.decodeProgress(d) ?: return ApplyResult.Malformed
                 val c = conn(s) ?: return ApplyResult.Failed
-                val movieUuids = vodIds.movieUuids(c.row, rows.filter { it.type == "m" }.map { it.vodId }.toSet())
-                rows.forEach { r ->
-                    // Integer id back to the local uuid; a row this device cannot map is skipped.
-                    val uuid = if (r.type == "e") vodIds.episodeUuid(c.base, c.apiKey, r.vodId, r.seriesId) else movieUuids[r.vodId]
-                    if (uuid == null) { unresolvedOnce(s, "progress in", "${r.type}${r.vodId}"); return@forEach }
-                    val local = watchProgressDao.getOnce(uuid)
-                    if (local != null && r.updatedAt * 1000 <= local.updatedAt) return@forEach
-                    val ep = r.type == "e"
-                    val baseRow = local ?: WatchProgressEntity(
-                        videoId = uuid, title = r.title, posterUrl = null,
-                        positionMs = 0, durationMs = 0, updatedAt = 0, playlistId = s.playlistId,
-                    )
-                    watchProgressDao.upsert(
-                        baseRow.copy(
-                            title = if (local != null && local.title.length > r.title.length && local.title.startsWith(r.title)) local.title else r.title,
-                            positionMs = r.position * 1000,
-                            durationMs = if (r.duration > 0) r.duration * 1000 else baseRow.durationMs,
-                            updatedAt = r.updatedAt * 1000,
-                            vodType = if (ep) "episode" else "movie",
-                            seriesId = r.seriesId?.toString() ?: baseRow.seriesId,
-                            seasonNumber = if (r.season > 0) r.season else baseRow.seasonNumber,
-                            episodeNumber = if (r.episode > 0) r.episode else baseRow.episodeNumber,
-                            isFinished = r.finished,
-                        ),
-                    )
-                }
+                val unresolved = applyProgressRows(s, c, rows)
+                holdProgress(s, c, unresolved, "in")
             }
             DsyncKey.Reminders -> {
                 val rows = DsyncPayloads.decodeReminders(d) ?: return ApplyResult.Malformed
@@ -1310,23 +2545,26 @@ class DispatcharrSyncManager @Inject constructor(
             }
             DsyncKey.HiddenGroups -> {
                 val g = DsyncPayloads.decodeHiddenGroups(d) ?: return ApplyResult.Malformed
-                prefs.setHiddenGroups(g.live.toSet())
-                prefs.setHiddenMovieGroups(g.movies.toSet())
-                prefs.setHiddenSeriesGroups(g.series.toSet())
+                prefs.setHiddenGroupsIn(g.live.toSet(), g.movies.toSet(), g.series.toSet(), s.token)
             }
             DsyncKey.GroupOrder -> {
                 val g = DsyncPayloads.decodeGroupOrder(d) ?: return ApplyResult.Malformed
-                prefs.setGroupSortMode(
+                prefs.setGroupOrderIn(
                     when (g.mode) { "alphabetical" -> "Alphabetical"; "manual" -> "Manual"; else -> "Default" },
+                    g.order, s.token,
                 )
-                prefs.setGroupOrder(g.order)
             }
             DsyncKey.Settings -> {
-                val v = DsyncPayloads.decodeSettings(d) ?: return ApplyResult.Malformed
-                // Only owned names are validated; foreign names round-trip untouched.
-                val r = DsyncSettingsValidator.filter(v.filterKeys { it in SETTINGS_OWNED })
+                val lanes = DsyncPayloads.decodeSettingsLanes(d) ?: return ApplyResult.Malformed
+                // Each name is read from the one lane its scope picks here (no
+                // fallback across lanes); Off reads nothing. Only owned names
+                // are validated; foreign names round-trip untouched.
+                val scopes = prefs.syncScopesOnce()
+                val v = com.aeriotv.android.core.sync.pickFromLanes(lanes, emptyList(), { prefs.syncScopeForName(scopes, it) }, isTv)
+                val r = DsyncSettingsValidator.filter(v.filterKeys { DsyncSettingsValidator.isOwned(it) })
                 r.ignored.forEach { Log.i(TAG, "[DSYNC] settings: ignored $it") }
-                prefs.applyDsyncSettings(r.accepted)
+                r.accepted["defaultGroup"]?.let { Log.i(TAG, "[DSYNC] settings: defaultGroup=${it.content}") }
+                prefs.applyDsyncSettings(r.accepted, s.playlistId, s.token)
             }
             DsyncKey.RemoteMap -> {
                 val tv = DsyncPayloads.decodeRemoteMap(d) ?: return ApplyResult.Malformed
@@ -1334,13 +2572,13 @@ class DispatcharrSyncManager @Inject constructor(
             }
             DsyncKey.RadioDefault -> {
                 val on = DsyncPayloads.decodeRadioDefault(d) ?: return ApplyResult.Malformed
-                prefs.setRadioModeByDefault(on)
+                prefs.setRadioModeByDefaultIn(on, s.token)
             }
             DsyncKey.Collections -> {
                 val rows = DsyncPayloads.decodeCollections(d) ?: return ApplyResult.Malformed
                 val m = channelMap(s)
                 if (m.toInt.isEmpty()) return ApplyResult.NotReady
-                prefs.setChannelCollections(
+                prefs.setChannelCollectionsIn(
                     rows.map { r ->
                         ChannelCollection(
                             id = r.id, name = r.name,
@@ -1348,15 +2586,34 @@ class DispatcharrSyncManager @Inject constructor(
                             placement = if (r.placement == "b") ChannelCollection.PLACEMENT_BEGINNING else ChannelCollection.PLACEMENT_END,
                         )
                     },
+                    s.token,
                 )
             }
             DsyncKey.Profiles -> {
                 val rows = DsyncPayloads.decodeProfiles(d) ?: return ApplyResult.Malformed
                 if (!isAdmin(s)) return ApplyResult.Applied
+                Log.i(TAG, "[DSYNC] profiles: pull stamps ${state.all.keys.filter { it.startsWith("pgone|") }.joinToString { "$it=${state.getLong(it, 0L)}" }.ifEmpty { "none" }} session=${s.playlistId}")
+                val tombs = tombstonesFor(s.playlistId, d)
+                removeSynced(s.playlistId, tombstonedLocal(s.playlistId, tombs), tombs)
+                val resolved = ProfileTombstones.resolve(rows, tombs)
+                resolved.dropped.forEach { Log.i(TAG, "[DSYNC] profiles: server row ${it.username} updatedAt=${it.updatedAt} tombstoned; dropped") }
+                // A local removal the server payload does not carry yet: send it.
+                val onServer = DsyncPayloads.decodeProfileTombstones(d)
+                val unsent = localTombstones(s.playlistId).filter { l ->
+                    ProfileTombstones.find(resolved.removed, l.username) != null &&
+                        (ProfileTombstones.find(onServer, l.username)?.removedAt ?: 0L) < l.removedAt
+                }
+                if (unsent.isNotEmpty() && !isDirty(s, DsyncKey.Profiles)) {
+                    Log.i(TAG, "[DSYNC] profiles: tombstones ${unsent.joinToString { it.username }} not on the server yet; re-sending")
+                    setDirty(s, DsyncKey.Profiles, true)
+                    schedule(s, DsyncKey.Profiles, PEEK_PUSH_DEBOUNCE_MS)
+                }
                 profileManager.get().mergeSyncedProfiles(
-                    s.playlistId, rows, adminUsers(s),
+                    s.playlistId, resolved.rows, adminUsers(s),
                     localUpdatedAt = { u -> state.getLong(rowKey(s.playlistId, u), 0L) },
                     adopted = { u, at -> if (at > 0) state.edit().putLong(rowKey(s.playlistId, u), at).apply() },
+                    removedAt = { u -> state.getLong(removedKey(s.playlistId, u), 0L) },
+                    customized = { u, name, avatar -> nameCustomized(s.playlistId, u, name, avatar) },
                 )
             }
         }
@@ -1421,24 +2678,34 @@ class DispatcharrSyncManager @Inject constructor(
     }
 
     companion object {
+        const val CHOICE_HOLD_MS = 120_000L
         private const val TAG = "AerioDsync"
         const val PROVIDER = "dispatcharr"
         private const val K_DEVICE = "deviceId"
         const val DEBOUNCE_MS = 5_000L
         const val FOREGROUND_PULL_MS = 5L * 60 * 1000
         const val PERIODIC_PULL_MS = 15L * 60 * 1000
+        /** How often a session with keys deferred for an id cache checks the cache. */
+        const val CACHE_POLL_MS = 5_000L
+        /** Picker-open profiles pull: at most one per playlist in this window. */
+        const val PICKER_PULL_MIN_MS = 30_000L
+        /** The one follow-up read after a picker-open pull. */
+        const val PICKER_REPULL_MS = 2_000L
+        /** Profiles-lane push debounce (live session or none): a burst of edits becomes one put. */
+        const val PEEK_PUSH_DEBOUNCE_MS = 1_000L
         private const val SUPPRESS_MS = 3_000L
+        private val HEAL_KEYS = setOf(DsyncKey.Favorites, DsyncKey.Recents, DsyncKey.Collections, DsyncKey.HiddenGroups, DsyncKey.GroupOrder)
         val BACKOFF_MS = longArrayOf(30_000L, 120_000L, 600_000L)
         val RECONNECT_MS = longArrayOf(2_000L, 5_000L, 15_000L, 60_000L)
 
-        /** Schema 4.9 names with an Android key. */
-        val SETTINGS_OWNED: Set<String> = setOf(
-            "selectedTheme", "appearanceMode", "trueBlack", "defaultTab", "timeFormat",
-            "textScale", "subtextScale", "textContrast", "guideProgramInfoButton",
-            "programInfoButtonGuide", "programInfoButtonList", "showEpgBadgesTv", "showRemoteHints",
-            "guideGroupSelector", "guideSidebarLayout", "guideTuneInMini",
-            "playerInfoCard.showOnChannelChange", "phoneGroupSelector", "liveTvEdgeSwipeOpensSidebar",
-            "skipLoadingScreen", "appleTVChannelFlip",
-        )
+        /** Schema 4.9 names with an Android key (prefix families via DsyncSettingsValidator.isOwned). */
+        val SETTINGS_OWNED: Set<String> get() = DsyncSettingsValidator.NAMES
     }
 }
+
+/** Dispatcharr Sync: skip a bucket GET pulled moments ago with the same listed size. */
+internal const val BUCKET_REFETCH_MIN_MS = 60_000L
+
+internal fun shouldSkipBucketGet(lastPullAt: Long, now: Long, fetchedBytes: Long?, listedBytes: Long?): Boolean =
+    lastPullAt > 0L && now - lastPullAt in 0 until BUCKET_REFETCH_MIN_MS &&
+        fetchedBytes != null && listedBytes != null && fetchedBytes == listedBytes

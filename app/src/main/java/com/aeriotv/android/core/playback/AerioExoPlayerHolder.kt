@@ -37,6 +37,7 @@ import java.util.concurrent.TimeUnit
 import com.aeriotv.android.BuildConfig
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -51,6 +52,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 
 /**
  * Media3 ExoPlayer holder mirroring [MPVPlayerHolder]'s lifetime contract.
@@ -331,6 +333,13 @@ class AerioExoPlayerHolder @Inject constructor(
         // Every member stream answered and none delivered: hand over to the
         // standing Task #150 retry / unavailable ladder.
         liveFailover.onExhausted = { markStreamUnavailable() }
+        // A status read or change_stream is only ever sent while that channel
+        // is the active tune and the player is not IDLE.
+        liveFailover.isTuneActive = { id ->
+            val p = player
+            p != null && p.playbackState != Player.STATE_IDLE && !_streamUnavailable.value &&
+                (currentChannelId ?: currentChannelIdForRebuild) == id
+        }
     }
 
     /** Learned time-to-first-byte per channel, mirrored in memory so the
@@ -1260,7 +1269,7 @@ class AerioExoPlayerHolder @Inject constructor(
      *  dead while bytes are still arriving. */
     fun ingestAgeMs(): Long =
         if (lastBufferAdvanceAtMs == 0L) Long.MAX_VALUE
-        else SystemClock.elapsedRealtime() - lastBufferAdvanceAtMs
+        else minOf(SystemClock.elapsedRealtime() - lastBufferAdvanceAtMs, tracer.feedSinceTune().second)
 
     /** Media the player still has ahead of the playhead, in ms. */
     fun bufferAheadMs(): Long {
@@ -1509,6 +1518,8 @@ class AerioExoPlayerHolder @Inject constructor(
         bypassCooldown: Boolean = false,
         /** The Dispatcharr status url being switched to; repeats for it are ignored. */
         targetStreamUrl: String? = null,
+        /** The target stream's stream_stats.video_codec, when Dispatcharr probed it. */
+        targetVideoCodec: String? = null,
     ): Boolean = withContext(Dispatchers.Main) {
         if (targetStreamUrl != null && isFollowingTarget(url, targetStreamUrl)) {
             Log.i(TAG, "[SWITCH] already following this stream; ignoring repeat follow")
@@ -1532,6 +1543,14 @@ class AerioExoPlayerHolder @Inject constructor(
             switchWindowUntilMs = SystemClock.elapsedRealtime() + SWITCH_WINDOW_MS
             return@withContext true
         }
+        // A known codec type change never rides the kept connection: the
+        // decoder swap would happen in place (see sequentialCodecRebuild).
+        // Unknown target codec: keep the connection; the PMT check catches it.
+        val currentMime = p.videoFormat?.sampleMimeType
+        if (CodecChangeRule.switchPlan(currentMime, targetVideoCodec) == CodecChangeRule.SwitchPlan.SEQUENTIAL) {
+            sequentialCodecRebuild(CodecChangeRule.familyOf(currentMime), CodecChangeRule.familyOf(targetVideoCodec))
+            return@withContext true
+        }
         val startAt = SystemClock.elapsedRealtime()
         val startGen = primeGeneration
         val startPos = p.currentPosition
@@ -1553,6 +1572,7 @@ class AerioExoPlayerHolder @Inject constructor(
             var lastPos = startPos
             var lastMoveAt = startAt
             var lastWaitLogAt = 0L
+            var resetRequested = false
             while (isActive) {
                 delay(SWITCH_POLL_MS)
                 val now = SystemClock.elapsedRealtime()
@@ -1573,6 +1593,13 @@ class AerioExoPlayerHolder @Inject constructor(
                     // over (or ends the session) on its own; keep the window open
                     // so no silence heal reopens the channel meanwhile.
                     switchWindowUntilMs = now + SWITCH_WINDOW_MS
+                    // Bytes are arriving, so the new upstream IS flowing; the
+                    // extractor just cannot use them (changed PIDs, foreign
+                    // timeline). Re-prime the extractor chain once.
+                    if (!resetRequested && tracer.feedSinceTune().second < SERVER_SWITCH_BYTES_FLOWING_MS) {
+                        resetRequested = true
+                        currentSplice?.request("nosamples")
+                    }
                     if (lastWaitLogAt == 0L) {
                         Log.i(TAG, "[SWITCH] waiting for new upstream (no reload) ${(now - startAt) / 1000}s")
                         lastWaitLogAt = now
@@ -1993,6 +2020,196 @@ class AerioExoPlayerHolder @Inject constructor(
      *  itself re-sets it so only ONE retry runs per failure. */
     private var decoderRetryUsed = false
 
+    /** [CODEC] rebuilds spent on the current channel; capped at
+     *  [MAX_CODEC_REBUILDS_PER_TUNE] so a decoder that keeps dying hands over
+     *  to the existing failover. Reset on a new channel or a rendered frame. */
+    private var codecRebuildsThisTune = 0
+    private var codecRebuildChannel: String? = null
+
+    /** Last non-fatal codec / audio sink error Media3 reported for this
+     *  prime (elapsedRealtime), 0 when none. The watchdog rebuilds sooner
+     *  when one was seen and no decoded progress followed. */
+    @Volatile private var codecErrorAtMs = 0L
+
+    private fun codecTrackLabel(mime: String?): String = when {
+        mime == null -> "media"
+        mime.startsWith("audio/") -> "audio"
+        mime.startsWith("video/") -> "video"
+        else -> "media"
+    }
+
+    /** Logs the [CODEC] line and runs the full player rebuild, at most
+     *  [MAX_CODEC_REBUILDS_PER_TUNE] times per channel. Returns false when the
+     *  per-tune budget is spent (the caller falls through to its old path). */
+    private fun rebuildForCodec(track: String, cause: String, reason: String): Boolean {
+        val chan = currentChannelIdForRebuild ?: currentChannelId
+        if (chan != codecRebuildChannel) {
+            codecRebuildChannel = chan
+            codecRebuildsThisTune = 0
+        }
+        if (codecRebuildsThisTune >= MAX_CODEC_REBUILDS_PER_TUNE) {
+            Log.w(TAG, "[CODEC] $track decoder died: $cause; rebuild budget spent, failover takes over")
+            return false
+        }
+        codecRebuildsThisTune++
+        Log.w(TAG, "[CODEC] $track decoder died: $cause; rebuilding player")
+        codecErrorAtMs = 0L
+        return rebuildPlayerAndSurface(reason)
+    }
+
+    // ---- Vendor codec HAL death (Streamer 2026-11-01) ----------------------
+
+    private val halRecovery = CodecHalRecovery { SystemClock.elapsedRealtime() }
+
+    /** True from a Radio Mode start on a playing channel until its audio-only
+     *  re-prepare is issued; a HAL death in that window completes as radio. */
+    @Volatile private var radioStartInFlight = false
+
+    /** elapsedRealtime the current HAL rebuild started, 0 when none. */
+    private var halRebuildStartedAtMs = 0L
+    private var halRebuildMode: CodecHalRecovery.Mode? = null
+    private var halRebuildJob: Job? = null
+
+    /** Completed by the analytics listener when a decoder is released. */
+    @Volatile private var decoderReleaseSignal: CompletableDeferred<Unit>? = null
+
+    /** stop() the player and wait for its decoders to be released (Media3
+     *  decoder-released callback, bounded by [DECODER_RELEASE_WAIT_MS]), so
+     *  the vendor HAL finishes one teardown before the next codec work. */
+    private suspend fun stopAndAwaitDecoderRelease(p: androidx.media3.exoplayer.ExoPlayer): Long {
+        val t0 = SystemClock.elapsedRealtime()
+        val signal = CompletableDeferred<Unit>()
+        decoderReleaseSignal = signal
+        // A deliberate stop: the stall watchdog must not read the gap as a wedge.
+        hasReachedPlaybackRestart = false
+        val staleCalls = takeLiveCallTrackers()
+        p.stop()
+        retireLiveCalls(p, staleCalls)
+        withTimeoutOrNull(DECODER_RELEASE_WAIT_MS) { signal.await() }
+        decoderReleaseSignal = null
+        return SystemClock.elapsedRealtime() - t0
+    }
+
+    private fun isCodecHalDeath(error: PlaybackException): Boolean =
+        error.errorCode == PlaybackException.ERROR_CODE_DECODING_RESOURCES_RECLAIMED ||
+            generateSequence(error as Throwable?) { it.cause }.any {
+                it is android.media.MediaCodec.CodecException &&
+                    (it.errorCode == CodecHalRecovery.DEAD_OBJECT ||
+                        it.message?.contains("0xffffffe0", ignoreCase = true) == true ||
+                        it.message?.contains("DEAD_OBJECT", ignoreCase = true) == true)
+            }
+
+    /**
+     * Radio Mode start on a channel that is already playing. Disabling the
+     * video track in place destroyed c2.mtk.hevc.decoder while the AC-3
+     * decoder kept running, and the MediaTek HAL died 8 ms later (Streamer
+     * 2026-11-01 19:05:03). Instead: stop (both decoders released), wait for
+     * the release, then re-prepare the same URL audio-only. A prime that was
+     * already built with the Radio policy (a menu start that just tuned) is
+     * left alone.
+     */
+    fun enterRadioModeOnPlaying(timeshiftWallMs: Long?) {
+        val p = player ?: return
+        radioVideoOff = true
+        if (radioPolicyGeneration == primeGeneration || p.playbackState == Player.STATE_IDLE ||
+            isCatchup || lastPlayUrl == null
+        ) {
+            setVideoTrackEnabled(false)
+            return
+        }
+        val wall = if (isTimeshifting) timeshiftWallMs else null
+        radioStartInFlight = true
+        watchdogScope.launch {
+            val ms = stopAndAwaitDecoderRelease(p)
+            Log.i(TAG, "[CODEC] Radio Mode start: decoders released +${ms}ms; re-preparing audio-only ch=$currentChannelId")
+            try {
+                if (player !== p || !radioVideoOff) return@launch
+                setVideoTrackEnabled(false)
+                if (isTimeshifting && wall != null) playTimeshift(wall) else reprimeSameUrl("Radio Mode start")
+            } finally {
+                radioStartInFlight = false
+            }
+        }
+    }
+
+    /** Generation of the last prime built with the Radio Mode policy. */
+    @Volatile private var radioPolicyGeneration = -1L
+
+    /**
+     * HAL death recovery: settle, then rebuild in the mode that was active
+     * (video stays video, radio stays radio, an in-flight Radio Mode start
+     * completes as radio). No surface or window rebuild: the surface is
+     * intact, only the HAL process was replaced. Returns false when the cap
+     * is spent (caller surfaces unavailable).
+     */
+    private fun rebuildAfterHalDeath(): Boolean {
+        if (lastPlayUrl == null) return false
+        val p = player ?: return false
+        val inFlight = radioStartInFlight
+        return when (val d = halRecovery.decide(radioVideoOff, inFlight)) {
+            is CodecHalRecovery.Decision.CapReached -> {
+                Log.w(TAG, "[CODEC] hal rebuild cap reached (${d.rebuildsInWindow} in ${CodecHalRecovery.WINDOW_MS / 1000}s); surfacing unavailable")
+                false
+            }
+            is CodecHalRecovery.Decision.Rebuild -> {
+                Log.w(TAG, "[CODEC] codec HAL died (pid change expected); rebuilding in ${d.mode.logName} mode after settle")
+                tracer.recover("codec HAL died; rebuilding in ${d.mode.logName} mode attempt=${d.attempt}")
+                halRebuildJob?.cancel()
+                halRebuildStartedAtMs = SystemClock.elapsedRealtime()
+                halRebuildMode = d.mode
+                halRebuildJob = watchdogScope.launch {
+                    stopAndAwaitDecoderRelease(p)
+                    Log.i(TAG, "[CODEC] hal settle ${d.settleMs}ms")
+                    delay(d.settleMs)
+                    if (player !== p || lastPlayUrl == null) return@launch
+                    if (d.mode == CodecHalRecovery.Mode.RADIO) radioVideoOff = true
+                    setVideoTrackEnabled(d.mode == CodecHalRecovery.Mode.VIDEO)
+                    radioStartInFlight = false
+                    reprimeSameUrl("codec HAL rebuild (${d.mode.logName})", rejoinNearLive = true)
+                }
+                true
+            }
+        }
+    }
+
+    private fun noteHalRebuildReady() {
+        val t0 = halRebuildStartedAtMs
+        if (t0 == 0L) return
+        halRebuildStartedAtMs = 0L
+        Log.i(TAG, "[CODEC] rebuilt in ${halRebuildMode?.logName} +${SystemClock.elapsedRealtime() - t0}ms")
+        halRebuildMode = null
+    }
+
+    /** Non-fatal codec reports. Media3 delivers these even when it does not
+     *  raise a player error, which is the silent-death shape seen on the
+     *  Streamer (DEAD_OBJECT on the new AC-3 decoder, player stuck BUFFERING). */
+    private val codecErrorListener = object : androidx.media3.exoplayer.analytics.AnalyticsListener {
+        override fun onAudioCodecError(
+            eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+            audioCodecError: Exception,
+        ) = noteCodecError("audio", audioCodecError)
+
+        override fun onVideoCodecError(
+            eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+            videoCodecError: Exception,
+        ) = noteCodecError("video", videoCodecError)
+
+        override fun onAudioSinkError(
+            eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+            audioSinkError: Exception,
+        ) = noteCodecError("audio sink", audioSinkError)
+
+        override fun onVideoDecoderReleased(
+            eventTime: androidx.media3.exoplayer.analytics.AnalyticsListener.EventTime,
+            decoderName: String,
+        ) { decoderReleaseSignal?.complete(Unit) }
+    }
+
+    private fun noteCodecError(track: String, e: Exception) {
+        codecErrorAtMs = SystemClock.elapsedRealtime()
+        Log.w(TAG, "[CODEC] $track codec error reported: ${e.javaClass.simpleName}: ${e.message}")
+    }
+
     /** Codec-handover shaped failure: a reclaimed / dead MediaCodec rather than a
      *  dead stream. Matches by error code, and by the cause chain for the
      *  DEAD_OBJECT / CodecException wording MediaTek boxes report. */
@@ -2047,6 +2264,7 @@ class AerioExoPlayerHolder @Inject constructor(
             // Reaching READY means the failure (if any) is behind us, so a later
             // playWhenReady=false is a real user pause again.
             if (playbackState == Player.STATE_READY) {
+                noteHalRebuildReady()
                 errorPending = false
                 if (player?.playWhenReady == true) clearFailureOnRecovery("READY")
             }
@@ -2210,6 +2428,19 @@ class AerioExoPlayerHolder @Inject constructor(
                 )
                 return
             }
+            LiveRedirect.findUpstreamHls(error)?.let { redirect ->
+                Log.i(LiveRedirect.TAG, "[LIVE] redirect answered HLS; re-tuning the redirect target through HLS")
+                tracer.recover("redirect HLS")
+                consecutiveReloads = 0
+                lastForcedReloadAtMs = 0L
+                errorPending = false
+                upstreamHlsUrl = redirect.landedUrl
+                playUrl(
+                    redirect.landedUrl, lastPlayTitle, lastPlaySubtitle, lastPlayArtworkUri,
+                    lastPlayDrmType, lastPlayDrmKey, null,
+                )
+                return
+            }
             if (handleConnectionLimit(error)) return
             // Android companion to the frame-stall path: a terminal source/HTTP
             // error. Re-prime under the same cooldown + reload cap. If a LAN/WAN
@@ -2322,14 +2553,29 @@ class AerioExoPlayerHolder @Inject constructor(
             // corresponding native window for surface", reboot to recover). Go
             // straight to the deepest teardown: release the player AND the
             // surface, then tune the same channel.
-            if (isDecoderDeath(error, causeChain)) {
+            // Streamer 2026-11-01: the vendor codec HAL process died. Rebuild
+            // once after a settle in the mode that was active, no surface
+            // rebuild, so a Radio Mode start or a video tune is not flipped.
+            if (!isTimeshifting && isCodecHalDeath(error)) {
+                if (!rebuildAfterHalDeath() && !_streamUnavailable.value) markStreamUnavailable()
+                return
+            }
+            if (isDecoderDeath(error, causeChain) ||
+                (!isTimeshifting && isTransientDecoderError(error, causeChain) &&
+                    causeChain.contains("DEAD_OBJECT", ignoreCase = true))
+            ) {
                 val kind = if (causeChain.contains("flush", ignoreCase = true)) {
                     "decoder death (MediaCodec flush)"
                 } else {
                     "decoder death (${error.errorCodeName})"
                 }
-                if (rebuildPlayerAndSurface(kind)) return
-                // Budget spent: markStreamUnavailable already ran inside.
+                val mime = (error as? androidx.media3.exoplayer.ExoPlaybackException)
+                    ?.rendererFormat?.sampleMimeType
+                if (rebuildForCodec(codecTrackLabel(mime), "${error.errorCodeName}", kind)) return
+                // Per-tune [CODEC] budget spent: hand over to the existing
+                // unavailable path (its card owns the retry). When the rebuild
+                // window budget was spent instead, it already ran inside.
+                if (!_streamUnavailable.value) markStreamUnavailable()
                 return
             }
             val liveUrl = lastPlayUrl
@@ -2399,6 +2645,7 @@ class AerioExoPlayerHolder @Inject constructor(
         override fun onRenderedFirstFrame() {
             videoFrameRendered = true
             noFrameHealAttempts = 0
+            codecRebuildsThisTune = 0
             // GH #107: video that has been painting steadily for a while means
             // the surface and codec are genuinely healthy again, so the rebuild
             // budget earns a fresh window. Guarded by elapsed time since the
@@ -2689,6 +2936,7 @@ class AerioExoPlayerHolder @Inject constructor(
                 addAnalyticsListener(LoadErrorDiagnosticsListener())
                 // Always-on tune/stall/feed tracer (tag AerioTrace).
                 addAnalyticsListener(tracer.analyticsListener)
+                addAnalyticsListener(codecErrorListener)
                 // Developer Force HLS: log the 302 Location Media3 followed.
                 addAnalyticsListener(forceHlsRedirectListener)
                 // Always-on frame-pacing timer ([JUDDER] / [PERF] render=).
@@ -2754,9 +3002,16 @@ class AerioExoPlayerHolder @Inject constructor(
         var dataSourceFactory: androidx.media3.datasource.DataSource.Factory =
             httpDataSourceFactory(rawTs)
         if (rawTs) {
-            dataSourceFactory = com.aeriotv.android.core.timeshift.TeeDataSource.Factory(
-                ServerHlsGuard.Factory(dataSourceFactory),
+            val tracker = liveCallTrackers.lastOrNull()
+            // GH #159: LiveRedirectSniff sits under the server-HLS guard so a
+            // Redirect-profile 302 to a provider HLS playlist is caught before
+            // the TS extractor sees it.
+            val tee = com.aeriotv.android.core.timeshift.TeeDataSource.Factory(
+                ServerHlsGuard.Factory(LiveRedirectSniff.Factory(dataSourceFactory)),
             ) { timeshift.get().activeWriter }
+            dataSourceFactory = tee
+            liveTee = tee
+            liveTeeTracker = tracker
         }
         // Byte-flow accounting for [TUNE] firstByte and the [FEED] lines. The
         // progressive TS load never "completes", so onLoadCompleted alone
@@ -2829,6 +3084,15 @@ class AerioExoPlayerHolder @Inject constructor(
         val mediaItem = mediaItemBuilder.build()
         _pipelineLabel.value = pipelineLabelFor(url, drm = drmUuid != null && drmLicenseKey != null)
         return when {
+            // GH #159: the provider URL a Redirect-profile channel landed on
+            // answered with an HLS playlist. Talk to it directly with HLS and
+            // without Dispatcharr's auth headers (a different host).
+            url == upstreamHlsUrl -> {
+                Log.i(LiveRedirect.TAG, "[LIVE] redirect target is HLS; HlsMediaSource without server auth")
+                HlsMediaSource.Factory(tracer.wrapDataSourceFactory(httpDataSourceFactory(stripAuth = true)))
+                    .setLoadErrorHandlingPolicy(Live503LoadErrorPolicy())
+                    .createMediaSource(mediaItem)
+            }
             isRawTsUrl(url) -> {
                 // SINGLE_PMT is what HlsMediaSource uses internally and
                 // what nearly every IPTV provider delivers: one program,
@@ -2945,6 +3209,7 @@ class AerioExoPlayerHolder @Inject constructor(
         val policy = audioOnlyPolicyFor(key)
         val gen = primeGeneration
         radioCutVideo = false
+        if (policy == AudioOnlyStartPolicy.REQUESTED) radioPolicyGeneration = gen
         if (policy != AudioOnlyStartPolicy.UNKNOWN) {
             Log.i(TAG, "[AUDIO-ONLY] start policy ${policy.logName} ch=$key")
         }
@@ -2983,6 +3248,115 @@ class AerioExoPlayerHolder @Inject constructor(
     /** A Radio Mode tune dropped the declared video track on this prime:
      *  Switch to Video Mode must re-prepare, a track toggle is not enough. */
     @Volatile private var radioCutVideo = false
+
+    /** The newest live source's splice control (loader-thread object). */
+    @Volatile private var currentSplice: SpliceControl? = null
+    private var serverSwitchWatchJob: Job? = null
+
+    /**
+     * Loader thread: the extractor chain re-primed itself after a server-side
+     * switch on the kept connection. Treat it as a fresh tune on the player
+     * side: drop the old "waiting for new upstream" watch, release a resume
+     * gate that was measuring the dead buffer, and watch for the picture to
+     * move again. If it does not within [SERVER_SWITCH_RESUME_DEADLINE_MS]
+     * while bytes keep arriving, re-prime the same url once (one connection,
+     * the old socket is retired first; see [reprimeSameUrl]).
+     */
+    private fun onServerSwitchDetected(reason: String, gen: Long) {
+        mainHandler.post {
+            if (gen != primeGeneration) return@post
+            val p = player ?: return@post
+            val startAt = SystemClock.elapsedRealtime()
+            switchWatchJob?.cancel()
+            switchWatchJob = null
+            releaseResumeGate("server-side switch (reason=$reason); re-priming from zero")
+            lastBufferAdvanceAtMs = startAt
+            switchWindowUntilMs = startAt + SWITCH_WINDOW_MS
+            val startPos = p.currentPosition
+            serverSwitchWatchJob?.cancel()
+            serverSwitchWatchJob = watchdogScope.launch {
+                while (isActive) {
+                    delay(SWITCH_POLL_MS)
+                    val pl = player
+                    if (pl == null || primeGeneration != gen || isTimeshifting) return@launch
+                    val now = SystemClock.elapsedRealtime()
+                    if (pl.currentPosition >= startPos + SERVER_SWITCH_RESUMED_ADVANCE_MS) {
+                        Log.i(TAG, "[SWITCH] resumed +${now - startAt}ms after server-side switch")
+                        return@launch
+                    }
+                    if (now - startAt >= SERVER_SWITCH_RESUME_DEADLINE_MS) {
+                        val byteGapMs = tracer.feedSinceTune().second
+                        if (byteGapMs < SERVER_SWITCH_BYTES_FLOWING_MS && pl.playWhenReady) {
+                            Log.i(
+                                TAG,
+                                "[SWITCH] no progress ${now - startAt}ms after server-side switch " +
+                                    "while bytes arrive (last byte ${byteGapMs}ms ago); re-priming same url",
+                            )
+                            switchWindowUntilMs = 0L
+                            reprimeSameUrl("server-side switch, no samples", rejoinNearLive = true)
+                        }
+                        return@launch
+                    }
+                }
+            }
+        }
+    }
+
+    /** Loader thread: the PMT changed the video codec type (see [CodecChangeRule]). */
+    private fun onCodecTypeChangeDetected(oldType: Int, newType: Int, gen: Long) {
+        mainHandler.post {
+            if (gen != primeGeneration) return@post
+            sequentialCodecRebuild(
+                CodecChangeRule.familyOfStreamType(oldType),
+                CodecChangeRule.familyOfStreamType(newType),
+            )
+        }
+    }
+
+    private var codecChangeJob: Job? = null
+    private var lastTimeshiftCodecRebuildAtMs = 0L
+
+    /**
+     * A video codec TYPE change (H.264 to HEVC or the reverse) is never
+     * handled in place: the MediaTek HAL died within 60 ms of every in-place
+     * avc/hevc decoder swap on the Streamer (2026-11-01). Same path as the
+     * Radio Mode start: stop the player, await the video decoder release,
+     * settle [CodecChangeRule.SETTLE_MS], then re-prepare. On the direct live
+     * stream that is a same-URL re-prime that rejoins near live; on the
+     * rewind buffer it re-enters just past the change point (a second change
+     * within 10 s goes live instead, so a bad interpolation cannot loop).
+     */
+    private fun sequentialCodecRebuild(old: String?, new: String?) {
+        val p = player ?: return
+        if (lastPlayUrl == null) return
+        val now = SystemClock.elapsedRealtime()
+        Log.i(TAG, "[SWITCH] codec change $old -> $new; sequential rebuild")
+        tracer.recover("codec change $old -> $new; sequential rebuild")
+        switchWatchJob?.cancel()
+        switchWatchJob = null
+        serverSwitchWatchJob?.cancel()
+        serverSwitchWatchJob = null
+        // Keep the stall and silence nets quiet while the player is stopped.
+        switchWindowUntilMs = now + SWITCH_WINDOW_MS
+        val inBuffer = isTimeshifting && !isAdoptedLive
+        val reenterWall = if (inBuffer) {
+            currentRewindWallMs()?.let { it + (p.bufferedPosition - p.currentPosition).coerceAtLeast(0L) + 500L }
+        } else null
+        val goLiveInstead = inBuffer && (reenterWall == null || now - lastTimeshiftCodecRebuildAtMs < 10_000L)
+        if (inBuffer) lastTimeshiftCodecRebuildAtMs = now
+        codecChangeJob?.cancel()
+        codecChangeJob = watchdogScope.launch {
+            val ms = stopAndAwaitDecoderRelease(p)
+            delay(CodecChangeRule.SETTLE_MS)
+            if (player !== p || lastPlayUrl == null) return@launch
+            Log.i(TAG, "[CODEC] codec change: decoders released +${ms}ms, settled ${CodecChangeRule.SETTLE_MS}ms; re-preparing ch=$currentChannelId")
+            when {
+                isAdoptedLive || goLiveInstead -> goLive()
+                inBuffer && reenterWall != null -> playTimeshift(reenterWall)
+                else -> reprimeSameUrl("codec change $old -> $new", rejoinNearLive = true)
+            }
+        }
+    }
 
     private fun onGuardDropped(policy: AudioOnlyStartPolicy, key: String?, gen: Long) {
         mainHandler.post {
@@ -3074,8 +3448,16 @@ class AerioExoPlayerHolder @Inject constructor(
         // which never carries a picture must not hold preparation forever.
         // safeTsExtractor: same TsExtractor, but a corrupt AC-3 header resyncs
         // instead of failing the load (see SafeTsExtractor.kt).
+        // Server-side stream switch on the kept connection (Streamer
+        // 2026-11-01): SpliceResetTsExtractor swaps in a fresh TsExtractor when
+        // the TS tables change, the AC-3 reader resyncs in a burst, or the
+        // rebaser sees rebases it cannot reconcile; ContinuousTsExtractor then
+        // puts every track on one shared base.
+        val splice = SpliceControl(onDetected = { reason -> onServerSwitchDetected(reason, gen) })
+        splice.onCodecChange = { old, new -> onCodecTypeChangeDetected(old, new, gen) }
+        currentSplice = splice
         val guard = AudioOnlyTrackGuard(
-            safeTsExtractor(),
+            SpliceResetTsExtractor({ onResync -> safeTsExtractor(onResync) }, splice),
             policy = policy,
             onDropped = { pol, _ -> onGuardDropped(pol, key, gen) },
             onVideoAfterDrop = { pol -> onGuardVideoAfterDrop(pol, key, gen) },
@@ -3085,7 +3467,7 @@ class AerioExoPlayerHolder @Inject constructor(
                 }
             },
         )
-        val continuous: Extractor = ContinuousTsExtractor(guard)
+        val continuous: Extractor = ContinuousTsExtractor(guard, splice = splice)
         buildList {
             fmp4?.let { add(it) }
             add(object : Extractor by continuous {
@@ -3147,10 +3529,37 @@ class AerioExoPlayerHolder @Inject constructor(
      *  never show a transport over a permanently empty buffer. */
     fun canBufferLiveRewind(url: String): Boolean = isRawTsUrl(url)
 
+    /** The newest raw-TS live source's tee and its Call tracker, so a Live
+     *  Rewind entry can take over that connection. */
+    @Volatile private var liveTee: com.aeriotv.android.core.timeshift.TeeDataSource.Factory? = null
+    @Volatile private var liveTeeTracker: LiveCallTracker? = null
+
+    /**
+     * Live Rewind entry from the direct live stream: hand the player's own
+     * open connection to the buffer filler instead of closing it and opening
+     * a second GET (Streamer 2026-11-01 19:35:33). The tracker leaves the
+     * retire set, so later source swaps do not cancel the kept call; the
+     * controller cancels it on Go Live or session end. Null when there is no
+     * open live connection or a filler already feeds the buffer.
+     */
+    private fun prepareLiveTakeover(
+        ts: com.aeriotv.android.core.timeshift.TimeshiftController,
+    ): com.aeriotv.android.core.timeshift.TimeshiftController.LiveTakeover? {
+        if (isTimeshifting || isCatchup || ts.isFilling()) return null
+        val tee = liveTee?.active ?: return null
+        val tracker = liveTeeTracker ?: return null
+        val takeover = com.aeriotv.android.core.timeshift.TimeshiftController.LiveTakeover { tracker.cancelAll() }
+        if (!tee.requestHandoff { src -> takeover.adopt(src) }) return null
+        liveCallTrackers.remove(tracker)
+        liveTeeTracker = null
+        return takeover
+    }
+
     fun playTimeshift(fromWallMs: Long): Boolean {
         val p = player ?: return false
         val ts = timeshift.get()
         if (ts.activeWriter == null) return false
+        val takeover = prepareLiveTakeover(ts)
         isTimeshifting = true
         isAdoptedLive = false
         val factory = com.aeriotv.android.core.timeshift.TimeshiftDataSource.Factory { ts.activeWriter }
@@ -3164,8 +3573,12 @@ class AerioExoPlayerHolder @Inject constructor(
         p.setMediaSource(source)
         p.prepare()
         p.playWhenReady = true
-        ts.onEnterTimeshift(fromWallMs)
-        Log.i(TAG, "[REWIND] entered timeshift at $fromWallMs")
+        ts.onEnterTimeshift(fromWallMs, takeover)
+        if (takeover != null) {
+            Log.i(TAG, "[REWIND] entered timeshift (no new live connection) at $fromWallMs")
+        } else {
+            Log.i(TAG, "[REWIND] entered timeshift at $fromWallMs")
+        }
         return true
     }
 
@@ -3658,6 +4071,16 @@ class AerioExoPlayerHolder @Inject constructor(
         val source = wrapForSwitchSkip(
             url, buildMediaSource(url, title, subtitle, artworkUri, drmLicenseType, drmLicenseKey),
         )
+        // Streamer 2026-11-01 18:20:19: on a live channel change the previous
+        // channel's c2.dolby.ac3.decoder was reclaimed only AFTER the new AC-3
+        // codec was created, and the new one died with DEAD_OBJECT. stop() is
+        // queued on the playback thread ahead of setMediaSource/prepare, so the
+        // renderers are disabled and the old codecs released before the next
+        // channel creates decoders of the same MIME type.
+        if (kind == "live" && channelId != null && p.playbackState != Player.STATE_IDLE) {
+            Log.i(TAG, "[CODEC] releasing previous decoders before tune ch=$effectiveChannelId")
+            p.stop()
+        }
         p.setMediaSource(source)
         retireLiveCalls(p, staleCalls)
         p.prepare()
@@ -3672,7 +4095,7 @@ class AerioExoPlayerHolder @Inject constructor(
         }
     }
 
-    private fun httpDataSourceFactory(isLive: Boolean = false): DataSource.Factory {
+    private fun httpDataSourceFactory(isLive: Boolean = false, stripAuth: Boolean = false): DataSource.Factory {
         // GH #32: live (raw-TS Dispatcharr proxy) playback goes through OkHttp,
         // not Media3's DefaultHttpDataSource. On Android 16 the HttpURLConnection
         // that DefaultHttpDataSource wraps can open the connection to the chunked
@@ -3696,9 +4119,10 @@ class AerioExoPlayerHolder @Inject constructor(
         // Apply Dispatcharr API-key / custom User-Agent. Headers are
         // applied verbatim; the User-Agent header (if present) replaces
         // the default.
-        if (httpHeaders.isNotEmpty()) {
-            factory.setDefaultRequestProperties(httpHeaders)
-            httpHeaders.entries
+        val headers = if (stripAuth) LiveRedirect.withoutAuth(httpHeaders) else httpHeaders
+        if (headers.isNotEmpty()) {
+            factory.setDefaultRequestProperties(headers)
+            headers.entries
                 .firstOrNull { it.key.equals("User-Agent", ignoreCase = true) }
                 ?.value
                 ?.let(factory::setUserAgent)
@@ -3920,10 +4344,18 @@ class AerioExoPlayerHolder @Inject constructor(
             .followRedirects(true)
             .followSslRedirects(true)
             .addNetworkInterceptor(ForceHls.redirectTokenInterceptor)
+            // GH #159: a Redirect-profile 302 points at the provider; never
+            // carry Dispatcharr's X-API-Key or Authorization there.
+            .addNetworkInterceptor(LiveRedirect.stripAuthOnCrossHost)
             .build()
     }
 
+    /** GH #159: the provider URL a redirected live open landed on when it
+     *  answered with HLS. buildMediaSource routes exactly this URL to HLS. */
+    @Volatile private var upstreamHlsUrl: String? = null
+
     private fun isRawTsUrl(url: String): Boolean {
+        if (url == upstreamHlsUrl) return false
         // Developer Force HLS: a Dispatcharr live URL asking for HLS is a
         // playlist, so every TS-only path (tee, switch skip, stall nets) skips it.
         if (ForceHls.isForcedHlsUrl(url)) return false
@@ -3977,9 +4409,10 @@ class AerioExoPlayerHolder @Inject constructor(
             isAdoptedLive = false
             isTimeshifting = false
         }
-        // Disarm the first-byte deadline with the pipeline but KEEP the tried
-        // set: an internal retry is the same tune on the same channel.
-        liveFailover.disarm()
+        // Cancel the first-byte deadline and any in-flight walk step with the
+        // pipeline but KEEP the tried set: an internal retry is the same tune
+        // on the same channel and re-arms through playUrl.
+        liveFailover.halt("player stopped")
         val staleCalls = takeLiveCallTrackers()
         p.stop()
         retireLiveCalls(p, staleCalls)
@@ -4120,7 +4553,13 @@ class AerioExoPlayerHolder @Inject constructor(
                     lastKnownBufferedPositionMs = bufferedNow
                     lastBufferAdvanceAtMs = now
                 }
-                val ingestStaleNowMs = now - lastBufferAdvanceAtMs
+                // "Ingest" is BYTES, the same clock as the [FEED] lines
+                // (PlaybackTracer.onBytes). Streamer 2026-11-01: the old
+                // buffer-advance clock said "ingest quiet 23024ms" while [FEED]
+                // showed bytes every 3 to 4 s, because the extractor could not
+                // turn the switched stream's bytes into samples. Buffer growth
+                // still drives the stale-reload discriminator below.
+                val ingestStaleNowMs = minOf(now - lastBufferAdvanceAtMs, tracer.feedSinceTune().second)
                 // A frozen frame is never silent (field 2026-09-14: the stream
                 // was stopped server-side and the picture sat frozen ~30s with
                 // no message). Once bytes stop arriving on a live channel we
@@ -4223,6 +4662,54 @@ class AerioExoPlayerHolder @Inject constructor(
                 val coldStartIsLive = coldStartUrl != null && isRawTsUrl(coldStartUrl)
                 val coldStartCeilingMs =
                     if (coldStartIsLive) liveNoDataStartupThresholdMs else noDataStartupThresholdMs
+                // Bytes flowing but nothing decoded: a local decoder fault, not
+                // a dead stream (Streamer 2026-11-01 18:20, 47 MB delivered
+                // while the old net said "no bytes" and walked every stream).
+                // Counted at the data source, so a buffered position stuck at 0
+                // behind a dead codec no longer reads as network silence.
+                if (coldStartIsLive && coldStartUrl != null && p.playWhenReady &&
+                    !hasReachedPlaybackRestart && !videoFrameRendered && !audioOnlyHoldActive &&
+                    p.playbackState == Player.STATE_BUFFERING && p.currentPosition <= 0L
+                ) {
+                    val (feedBytes, sinceLastByte) = tracer.feedSinceTune()
+                    val elapsedMs = now - streamPrimedAtMs
+                    val flowing = LiveNoProgressPolicy.isFlowing(feedBytes, sinceLastByte)
+                    val codecErr = codecErrorAtMs
+                    val codecErrDue = codecErr != 0L && codecErr >= streamPrimedAtMs &&
+                        now - codecErr >= CODEC_ERROR_REBUILD_MS
+                    val verdict = LiveNoProgressPolicy.decide(
+                        elapsedMs, coldStartCeilingMs, feedBytes, sinceLastByte, decodedProgress = false,
+                    )
+                    if (flowing && (verdict == LiveNoProgressPolicy.Verdict.REBUILD || codecErrDue)) {
+                        Log.w(
+                            TAG,
+                            "[NO-DATA] bytes flowing (${feedBytes / 1024} KB in budget) but no decoded " +
+                                "progress; rebuilding player ch=$currentChannelId",
+                        )
+                        if (rebuildForCodec(
+                                "media", if (codecErrDue) "codec error, no progress" else "no decoded progress",
+                                "no decoded progress",
+                            )
+                        ) {
+                            continue
+                        }
+                    }
+                    // Flowing feed with the rebuild budget spent, or still
+                    // inside its budget: never declare the stream unavailable.
+                    if (flowing) {
+                        if (codecRebuildsThisTune >= MAX_CODEC_REBUILDS_PER_TUNE &&
+                            elapsedMs >= coldStartCeilingMs
+                        ) {
+                            Log.w(
+                                TAG,
+                                "[NO-DATA] bytes flowing but no decoded progress after " +
+                                    "$codecRebuildsThisTune rebuilds ch=$currentChannelId; surfacing unavailable",
+                            )
+                            markStreamUnavailable()
+                        }
+                        continue
+                    }
+                }
                 if (coldStartUrl != null && p.playWhenReady && !hasReachedPlaybackRestart &&
                     !videoFrameRendered && p.playbackState == Player.STATE_BUFFERING &&
                     p.currentPosition <= 0L && p.bufferedPosition <= 0L &&
@@ -4750,7 +5237,7 @@ class AerioExoPlayerHolder @Inject constructor(
      * watchdog's escalating budget on a retry the server invited would burn the
      * ladder that exists for genuinely wedged streams.
      */
-    private fun reprimeSameUrl(reason: String) {
+    private fun reprimeSameUrl(reason: String, rejoinNearLive: Boolean = false) {
         val p = player ?: return
         val url = lastPlayUrl ?: return
         val now = SystemClock.elapsedRealtime()
@@ -4776,10 +5263,42 @@ class AerioExoPlayerHolder @Inject constructor(
                 lastPlayDrmType, lastPlayDrmKey,
             ),
         )
+        if (rejoinNearLive) armRejoinNearLive(source)
         p.setMediaSource(source)
         retireLiveCalls(p, staleCalls)
         p.prepare()
         p.playWhenReady = true
+    }
+
+    /**
+     * After a rebuild on the same URL (codec HAL rebuild, codec change
+     * rebuild, server-side switch rebuild) Dispatcharr serves its channel
+     * buffer from its start, which replays seconds the user already saw.
+     * Streamer 2026-11-01 19:35:47 HAL rebuild: buffered ahead 7936 ms at
+     * READY, 14259 ms one second later, and the rewind buffer trimmed
+     * 11.8 MB of that burst as overlap with bytes it already held. Skip to
+     * the newest keyframe in that burst that keeps [LiveRejoin.KEEP_AHEAD_MS]
+     * (or the channel's learned hold-back, when larger) buffered. A fresh
+     * tune never comes through here, so its hold-back logic is unchanged.
+     */
+    private fun armRejoinNearLive(source: MediaSource) {
+        val skip = source as? SwitchSkipMediaSource ?: return
+        val gen = primeGeneration
+        val keep = maxOf(LiveRejoin.KEEP_AHEAD_MS, learnedHoldBackMs().toLong())
+        skip.requestRejoin(mainHandler, keep) { r ->
+            if (gen != primeGeneration) return@requestRejoin
+            when (r) {
+                is SwitchSkipMediaSource.RejoinResult.Skipped -> {
+                    Log.i(TAG, "[RECOVER] rejoined near live: skipped ${r.droppedMs}ms of replayed buffer (${r.aheadAfterMs}ms ahead)")
+                    holdAudioForFirstVideoFrame()
+                    lastPositionAdvanceAtMs = SystemClock.elapsedRealtime()
+                }
+                is SwitchSkipMediaSource.RejoinResult.NotNeeded ->
+                    Log.i(TAG, "[RECOVER] rejoin near live: nothing to skip (${r.aheadMs}ms buffered, keep ${keep}ms)")
+                is SwitchSkipMediaSource.RejoinResult.Abandoned ->
+                    Log.i(TAG, "[RECOVER] rejoin near live abandoned (${r.reason})")
+            }
+        }
     }
 
     /** Terminal heal for a never-started live stream: the Dispatcharr proxy
@@ -4802,6 +5321,7 @@ class AerioExoPlayerHolder @Inject constructor(
         _streamUnavailable.value = true
         failedChannelId = reconnectChannelId
         tracer.recover("stream unavailable; stopping")
+        liveFailover.halt("channel unavailable")
         stop()
     }
 
@@ -5151,6 +5671,14 @@ class AerioExoPlayerHolder @Inject constructor(
         /** Playhead frozen this long after a switch = the new upstream is not
          *  flowing yet; the watch starts logging and keeps the switch window open. */
         const val SWITCH_NO_PROGRESS_MS = 6_000L
+        /** Playhead advance that proves playback resumed after a server-side switch. */
+        private const val SERVER_SWITCH_RESUMED_ADVANCE_MS = 500L
+        /** No progress this long after an extractor re-prime while bytes flow:
+         *  re-prime the same url. */
+        private const val SERVER_SWITCH_RESUME_DEADLINE_MS = 8_000L
+        /** A last byte this recent means the feed is flowing (Dispatcharr
+         *  bursts every 3 to 10 s). */
+        private const val SERVER_SWITCH_BYTES_FLOWING_MS = 5_000L
         private const val SWITCH_POLL_MS = 250L
         /** Interval of the "[SWITCH] still waiting for new upstream" log. */
         private const val SWITCH_WAIT_LOG_MS = 10_000L
@@ -5271,6 +5799,11 @@ class AerioExoPlayerHolder @Inject constructor(
         private const val DECODER_RETRY_WINDOW_MS = 3_000L
         /** GH #107: full player + surface rebuilds allowed per window. */
         private const val MAX_FULL_REBUILDS = 2
+        private const val MAX_CODEC_REBUILDS_PER_TUNE = 2
+        private const val DECODER_RELEASE_WAIT_MS = 150L
+        /** After a reported codec error, how long a flowing feed may go
+         *  without decoded progress before the rebuild. */
+        private const val CODEC_ERROR_REBUILD_MS = 3_000L
         /** GH #107: rolling window the rebuild budget is counted in. */
         private const val FULL_REBUILD_WINDOW_MS = 90_000L
         /** GH #107: settle time between dropping the old surface and tuning

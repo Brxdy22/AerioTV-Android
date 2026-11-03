@@ -196,6 +196,8 @@ Click each type for the full breakdown:
 - **External XMLTV URL override** <em>(advanced)</em>: point the EPG at a third-party XMLTV source while keeping channels from Dispatcharr's API.
 - **Auto-discovery of recordings scheduled outside the app**: recordings you scheduled from the Dispatcharr web UI appear in AerioTV's DVR tab within a couple of minutes. Xtream Codes and M3U have no server-side scheduler to discover from.
 
+On a phone or tablet you can sign in by scanning the API key QR code that Dispatcharr shows for a user on its Users page (Scan QR code), or by picking a saved image of that code (Choose from Photos).
+
 </details>
 
 <details>
@@ -253,6 +255,11 @@ server: the Dispatcharr API by an API key or token, the Xtream Codes paths
 by the account's username and password, and the stream proxy by the stream
 UUID in the URL.
 
+Set up a TV from your phone uses no server path, so the tables below are
+unchanged: while the TV's setup screen is open it listens on a random LAN
+port and advertises `_aeriotv-setup._tcp`, and the phone sends the
+encrypted playlist straight to it (see docs/DeviceSetupHandoff.md).
+
 <details>
 <summary><strong>Pangolin access rules for Dispatcharr</strong> (click to expand)</summary>
 
@@ -306,46 +313,49 @@ numeric id or session token; reverse proxies usually need a wildcard there.
 | 5 | Login and account | `/api/accounts/users/<id>/` | `PATCH` with `channel_profiles` to assign a profile's Channel Profiles (admin only) |
 | 6 | Login and account | `/api/accounts/users/me/app-data/` | Lists AerioTV's synced data keys and sizes for the signed-in profile (Dispatcharr Sync) |
 | 7 | Login and account | `/api/accounts/users/me/app-data/<key>/` | Reads, saves, and clears one Dispatcharr Sync category (keys start with `app.molinete.aerio.`) |
-| 8 | Server | `/api/core/version/` | server version, also the connectivity and auth test at setup |
-| 9 | Server | `/api/core/settings/` | server-wide switches such as whether Catch-Up is enabled |
-| 10 | Channels and guide | `/api/channels/channels/` | the channel list for the playlist |
-| 11 | Channels and guide | `/api/channels/channels/<id>/` | one channel's details and stream order (Switch Stream reorder); `PATCH` with `is_radio` for Mark as Radio Channel and Unmark Radio Channel (admin only) |
-| 12 | Channels and guide | `/api/channels/channels/<id>/streams/` | a channel's member streams for Switch Stream |
-| 13 | Channels and guide | `/api/channels/groups/` | channel groups for the group pills and sidebar |
-| 14 | Channels and guide | `/api/channels/profiles/` | channel profiles for the Edit Playlist picker and the admin Channel Profiles assignment |
-| 15 | Channels and guide | `/api/channels/profiles/<id>/` | the channels inside the chosen profile |
-| 16 | Channels and guide | `/api/channels/logos/<id>/cache/` | channel logo images |
-| 17 | Channels and guide | `/api/channels/summary/` | lightweight counts used to verify the connection |
-| 18 | Channels and guide | `/api/epg/grid/` | the bulk EPG window (about -1 h to +24 h) that fills the guide |
-| 19 | Channels and guide | `/api/epg/programs/` | program search and per-channel program lists beyond the grid window |
-| 20 | Channels and guide | `/api/epg/programs/<id>/` | one program's full detail (categories, rating) for tinted cards and the info sheet |
-| 21 | Channels and guide | `/api/epg/current-programs/` | what is airing now on a set of channels (Live TV cards, Top Shelf) |
-| 22 | Channels and guide | `/api/epg/epgdata/` | the EPG channel rows that map tvg ids to EPG sources |
-| 23 | Channels and guide | `/api/epg/sources/` | the server's EPG sources, layered onto the guide |
-| 24 | Channels and guide | `/api/m3u/accounts/` | source account names shown next to streams and in the VOD version picker |
-| 25 | DVR | `/api/channels/recordings/` | list and schedule recordings |
-| 26 | DVR | `/api/channels/recordings/<id>/` | one recording's details, edit and delete |
-| 27 | DVR | `/api/channels/recordings/<id>/file/` | plays a completed recording |
-| 28 | DVR | `/api/channels/recordings/<id>/stop/` | stops a recording in progress |
-| 29 | DVR | `/api/channels/recordings/<id>/comskip/` | runs commercial removal on a recording |
-| 30 | DVR | `/api/channels/series-rules/` | series recording rules |
-| 31 | DVR | `/api/channels/series-rules/evaluate/` | schedules the episodes a new series rule matches |
-| 32 | VOD | `/api/vod/categories/` | movie and series categories |
-| 33 | VOD | `/api/vod/movies/` | movie library pages, search and Recently Added |
-| 34 | VOD | `/api/vod/movies/<id>/providers/` | the copies of a movie across source accounts (version picker) |
-| 35 | VOD | `/api/vod/movies/<id>/provider-info/` | TMDB-enriched detail for a movie |
-| 36 | VOD | `/api/vod/series/` | series library pages, search and Recently Added |
-| 37 | VOD | `/api/vod/series/<id>/` | one series by id, for Continue Watching and Watchlist rows |
-| 38 | VOD | `/api/vod/series/<id>/providers/` | the copies of a series across source accounts |
-| 39 | VOD | `/api/vod/series/<id>/provider-info/` | TMDB-enriched detail for a series |
-| 40 | VOD | `/api/vod/episodes/` | the episodes of a series |
-| 41 | Playback sessions | `/api/proxy/hls/sessions/` | opens a Force HLS session for a channel |
-| 42 | Playback sessions | `/api/proxy/hls/sessions/<token>/` | closes that session when playback stops |
-| 43 | Playback sessions | `/api/catchup/sessions/` | opens a native Catch-Up session for a past program |
-| 44 | Playback sessions | `/api/catchup/sessions/<id>/` | closes the Catch-Up session |
-| 45 | Playback sessions | `/api/catchup/sessions/<id>/position/` | reports the playback position so the session can be resumed |
+| 8 | Login and account | `/api/accounts/api-keys/generate/` | `POST` with `user_id` to mint an API key for a user from Enable API access in Add Profile (admin only) |
+| 9 | Login and account | `/api/accounts/api-keys/revoke/` | `POST` with `user_id` to revoke that key when Enable API access is turned back off (admin only) |
+| 10 | Server | `/api/core/version/` | server version, also the connectivity and auth test at setup |
+| 11 | Server | `/api/core/settings/` | server-wide switches such as whether Catch-Up is enabled |
+| 12 | Channels and guide | `/api/channels/channels/` | the channel list for the playlist |
+| 13 | Channels and guide | `/api/channels/channels/<id>/` | one channel's details and stream order (Switch Stream reorder); `PATCH` with `is_radio` for Mark as Radio Channel and Unmark Radio Channel (admin only) |
+| 14 | Channels and guide | `/api/channels/channels/<id>/streams/` | a channel's member streams for Switch Stream |
+| 15 | Channels and guide | `/api/channels/groups/` | channel groups for the group pills and sidebar |
+| 16 | Channels and guide | `/api/channels/profiles/` | channel profiles for the Edit Playlist picker and the admin Channel Profiles assignment |
+| 17 | Channels and guide | `/api/channels/profiles/<id>/` | the channels inside the chosen profile |
+| 18 | Channels and guide | `/api/channels/logos/<id>/cache/` | channel logo images |
+| 19 | Channels and guide | `/api/channels/summary/` | lightweight counts used to verify the connection |
+| 20 | Channels and guide | `/api/epg/grid/` | the bulk EPG window (about -1 h to +24 h) that fills the guide |
+| 21 | Channels and guide | `/api/epg/programs/` | program search and per-channel program lists beyond the grid window |
+| 22 | Channels and guide | `/api/epg/programs/<id>/` | one program's full detail (categories, rating) for the info sheet (tinted cards too on servers without the search below) |
+| 23 | Channels and guide | `/api/epg/programs/search/` | every program airing now, with categories, in one request (`airing_at`, `fields`, `page_size`), for tinted guide cards |
+| 24 | Channels and guide | `/api/epg/current-programs/` | what is airing now on a set of channels (Live TV cards, Top Shelf) |
+| 25 | Channels and guide | `/api/epg/epgdata/` | the EPG channel rows that map tvg ids to EPG sources |
+| 26 | Channels and guide | `/api/epg/sources/` | the server's EPG sources, layered onto the guide |
+| 27 | Channels and guide | `/api/m3u/accounts/` | source account names shown next to streams and in the VOD version picker |
+| 28 | DVR | `/api/channels/recordings/` | list and schedule recordings |
+| 29 | DVR | `/api/channels/recordings/<id>/` | one recording's details, edit and delete |
+| 30 | DVR | `/api/channels/recordings/<id>/file/` | plays a completed recording |
+| 31 | DVR | `/api/channels/recordings/<id>/stop/` | stops a recording in progress |
+| 32 | DVR | `/api/channels/recordings/<id>/comskip/` | runs commercial removal on a recording |
+| 33 | DVR | `/api/channels/series-rules/` | series recording rules |
+| 34 | DVR | `/api/channels/series-rules/evaluate/` | schedules the episodes a new series rule matches |
+| 35 | VOD | `/api/vod/categories/` | movie and series categories |
+| 36 | VOD | `/api/vod/movies/` | movie library pages, search and Recently Added |
+| 37 | VOD | `/api/vod/movies/<id>/providers/` | the copies of a movie across source accounts (version picker) |
+| 38 | VOD | `/api/vod/movies/<id>/provider-info/` | TMDB-enriched detail for a movie |
+| 39 | VOD | `/api/vod/series/` | series library pages, search and Recently Added |
+| 40 | VOD | `/api/vod/series/<id>/` | one series by id, for Continue Watching and Watchlist rows |
+| 41 | VOD | `/api/vod/series/<id>/providers/` | the copies of a series across source accounts |
+| 42 | VOD | `/api/vod/series/<id>/provider-info/` | TMDB-enriched detail for a series |
+| 43 | VOD | `/api/vod/episodes/` | the episodes of a series |
+| 44 | Playback sessions | `/api/proxy/hls/sessions/` | opens a Force HLS session for a channel |
+| 45 | Playback sessions | `/api/proxy/hls/sessions/<token>/` | closes that session when playback stops |
+| 46 | Playback sessions | `/api/catchup/sessions/` | opens a native Catch-Up session for a past program |
+| 47 | Playback sessions | `/api/catchup/sessions/<id>/` | closes the Catch-Up session |
+| 48 | Playback sessions | `/api/catchup/sessions/<id>/position/` | reports the playback position so the session can be resumed |
 
-**Collapsed to prefixes (10 rules cover all 45 paths):**
+**Collapsed to prefixes (10 rules cover all 46 paths):**
 `/api/accounts/*`, `/api/core/*`, `/api/channels/*`, `/api/epg/*`, `/api/m3u/*`,
 `/api/vod/*`, `/api/proxy/*`, `/api/catchup/*`, plus `/proxy/*` and
 `/timeshift/*`.
@@ -354,6 +364,19 @@ New Dispatcharr features will add paths over time, which is the trade against
 the single `/api/*` rule.
 
 </details>
+
+## When does AerioTV refresh?
+
+AerioTV always opens from the cache on your device first and refreshes in the background. The spinner only appears when there is nothing cached yet or when you refresh by hand.
+
+| Data | On launch | While open | While closed |
+|---|---|---|---|
+| Channels and guide | Painted from the cache, then refreshed quietly after the guide appears | Refreshed again when you return and the data is more than 30 minutes old | Background Refresh interval in Settings, General (1 to 48 hours, or a time of day; the About Refreshing note there summarizes this table) |
+| Movies and TV Shows | Library restored from the cache | Re-scanned in the background on the Refresh Library schedule in Settings, Movies and TV Shows (every launch, daily, or weekly), or when the server reports a change | Same background job |
+| DVR recordings | Restored from the cache | Updated every 30 seconds while the app is in the foreground | Not polled |
+| Favorites, progress, reminders, settings (sync) | Pulled on launch and on profile switch | Pulled again after 5 minutes away and every 15 minutes; your changes are sent a few seconds after you make them | Not synced |
+
+Switching profiles on a Dispatcharr playlist keeps the server's guide and library on screen; only your channel visibility and personal data change. Pull down (phone) or press Refresh (TV) to force an update at any time.
 
 ## OTA / HDHomeRun Channels (MPEG-2)
 

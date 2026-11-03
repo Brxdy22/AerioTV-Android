@@ -145,6 +145,13 @@ fun PinEntryDialog(
         return true
     }
 
+    // Every PIN pad pauses launch and switch work, cached paints included,
+    // until it leaves composition (ok, cancel, or back). Streamer 2026-10-27:
+    // the cached paints under the pad dropped frames while the PIN was typed.
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        com.aeriotv.android.core.app.LaunchWorkHold.pinPadOpened()
+        onDispose { com.aeriotv.android.core.app.LaunchWorkHold.pinPadClosed() }
+    }
     val rootFocus = remember { FocusRequester() }
     Dialog(
         onDismissRequest = { back() },
@@ -292,6 +299,13 @@ private fun PadKey(
     enabled: Boolean = true,
     onClick: () -> Unit,
 ) {
+    // Focus trails on the TV pad (2026-10-27 "ghosting when moving around
+    // on the PIN sheet"): the default clickable indication drew a ripple
+    // focus/press state layer that faded out over the key focus just left,
+    // so every D-pad move left a fading disc behind. The key's own fill is
+    // the focus visual; no indication, no animation, and the old key snaps
+    // straight back to idle in the same frame the new one lights up.
+    val interaction = remember { androidx.compose.foundation.interaction.MutableInteractionSource() }
     var focused by remember { mutableStateOf(false) }
     Box(
         modifier
@@ -302,7 +316,12 @@ private fun PadKey(
                 if (focused) MaterialTheme.colorScheme.primary
                 else MaterialTheme.colorScheme.surfaceVariant,
             )
-            .clickable(enabled = enabled, onClick = onClick),
+            .clickable(
+                interactionSource = interaction,
+                indication = null,
+                enabled = enabled,
+                onClick = onClick,
+            ),
         contentAlignment = Alignment.Center,
     ) {
         val tint = when {
@@ -388,17 +407,19 @@ fun SetPinFlow(
     playlistId: String,
     profile: DispatcharrProfile,
     vm: ProfilesViewModel,
+    /** Reset with a temporary PIN: hand the new PIN back instead of saving it (no current PIN step). */
+    onChosen: ((PinType, List<String>) -> Unit)? = null,
     onClose: (String?) -> Unit,
 ) {
     val scope = rememberCoroutineScope()
     var needsCurrent by remember { mutableStateOf<Boolean?>(null) }
-    LaunchedEffect(profile.id) { needsCurrent = vm.needsCurrentPin(playlistId, profile.id) }
+    LaunchedEffect(profile.id) { needsCurrent = onChosen == null && vm.needsCurrentPin(playlistId, profile.id) }
     val nc = needsCurrent ?: return
     var current by remember { mutableStateOf<List<String>?>(null) }
     var type by remember { mutableStateOf<PinType?>(null) }
     var first by remember { mutableStateOf<List<String>?>(null) }
     var mismatch by remember { mutableStateOf<String?>(null) }
-    val title = if (vm.hasPin(profile.id)) "Change PIN" else "Set PIN"
+    val title = if (vm.hasPin(profile.id) && onChosen == null) "Change PIN" else "Set PIN"
 
     when {
         nc && current == null -> PinEntryDialog(
@@ -412,13 +433,13 @@ fun SetPinFlow(
             },
             lockSeconds = { vm.pinLockSeconds(profile.id) },
         )
-        type == null -> AlertDialog(
+        type == null -> com.aeriotv.android.ui.settings.SettingsAlertDialog(
             onDismissRequest = { onClose(null) },
             title = { Text("PIN type") },
             text = {
                 Column {
                     PinType.entries.forEach { t ->
-                        ChoiceRow(label = t.label, onClick = { type = t })
+                        ChoiceRow(label = t.label, checked = type == t, radio = true, onClick = { type = t })
                     }
                 }
             },
@@ -447,6 +468,7 @@ fun SetPinFlow(
                     null
                 } else {
                     val t = type!!
+                    if (onChosen != null) { onChosen(t, seq); return@PinEntryDialog null }
                     scope.launch {
                         onClose(vm.setPin(playlistId, profile.id, t, seq, current).exceptionOrNull()?.message)
                     }
@@ -467,7 +489,7 @@ fun RemovePinFlow(
 ) {
     val scope = rememberCoroutineScope()
     vm.pinRemovalBlock(playlistId, profile.id)?.let { reason ->
-        AlertDialog(
+        com.aeriotv.android.ui.settings.SettingsAlertDialog(
             onDismissRequest = { onClose(null) },
             title = { Text("Remove PIN") },
             text = { Text(reason) },
@@ -515,25 +537,52 @@ internal fun ChoiceRow(
     checked: Boolean? = null,
     destructive: Boolean = false,
     modifier: Modifier = Modifier,
+    /** One-of-N choice: a radio button instead of a checkbox. */
+    radio: Boolean = false,
 ) {
     var focused by remember { mutableStateOf(false) }
+    // D-pad OK fires only on a KeyUp whose KeyDown this row also saw. The
+    // release of the long press that opened a row menu arrives as a bare
+    // KeyUp (its KeyDown went to the launching row), so it cannot pick the
+    // first item (same latch as TvActionMenuDialog).
+    var okLatched by remember { mutableStateOf(false) }
     Row(
         modifier
             .fillMaxWidth()
-            .onFocusChanged { focused = it.isFocused }
+            .onFocusChanged {
+                focused = it.isFocused
+                if (!it.isFocused) okLatched = false
+            }
+            .onPreviewKeyEvent { ev ->
+                val isOk = ev.key == Key.DirectionCenter || ev.key == Key.Enter || ev.key == Key.NumPadEnter
+                if (!isOk) return@onPreviewKeyEvent false
+                when (ev.type) {
+                    KeyEventType.KeyDown -> { if (ev.nativeKeyEvent.repeatCount == 0) okLatched = true; true }
+                    KeyEventType.KeyUp -> {
+                        val latched = okLatched
+                        okLatched = false
+                        if (latched) onClick()
+                        true
+                    }
+                    else -> false
+                }
+            }
             .settingsRowCard(focused)
             .clickable(onClick = onClick)
             .padding(horizontal = 12.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (checked != null) {
-            Checkbox(checked = checked, onCheckedChange = null)
+            if (radio) androidx.compose.material3.RadioButton(
+                selected = checked, onClick = null,
+                colors = androidx.compose.material3.RadioButtonDefaults.colors(selectedColor = MaterialTheme.colorScheme.primary),
+            ) else Checkbox(checked = checked, onCheckedChange = null)
             Spacer(Modifier.size(8.dp))
         }
         Text(
             label,
             style = MaterialTheme.typography.bodyLarge,
-            color = if (destructive) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurface,
+            color = when { destructive -> MaterialTheme.colorScheme.error; checked == true -> MaterialTheme.colorScheme.primary; else -> MaterialTheme.colorScheme.onSurface },
         )
     }
 }
@@ -559,7 +608,7 @@ fun ChannelProfilesDialog(
             { error = it.message ?: "Could not load channel profiles" },
         )
     }
-    AlertDialog(
+    com.aeriotv.android.ui.settings.SettingsAlertDialog(
         onDismissRequest = { onClose(null) },
         title = { Text("Channel Profiles") },
         text = {

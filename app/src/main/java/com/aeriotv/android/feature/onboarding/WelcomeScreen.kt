@@ -1,17 +1,13 @@
 package com.aeriotv.android.feature.onboarding
 
-import com.aeriotv.android.ui.theme.decorSecondary
-import com.aeriotv.android.ui.scale.subtext
-import com.aeriotv.android.ui.theme.textAccent
-import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.Image
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -19,477 +15,351 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CloudOff
-import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.CloudSync
 import androidx.compose.material.icons.filled.Key
-import androidx.compose.material.icons.filled.Tv
-import androidx.compose.material.icons.outlined.Hub
-import androidx.compose.material.icons.outlined.Wifi
+import androidx.compose.material.icons.filled.PhoneAndroid
+import androidx.compose.material.icons.outlined.Dns
+import androidx.compose.material.icons.outlined.QrCodeScanner
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.material.icons.outlined.Circle
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
+import com.aeriotv.android.ui.settings.dpadFocusRing
 import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.drawWithContent
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.BlendMode
-import androidx.compose.ui.graphics.Brush
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.CompositingStrategy
-import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.ui.layout.ContentScale
+import com.aeriotv.android.R
 import androidx.compose.ui.res.painterResource
+import androidx.compose.foundation.Image
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import com.aeriotv.android.R
-import com.aeriotv.android.feature.onboarding.components.SourceTypeCard
+import com.aeriotv.android.feature.onboarding.components.OnboardingCard
+import com.aeriotv.android.feature.onboarding.components.OnboardingSectionLabel
+import com.aeriotv.android.feature.onboarding.components.SkipPill
+import com.aeriotv.android.feature.onboarding.components.TvBackHint
+import com.aeriotv.android.ui.scale.subtext
 
 /**
- * Cold-start welcome surface. Mirrors iOS App Store screenshot IMG_1076: AerioTV
- * brand block + supported source types + Sync / Detect-Home-WiFi info cards +
- * "Connect a Server" CTA + "Skip for now" link.
+ * Cold-start welcome (onboarding redesign 2026-10-29): wordmark, headline,
+ * START HERE (TV: Set up from your phone first, accent-outlined, then Connect a Server;
+ * phone and tablet: Connect a Server only, QR scanning lives on Connect a Server),
+ * KEEP YOUR DEVICES IN SYNC (Google Drive, Dispatcharr), then Skip directly
+ * under the sync rows so it is one D-pad press from the last row.
  *
- * Layout adapts to viewport: a short-but-wide screen (Android TV at 960dp x
- * 540dp, tablets in landscape, foldables unfolded) switches to a two-column
- * presentation so the CTA stays above the fold and the user can reach it with
- * a D-pad without scrolling. Portrait phones get the original vertical stack.
+ * Phone: single column. Tablet and large foldables: two columns, brand left,
+ * cards right. Android TV: two columns, the first card takes focus.
  */
 @Composable
 fun WelcomeScreen(
     onConnectServer: () -> Unit,
     onSkip: () -> Unit,
-    /**
-     * Optional Sign-in-with-Google handler. When provided, a pill appears
-     * between Connect-a-Server and Skip on the welcome screen so the user
-     * can authenticate Drive Sync up front instead of being routed back to
-     * Settings later. Setting this null hides the row entirely (e.g. on
-     * builds that ship without a Google Cloud OAuth client ID baked in).
-     */
-    onSignInWithGoogle: (() -> Unit)? = null,
+    /** Shows the "Sync with Google Drive" card (sign-in turns Drive on and restores a backup). */
+    showDrive: Boolean = false,
     googleSignInInProgress: Boolean = false,
-    /** Signed-in Google account, shown on the sync card in place of the chevron. */
+    /** Signed-in Google account, shown on the sync row. */
     googleSignedInEmail: String? = null,
-    /** "Sync via Dispatcharr": opens the Direct Connect form, sync turns on after the connect. */
-    onSyncViaDispatcharr: (() -> Unit)? = null,
+    /** Shows the "Sync with Dispatcharr" card (Direct Connect form, sync on after the connect). */
+    showDispatcharr: Boolean = false,
+    /**
+     * Continue under the sync cards (Logan, 2026-10-30): the cards only toggle
+     * selection; this runs the chain for the selection (see WelcomeSyncChain).
+     */
+    onContinueSync: (drive: Boolean, dispatcharr: Boolean) -> Unit = { _, _ -> },
+    /** TV only: "Set up from your phone" (docs/DeviceSetupHandoff.md). Null hides it. */
+    onSetUpFromPhone: (() -> Unit)? = null,
 ) {
     val config = LocalConfiguration.current
     val isTv = com.aeriotv.android.feature.livetv.rememberLiveTvFormFactor().isTv
-    // Two-column when the viewport is meaningfully wider than tall (tablet
-    // landscape, foldable unfolded). TV is excluded: it uses the centered
-    // single column to mirror the tvOS welcome layout.
     val twoColumn = !isTv && config.screenWidthDp >= 720 && config.screenHeightDp < 720
-
-    if (twoColumn) WelcomeTwoColumn(onConnectServer, onSkip, onSignInWithGoogle, googleSignInInProgress, googleSignedInEmail, onSyncViaDispatcharr)
-    else WelcomeSingleColumn(onConnectServer, onSkip, onSignInWithGoogle, googleSignInInProgress, googleSignedInEmail, onSyncViaDispatcharr)
+    val content = WelcomeContent(
+        isTv = isTv,
+        onConnectServer = onConnectServer,
+        onSkip = onSkip,
+        showDrive = showDrive,
+        googleSignInInProgress = googleSignInInProgress,
+        googleSignedInEmail = googleSignedInEmail,
+        showDispatcharr = showDispatcharr,
+        onContinueSync = onContinueSync,
+        onFastest = if (isTv) onSetUpFromPhone else null,
+    )
+    // TV: Welcome is the top of onboarding, and Back never closes the app.
+    BackHandler(enabled = isTv) { }
+    Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)) {
+        when {
+            isTv -> WelcomeTv(content)
+            twoColumn -> WelcomeTwoColumn(content)
+            else -> WelcomeSingleColumn(content)
+        }
+    }
 }
 
+private class WelcomeContent(
+    val isTv: Boolean,
+    val onConnectServer: () -> Unit,
+    val onSkip: () -> Unit,
+    val showDrive: Boolean,
+    val googleSignInInProgress: Boolean,
+    val googleSignedInEmail: String?,
+    val showDispatcharr: Boolean,
+    val onContinueSync: (Boolean, Boolean) -> Unit,
+    val onFastest: (() -> Unit)?,
+)
+
 @Composable
-private fun WelcomeSingleColumn(
-    onConnectServer: () -> Unit,
-    onSkip: () -> Unit,
-    onSignInWithGoogle: (() -> Unit)?,
-    googleSignInInProgress: Boolean,
-    googleSignedInEmail: String?,
-    onSyncViaDispatcharr: (() -> Unit)?,
-) {
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background),
-    ) {
-        WelcomeAmbientOrbs(modifier = Modifier.fillMaxSize())
-        // Mirrors the tvOS WelcomeView: a single centered column, brand on top,
-        // the three supported source types, ONE Sync card, a Connect-a-Server
-        // row, then Skip. Sized to fit a 1080p Android TV (~540dp tall, half
-        // tvOS's 1080pt logical height) without scrolling. Centered so it sits
-        // balanced; verticalScroll is only a last-ditch fallback for an
-        // unusually short viewport.
+private fun WelcomeSingleColumn(c: WelcomeContent) {
+    // Logan, 2026-10-29: the logo floats centered between the status bar and
+    // the headline; the headline, cards, and Skip sit in the lower part of
+    // the screen. Weights only apply when there is room; on a short screen
+    // the band collapses to a fixed gap and the column scrolls.
+    BoxWithConstraints(Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.systemBars)) {
+        val tall = maxHeight >= 640.dp
         Column(
             modifier = Modifier
-                .align(Alignment.TopCenter)
-                .fillMaxHeight()
-                .widthIn(max = 620.dp)
+                .widthIn(max = 560.dp)
                 .fillMaxWidth()
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 24.dp, vertical = 16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center,
+                .align(Alignment.TopCenter)
+                .then(if (tall) Modifier.fillMaxHeight() else Modifier.verticalScroll(rememberScrollState()))
+                .padding(horizontal = 20.dp, vertical = 28.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            BrandBlock()
-            Spacer(Modifier.height(22.dp))
-            SupportedTypesGroup(alignStart = false)
-            Spacer(Modifier.height(22.dp))
-            SyncCard(inProgress = googleSignInInProgress, signedInEmail = googleSignedInEmail, onClick = onSignInWithGoogle)
-            if (onSignInWithGoogle != null) Spacer(Modifier.height(12.dp))
-            if (onSyncViaDispatcharr != null) {
-                DispatcharrSyncCard(onClick = onSyncViaDispatcharr)
-                Spacer(Modifier.height(12.dp))
+            if (tall) {
+                Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) { WelcomeLogo() }
+            } else {
+                Spacer(Modifier.height(24.dp))
+                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { WelcomeLogo() }
+                Spacer(Modifier.height(24.dp))
             }
-            ConnectServerRow(onClick = onConnectServer)
-            Spacer(Modifier.height(4.dp))
-            SkipRow(onSkip = onSkip)
+            WelcomeHeadline("Welcome.\nLet's set up your content.")
+            Spacer(Modifier.height(12.dp))
+            StartHereSection(c)
+            Spacer(Modifier.height(6.dp))
+            SyncSection(c, sideBySide = false, skipLine = PHONE_SKIP)
+            if (tall) Spacer(Modifier.weight(0.45f))
         }
     }
 }
 
 @Composable
-private fun WelcomeTwoColumn(
-    onConnectServer: () -> Unit,
-    onSkip: () -> Unit,
-    onSignInWithGoogle: (() -> Unit)?,
-    googleSignInInProgress: Boolean,
-    googleSignedInEmail: String?,
-    onSyncViaDispatcharr: (() -> Unit)?,
-) {
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background),
-    ) {
-        WelcomeAmbientOrbs(modifier = Modifier.fillMaxSize())
-        WelcomeTwoColumnRow(onConnectServer, onSkip, onSignInWithGoogle, googleSignInInProgress, googleSignedInEmail, onSyncViaDispatcharr)
-    }
-}
-
-@Composable
-private fun WelcomeTwoColumnRow(
-    onConnectServer: () -> Unit,
-    onSkip: () -> Unit,
-    onSignInWithGoogle: (() -> Unit)?,
-    googleSignInInProgress: Boolean,
-    googleSignedInEmail: String?,
-    onSyncViaDispatcharr: (() -> Unit)?,
-) {
+private fun WelcomeTwoColumn(c: WelcomeContent) {
     Row(
-        modifier = Modifier
-            .fillMaxSize()
-            .padding(horizontal = 48.dp, vertical = 24.dp),
+        modifier = Modifier.fillMaxSize().windowInsetsPadding(WindowInsets.systemBars).padding(horizontal = 48.dp, vertical = 24.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(40.dp),
     ) {
-        // Left column: brand + supported source types. Centered vertically.
         Column(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxHeight()
-                .verticalScroll(rememberScrollState()),
+            modifier = Modifier.weight(1f).fillMaxHeight().verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.Center,
-            horizontalAlignment = Alignment.Start,
         ) {
-            BrandBlock(alignStart = true)
-            Spacer(Modifier.height(20.dp))
-            SupportedTypesGroup(alignStart = true)
+            WelcomeBrand(headline = "Welcome.\nLet's get connected.")
         }
-        // Right column: info cards + CTAs. The Connect button sits in the
-        // viewport center on TV so the focus ring lands on it at cold start,
-        // which is what a remote-driven flow wants.
         Column(
-            modifier = Modifier
-                .weight(1f)
-                .fillMaxHeight()
-                .widthIn(max = 540.dp)
-                .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.Center,
+            modifier = Modifier.weight(1f).widthIn(max = 540.dp).fillMaxHeight().verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(10.dp, Alignment.CenterVertically),
         ) {
-            SyncCard(inProgress = googleSignInInProgress, signedInEmail = googleSignedInEmail, onClick = onSignInWithGoogle)
-            if (onSignInWithGoogle != null) Spacer(Modifier.height(12.dp))
-            if (onSyncViaDispatcharr != null) {
-                DispatcharrSyncCard(onClick = onSyncViaDispatcharr)
-                Spacer(Modifier.height(12.dp))
-            }
-            ConnectServerRow(onClick = onConnectServer)
+            StartHereSection(c)
+            Spacer(Modifier.height(6.dp))
+            SyncSection(c, sideBySide = false, skipLine = PHONE_SKIP)
+        }
+    }
+}
+
+/** 960 x 540 dp: brand and the Back hint left, the cards right, no scrolling. */
+@Composable
+private fun WelcomeTv(c: WelcomeContent) {
+    Row(
+        modifier = Modifier.fillMaxSize().padding(horizontal = 48.dp, vertical = 27.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(40.dp),
+    ) {
+        Column(Modifier.weight(0.42f), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            WelcomeBrand(headline = "Welcome.\nLet's get your TV connected.")
+            Spacer(Modifier.height(6.dp))
+            TvBackHint("Back returns to the previous step at any time")
+        }
+        Column(
+            modifier = Modifier.weight(0.58f).verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            StartHereSection(c)
             Spacer(Modifier.height(4.dp))
-            SkipRow(onSkip = onSkip)
+            SyncSection(
+                c,
+                sideBySide = true,
+                skipLine = "Look around first. You can connect a server any time from Settings.",
+                skipCentered = false,
+            )
         }
     }
 }
 
 @Composable
-private fun BrandBlock(alignStart: Boolean = false) {
-    Column(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalAlignment = if (alignStart) Alignment.Start else Alignment.CenterHorizontally,
-    ) {
-        BrandLogo()
-        Spacer(Modifier.height(10.dp))
+private fun WelcomeLogo(modifier: Modifier = Modifier) {
+    // The logo with the name (Logan, 2026-10-29): the TV banner's wordmark
+    // keyed onto a transparent background (drawable-nodpi).
+    Image(
+        painter = painterResource(id = R.drawable.aerio_wordmark),
+        contentDescription = "AerioTV",
+        contentScale = ContentScale.Fit,
+        modifier = modifier.fillMaxWidth(0.8f).heightIn(max = 64.dp),
+    )
+}
+
+@Composable
+private fun WelcomeHeadline(headline: String) {
+    Text(
+        headline,
+        style = MaterialTheme.typography.headlineSmall,
+        fontWeight = FontWeight.Bold,
+        color = MaterialTheme.colorScheme.onBackground,
+    )
+}
+
+@Composable
+private fun WelcomeBrand(headline: String) {
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(24.dp)) {
+        WelcomeLogo(Modifier.align(Alignment.CenterHorizontally))
+        WelcomeHeadline(headline)
+    }
+}
+
+@Composable
+private fun StartHereSection(c: WelcomeContent) {
+    val firstFocus = remember { FocusRequester() }
+    if (c.isTv) LaunchedEffect(Unit) { runCatching { firstFocus.requestFocus() } }
+    OnboardingSectionLabel("Start here")
+    val fastest = c.onFastest
+    if (fastest != null) {
+        if (c.isTv) {
+            OnboardingCard(
+                icon = Icons.Filled.PhoneAndroid,
+                title = "Set up from your phone",
+                subtitle = "Fastest. On your phone, scan the code on the next screen, tap the banner on the " +
+                    "Live TV tab, or navigate to Settings. Your playlist, profiles, and preferences come over in one step.",
+                onClick = fastest,
+                highlighted = true,
+                compact = true,
+                modifier = Modifier.focusRequester(firstFocus),
+            )
+        } else {
+            OnboardingCard(
+                icon = Icons.Outlined.QrCodeScanner,
+                title = "Scan a QR code",
+                subtitle = "Fastest. Scan the QR code from the Users page in Dispatcharr, or import it from Photos.",
+                onClick = fastest,
+                highlighted = true,
+            )
+        }
+    }
+    OnboardingCard(
+        icon = Icons.Outlined.Dns,
+        title = "Connect a Server",
+        subtitle = if (c.isTv) "Enter the details yourself. Dispatcharr, Xtream Codes, or an M3U playlist with an optional EPG."
+        else "Dispatcharr, Xtream Codes, or an M3U playlist with an optional EPG.",
+        onClick = c.onConnectServer,
+        highlighted = fastest == null,
+        compact = c.isTv,
+        modifier = if (fastest == null) Modifier.focusRequester(firstFocus) else Modifier,
+    )
+}
+
+/**
+ * Both cards are selectable (checkmark plus accent outline, both may be on);
+ * the D-pad focus ring stays separate from selection. A filled Continue shows
+ * once one is selected and replaces Skip for now; with nothing selected Skip stays.
+ */
+@Composable
+private fun SyncSection(c: WelcomeContent, sideBySide: Boolean, skipLine: String, skipCentered: Boolean = true) {
+    // A Cancel on the setup prompt comes back with the last selections kept.
+    var driveSelected by rememberSaveable { mutableStateOf(WelcomeSyncChain.kept?.first ?: false) }
+    var dispatcharrSelected by rememberSaveable { mutableStateOf(WelcomeSyncChain.kept?.second ?: false) }
+    if (c.showDrive || c.showDispatcharr) {
+        OnboardingSectionLabel("Keep your devices in sync")
         Text(
-            text = "AerioTV",
-            style = MaterialTheme.typography.headlineMedium,
-            color = MaterialTheme.colorScheme.onBackground,
-            fontWeight = FontWeight.Bold,
-        )
-        Spacer(Modifier.height(2.dp))
-        Text(
-            text = "Your IPTV & Media Hub",
-            style = MaterialTheme.typography.titleMedium,
-            color = MaterialTheme.colorScheme.textAccent,
-        )
-        Spacer(Modifier.height(2.dp))
-        Text(
-            text = "Android TV · Phone · Tablet",
+            "Pick one or both, then Continue.",
             style = MaterialTheme.typography.bodySmall.subtext(),
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }
-}
-
-@Composable
-private fun SupportedTypesGroup(alignStart: Boolean = false) {
-    Column(modifier = Modifier.fillMaxWidth()) {
-        SupportedTypeRow(icon = Icons.Filled.Key, label = "Dispatcharr Direct Connect", alignStart = alignStart)
-        SupportedTypeRow(icon = Icons.Filled.Tv, label = "Xtream Codes", alignStart = alignStart)
-        SupportedTypeRow(icon = Icons.Filled.Description, label = "M3U + EPG", alignStart = alignStart)
+    val selectMark: @Composable (Boolean) -> Unit = { on ->
+        if (on) Icon(Icons.Filled.CheckCircle, contentDescription = "Selected", tint = MaterialTheme.colorScheme.primary)
+        else Icon(Icons.Outlined.Circle, contentDescription = "Not selected", tint = MaterialTheme.colorScheme.onSurfaceVariant)
     }
-}
-
-/**
- * Sync opt-in card, the Drive analog of the tvOS WelcomeView iCloud card: one
- * card with an On/Off status pill. On the welcome screen sync is always Off
- * (signing in transitions onboarding to the restore-progress screen), so the
- * card is the tap target that launches Google sign-in. Hidden entirely when
- * the build ships without an OAuth client id (onClick null).
- */
-@Composable
-private fun SyncCard(inProgress: Boolean, signedInEmail: String?, onClick: (() -> Unit)?) {
-    if (onClick == null) return
-    SourceTypeCard(
-        modifier = Modifier
-            .clip(RoundedCornerShape(16.dp))
-            .clickable(enabled = !inProgress, onClick = onClick),
-        icon = Icons.Filled.CloudOff,
-        title = "Sync via Google Account",
-        subtitle = if (signedInEmail != null) "Signed in as $signedInEmail"
-        else "Sign in to mirror playlists, watch progress, reminders, and preferences across your devices.",
-        trailing = {
-            when {
-                inProgress -> Text(
-                    text = "...",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onBackground,
-                )
-                signedInEmail != null -> Icon(
-                    imageVector = Icons.Filled.CheckCircle,
-                    contentDescription = "Signed in",
-                    tint = MaterialTheme.colorScheme.primary,
-                )
-                else -> Icon(
-                    imageVector = Icons.Filled.ChevronRight,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        },
-    )
-}
-
-/** Dispatcharr Sync entry: the Direct Connect form, then sync turns on by itself. */
-@Composable
-private fun DispatcharrSyncCard(onClick: () -> Unit) {
-    SourceTypeCard(
-        modifier = Modifier
-            .clip(RoundedCornerShape(16.dp))
-            .clickable(onClick = onClick),
-        icon = Icons.Filled.Key,
-        title = "Sync via Dispatcharr",
-        subtitle = "Connect your Dispatcharr server to keep favorites, progress, reminders, and preferences on it for every profile and device.",
-        trailing = {
-            Icon(
-                imageVector = Icons.Filled.ChevronRight,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        },
-    )
-}
-
-/** "Connect a Server" as a single-line row with a trailing chevron, mirroring
- *  the tvOS WelcomeView nav row (not a full-bleed gradient button). */
-@Composable
-private fun ConnectServerRow(onClick: () -> Unit) {
-    SourceTypeCard(
-        modifier = Modifier
-            .clip(RoundedCornerShape(16.dp))
-            .clickable(onClick = onClick),
-        icon = Icons.Outlined.Hub,
-        title = "Connect a Server",
-        subtitle = null,
-        trailing = {
-            Icon(
-                imageVector = Icons.Filled.ChevronRight,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        },
-    )
-}
-
-@Composable
-private fun SkipRow(onSkip: () -> Unit) {
-    TextButton(onClick = onSkip) {
-        Text(
-            text = "Skip for now",
-            color = MaterialTheme.colorScheme.textAccent,
-            style = MaterialTheme.typography.bodyMedium,
+    val googleRow: @Composable (Modifier) -> Unit = { m ->
+        if (c.showDrive) OnboardingCard(
+            icon = Icons.Filled.CloudSync,
+            title = "Sync with Google Drive",
+            subtitle = c.googleSignedInEmail?.let { "Signed in as $it" }
+                ?: if (c.isTv) "Turns on sync from here on. If you already have a backup, it restores it too."
+                else "Turns on sync. Restores a backup if you have one.",
+            onClick = { driveSelected = !driveSelected },
+            enabled = !c.googleSignInInProgress,
+            compact = c.isTv,
+            highlighted = driveSelected,
+            trailing = if (c.googleSignInInProgress) ({ Text("...", style = MaterialTheme.typography.titleMedium) })
+            else ({ selectMark(driveSelected) }),
+            modifier = m.semantics { selected = driveSelected },
         )
     }
-}
-
-@Composable
-private fun BrandLogo() {
-    // Mirrors iOS WelcomeView's `.shadow(color: aerioCyan @ 0.45, radius: 20, y: 8)`
-    // under the logo. Compose's shadow modifier only renders elevation drop-shadows,
-    // not colored glows, so we draw a soft radial gradient halo behind the logo
-    // bitmap instead, same visual effect, API-agnostic.
-    val accent = MaterialTheme.colorScheme.primary
-    // Sized to read as a hero logo while still letting the whole stacked page
-    // fit a ~540dp-tall Android TV without scrolling.
-    val haloSize = 84.dp
-    val imageSize = 56.dp
-    Box(
-        modifier = Modifier.size(haloSize),
-        contentAlignment = Alignment.Center,
-    ) {
-        Canvas(modifier = Modifier.size(haloSize)) {
-            drawCircle(
-                brush = Brush.radialGradient(
-                    colorStops = arrayOf(
-                        0.0f to accent.copy(alpha = 0.55f),
-                        0.35f to accent.copy(alpha = 0.28f),
-                        0.7f to accent.copy(alpha = 0.06f),
-                        1.0f to Color.Transparent,
-                    ),
-                    center = Offset(size.width / 2f, size.height / 2f + 8.dp.toPx()),
-                    radius = size.minDimension / 2f,
-                ),
-                center = Offset(size.width / 2f, size.height / 2f + 8.dp.toPx()),
-                radius = size.minDimension / 2f,
-            )
+    val dispatcharrRow: @Composable (Modifier) -> Unit = { m ->
+        if (c.showDispatcharr) OnboardingCard(
+            icon = Icons.Filled.Key,
+            title = "Sync with Dispatcharr",
+            subtitle = if (c.isTv) "Connects your server and turns on sync for favorites, progress, and settings."
+            else "Connects your server and turns on sync.",
+            onClick = { dispatcharrSelected = !dispatcharrSelected },
+            compact = c.isTv,
+            highlighted = dispatcharrSelected,
+            trailing = { selectMark(dispatcharrSelected) },
+            modifier = m.semantics { selected = dispatcharrSelected },
+        )
+    }
+    if (sideBySide) {
+        // Dispatcharr first, Google Drive second (Logan, 2026-10-29).
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (c.showDispatcharr) dispatcharrRow(Modifier.weight(1f))
+            if (c.showDrive) googleRow(Modifier.weight(1f))
         }
-        Image(
-            painter = painterResource(id = R.drawable.aerio_logo),
-            contentDescription = null,
-            modifier = Modifier.size(imageSize),
-        )
+    } else {
+        dispatcharrRow(Modifier)
+        googleRow(Modifier)
     }
-}
-
-/**
- * Two soft, blurred accent orbs in opposite corners, mirrors iOS WelcomeView
- * lines 22-35 where SwiftUI uses `Circle().blur(radius: 80)` on top of the
- * navy background. Compose's Modifier.blur is API 31+, so the same look here
- * comes from radial gradients with carefully tuned color stops.
- */
-@Composable
-private fun WelcomeAmbientOrbs(modifier: Modifier = Modifier) {
-    val primary = MaterialTheme.colorScheme.primary
-    val secondary = MaterialTheme.colorScheme.secondary
-    Canvas(modifier = modifier) {
-        // Top-left orb (cyan)
-        val tlCenter = Offset(-50.dp.toPx(), -30.dp.toPx())
-        val tlRadius = 360.dp.toPx()
-        drawCircle(
-            brush = Brush.radialGradient(
-                colorStops = arrayOf(
-                    0.0f to primary.copy(alpha = 0.18f),
-                    0.4f to primary.copy(alpha = 0.10f),
-                    0.75f to primary.copy(alpha = 0.03f),
-                    1.0f to Color.Transparent,
-                ),
-                center = tlCenter,
-                radius = tlRadius,
+    val drive = driveSelected && c.showDrive
+    val dispatcharr = dispatcharrSelected && c.showDispatcharr
+    if (drive || dispatcharr) {
+        Button(
+            onClick = { if (!c.googleSignInInProgress) c.onContinueSync(drive, dispatcharr) },
+            modifier = Modifier.fillMaxWidth().heightIn(min = if (c.isTv) 44.dp else 54.dp)
+                .dpadFocusRing(RoundedCornerShape(50), onFilled = true),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = MaterialTheme.colorScheme.primary,
+                contentColor = MaterialTheme.colorScheme.onPrimary,
             ),
-            center = tlCenter,
-            radius = tlRadius,
-        )
-        // Bottom-right orb (teal)
-        val brCenter = Offset(size.width + 50.dp.toPx(), size.height - 80.dp.toPx())
-        val brRadius = 320.dp.toPx()
-        drawCircle(
-            brush = Brush.radialGradient(
-                colorStops = arrayOf(
-                    0.0f to secondary.copy(alpha = 0.16f),
-                    0.4f to secondary.copy(alpha = 0.08f),
-                    0.75f to secondary.copy(alpha = 0.02f),
-                    1.0f to Color.Transparent,
-                ),
-                center = brCenter,
-                radius = brRadius,
-            ),
-            center = brCenter,
-            radius = brRadius,
-        )
+        ) { Text("Continue", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold) }
+    } else {
+        SkipPill(line = skipLine, onSkip = c.onSkip, centered = skipCentered)
     }
 }
 
-/** Linear cyan→teal gradient matching iOS LinearGradient.accentGradient
- * (top-leading to bottom-trailing). */
-@Composable
-private fun accentBrush(): Brush = Brush.linearGradient(
-    colors = listOf(
-        MaterialTheme.colorScheme.primary,
-        MaterialTheme.colorScheme.secondary,
-    ),
-)
-
-/** Icon filled with a Brush instead of a solid tint, mirrors iOS FeaturePill's
- * `.foregroundStyle(LinearGradient.accentGradient)` on the SF Symbol. */
-@Composable
-private fun GradientIcon(
-    imageVector: ImageVector,
-    brush: Brush,
-    modifier: Modifier = Modifier,
-) {
-    Box(modifier = modifier.graphicsLayer(compositingStrategy = CompositingStrategy.Offscreen)) {
-        Icon(
-            imageVector = imageVector,
-            contentDescription = null,
-            tint = Color.White,
-            modifier = Modifier
-                .fillMaxSize()
-                .drawWithContent {
-                    drawContent()
-                    drawRect(brush = brush, blendMode = BlendMode.SrcIn)
-                },
-        )
-    }
-}
-
-@Composable
-private fun SupportedTypeRow(icon: ImageVector, label: String, alignStart: Boolean = false) {
-    val gradient = accentBrush()
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 6.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(
-            10.dp,
-            if (alignStart) Alignment.Start else Alignment.CenterHorizontally,
-        ),
-    ) {
-        GradientIcon(
-            imageVector = icon,
-            brush = gradient,
-            modifier = Modifier.size(18.dp),
-        )
-        Text(
-            text = label,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onBackground,
-        )
-    }
-}
+private const val PHONE_SKIP = "You can connect a server any time from Settings."

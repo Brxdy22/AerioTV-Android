@@ -23,6 +23,7 @@ import com.aeriotv.android.core.playback.AerioMediaPlaybackService
 import kotlinx.coroutines.launch
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.collectAsState
@@ -143,6 +144,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        com.aeriotv.android.core.app.LaunchWorkHold.noteKey()
         // Android#114: the Learn Button dialog takes the next learnable press.
         com.aeriotv.android.core.remote.LearnedButtons.onCapture?.let { capture ->
             if (com.aeriotv.android.core.remote.LearnedButtons.isLearnable(event.keyCode)) {
@@ -638,6 +640,10 @@ class MainActivity : ComponentActivity() {
         val data = intent?.data ?: return
         if (!data.scheme.equals("aeriotv", ignoreCase = true)) return
         val host = data.host?.lowercase() ?: return
+        if (host == "setup") {
+            deepLinkTarget.value = DeepLinkTarget.DeviceSetup(data.toString())
+            return
+        }
         val path = data.pathSegments?.firstOrNull()?.takeIf { it.isNotBlank() }
             // Screenshot deep link: a bare aeriotv://settings means the root.
             ?: (if (host == "settings") "root" else return)
@@ -779,6 +785,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         com.aeriotv.android.feature.player.DisplayFrameRateMatcher.onRateRequested = null
+        com.aeriotv.android.feature.player.DisplayFrameRateMatcher.onVodDetached = null
         // Explicit app exit (Back -> Exit dialog -> finish) must stop playback.
         // The ExoPlayer holder + media session are process-scoped singletons, so
         // without this they keep decoding audio after the activity is gone (the
@@ -945,7 +952,9 @@ class MainActivity : ComponentActivity() {
         // Android#134: gated by Match Frame Rate alone. The mode pick below
         // keeps the current physical size, so this never changes resolution.
         if (!matchFrameRateEnabled || !isTelevisionDevice()) return
-        val player = resMatchPlayer ?: return
+        // The player the matcher measured (VOD builds its own), else live.
+        val player = com.aeriotv.android.feature.player.DisplayFrameRateMatcher.attachedPlayer
+            ?: resMatchPlayer ?: return
         if (!player.playWhenReady) return
         val disp = currentDisplay() ?: return
         val current = disp.mode ?: return
@@ -1120,6 +1129,14 @@ class MainActivity : ComponentActivity() {
         // class; pick a same-size display mode at that rate when needed.
         com.aeriotv.android.feature.player.DisplayFrameRateMatcher.onRateRequested = { rate ->
             runOnUiThread { onContentRateRequested(rate) }
+        }
+        com.aeriotv.android.feature.player.DisplayFrameRateMatcher.onVodDetached = {
+            // VOD left: drop its rate pin unless live playback is active.
+            val live = resMatchPlayer
+            if (live == null || !live.playWhenReady || live.mediaItemCount == 0) {
+                lastContentRate = 0f
+                restoreDisplayMode()
+            }
         }
         enableEdgeToEdge()
         // Remote Control initiative: keep the button map hot for
@@ -1418,10 +1435,18 @@ class MainActivity : ComponentActivity() {
                 trueBlack = trueBlack,
             ) {
                 Surface(
-                    modifier = Modifier.fillMaxSize(),
+                    // Root key interceptor for the staged resume: every key
+                    // that reaches the Compose tree (D-pad focus moves
+                    // included) marks input as active. dispatchKeyEvent
+                    // below covers the activity window as well.
+                    modifier = Modifier.fillMaxSize().onPreviewKeyEvent {
+                        com.aeriotv.android.core.app.LaunchWorkHold.noteKey()
+                        false
+                    },
                     color = MaterialTheme.colorScheme.background
                 ) {
                     NotificationPermissionGate()
+                    com.aeriotv.android.feature.qrscan.ImportSourceDeletePrompt()
                     SplashGate {
                         // Phase 165/167: PersistentMpvWindow lives as a
                         // SIBLING of NavHost inside an outer Box. The
@@ -1495,12 +1520,18 @@ class MainActivity : ComponentActivity() {
                             // on Android TV (issue #16). Sibling of the NavHost so it
                             // overlays every screen. Cancel (appended by the dialog,
                             // initial D-pad focus) dismisses; Exit finishes.
+                            // Exit Prompt Starts on Exit (Remote Control settings) opens with
+                            // focus on Exit instead; the per-row OK latch still
+                            // ignores the release of the press that opened it.
+                            val exitFocusExit by appPreferences.exitDialogFocusExit
+                                .collectAsState(initial = false)
                             if (showExitConfirm.value) {
                                 val exitGuard = rememberTvMenuGuard()
                                 TvActionMenuDialog(
                                     title = "Exit AerioTV?",
                                     guard = exitGuard,
-                                    focusCancel = true,
+                                    focusCancel = !exitFocusExit,
+                                    focusFirstAction = exitFocusExit,
                                     onDismiss = {
                                         // The dialog calls onDismiss before an action's
                                         // onClick, so decide "cancelled" a frame later.

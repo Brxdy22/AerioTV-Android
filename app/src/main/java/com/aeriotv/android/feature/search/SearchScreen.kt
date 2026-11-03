@@ -22,6 +22,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -41,12 +43,15 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -79,6 +84,12 @@ fun SearchScreen(
     onMovieClick: (uuid: String) -> Unit,
     onSeriesClick: (id: Int) -> Unit,
     /**
+     * GH #162: a result for a program airing NOW opens its channel (the user
+     * searched for something to watch); a future program still jumps to its
+     * guide cell. Null keeps the guide jump for every EPG result.
+     */
+    onPlayChannel: ((channelId: String) -> Unit)? = null,
+    /**
      * Both false when hosted as the TV nav-bar Search TAB (Logan 2026-08-06)
      * rather than a pushed route: there is no screen to pop (the arrow would
      * lie; remote Back still fires [onBack] to return to Live TV), and the
@@ -94,9 +105,22 @@ fun SearchScreen(
     BackHandler { onBack() }
 
     val fieldFocus = remember { FocusRequester() }
+    val chipFocus = remember { FocusRequester() }
     val focusManager = LocalFocusManager.current
-    if (autoFocusField) {
-        LaunchedEffect(Unit) { runCatching { fieldFocus.requestFocus() } }
+    // GH #162: restore the list position and the opened row's focus when the
+    // screen comes back from a detail or player route.
+    val listState = rememberLazyListState(viewModel.listIndex, viewModel.listOffset)
+    val restoreKey = remember { viewModel.lastOpenedKey }
+    val restoreFocus = remember { FocusRequester() }
+    LaunchedEffect(Unit) {
+        if (restoreKey != null && state.results.any { it.key == restoreKey }) {
+            android.util.Log.i("AerioSearch", "[SEARCH] restore results=${state.results.size} index=${viewModel.listIndex}")
+            // One frame so the restored row is laid out before focusing it.
+            kotlinx.coroutines.delay(50)
+            runCatching { restoreFocus.requestFocus() }
+        } else if (autoFocusField) {
+            runCatching { fieldFocus.requestFocus() }
+        }
     }
 
     Column(
@@ -124,6 +148,7 @@ fun SearchScreen(
                 modifier = Modifier
                     .weight(1f)
                     .focusRequester(fieldFocus)
+                    .onFocusChanged { if (it.isFocused) com.aeriotv.android.ui.tv.TvFocusTrace.focus("search:field") }
                     // On Android TV the field otherwise traps D-pad DOWN, so once
                     // the on-screen keyboard is dismissed there is no way to reach
                     // the scope chips / results with the remote. Hand focus down
@@ -132,7 +157,19 @@ fun SearchScreen(
                         if (event.type == KeyEventType.KeyDown &&
                             event.key == Key.DirectionDown
                         ) {
-                            focusManager.moveFocus(FocusDirection.Down)
+                            // Land on the selected scope chip: a plain moveFocus
+                            // skipped the chip row and dropped into the results
+                            // (Streamer 2026-11-02), leaving scope unreachable.
+                            runCatching { chipFocus.requestFocus() }.isSuccess ||
+                                focusManager.moveFocus(FocusDirection.Down)
+                        } else if (event.type == KeyEventType.KeyDown &&
+                            event.key == Key.DirectionUp
+                        ) {
+                            // The single-line field spends Up on moving the
+                            // cursor home, so the nav bar was unreachable from
+                            // it (Streamer 2026-11-02). Leave the content group;
+                            // its exit lands on the selected tab's pill.
+                            focusManager.moveFocus(FocusDirection.Up)
                         } else {
                             false
                         }
@@ -152,6 +189,8 @@ fun SearchScreen(
                     label = scope.label,
                     selected = scope == state.scope,
                     onClick = { viewModel.onScopeChange(scope) },
+                    focusRequester = if (scope == state.scope) chipFocus else null,
+                    upTarget = fieldFocus,
                 )
             }
         }
@@ -173,17 +212,33 @@ fun SearchScreen(
                 subtitle = "Try a different search term or change the scope filter.",
             )
             else -> LazyColumn(
+                state = listState,
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(vertical = 8.dp, horizontal = 0.dp),
                 verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-                items(state.results, key = { it.key }) { result ->
+                itemsIndexed(state.results, key = { _, it -> it.key }) { index, result ->
                     ResultRow(
                         result = result,
+                        focusRequester = if (result.key == restoreKey) restoreFocus else null,
+                        // Up from the first row lands on the selected scope chip,
+                        // not the nav bar (Streamer 2026-11-02).
+                        upTarget = if (index == 0) chipFocus else null,
+                        traceName = "search:row$index",
                         onClick = {
+                            viewModel.lastOpenedKey = result.key
+                            viewModel.listIndex = listState.firstVisibleItemIndex
+                            viewModel.listOffset = listState.firstVisibleItemScrollOffset
                             when (result) {
-                                is SearchViewModel.Result.Epg ->
-                                    onEpgResult(result.programme.channelId, result.programme.startMillis)
+                                is SearchViewModel.Result.Epg -> {
+                                    val channelId = result.channelRowId
+                                    if (result.isLive && channelId != null && onPlayChannel != null) {
+                                        android.util.Log.i("AerioSearch", "[SEARCH] live result: open channel")
+                                        onPlayChannel(channelId)
+                                    } else {
+                                        onEpgResult(result.programme.channelId, result.programme.startMillis)
+                                    }
+                                }
                                 is SearchViewModel.Result.Movie -> onMovieClick(result.movie.uuid)
                                 is SearchViewModel.Result.Series -> onSeriesClick(result.series.id)
                             }
@@ -196,14 +251,23 @@ fun SearchScreen(
 }
 
 @Composable
-private fun ScopeChip(label: String, selected: Boolean, onClick: () -> Unit) {
+private fun ScopeChip(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    focusRequester: FocusRequester? = null,
+    upTarget: FocusRequester? = null,
+) {
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
+    if (focused) LaunchedEffect(Unit) { com.aeriotv.android.ui.tv.TvFocusTrace.focus("pill:$label") }
     Text(
         text = label,
         style = MaterialTheme.typography.labelLarge,
         color = if (selected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier
+            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+            .then(if (upTarget != null) Modifier.upTo(upTarget) else Modifier)
             .clip(RoundedCornerShape(50))
             .background(
                 if (selected) MaterialTheme.colorScheme.primary
@@ -221,7 +285,13 @@ private fun ScopeChip(label: String, selected: Boolean, onClick: () -> Unit) {
 }
 
 @Composable
-private fun ResultRow(result: SearchViewModel.Result, onClick: () -> Unit) {
+private fun ResultRow(
+    result: SearchViewModel.Result,
+    focusRequester: FocusRequester? = null,
+    upTarget: FocusRequester? = null,
+    traceName: String = "search:row",
+    onClick: () -> Unit,
+) {
     val display = resultDisplay(result)
     val title = display.title
     val subtitle = display.subtitle
@@ -229,6 +299,7 @@ private fun ResultRow(result: SearchViewModel.Result, onClick: () -> Unit) {
     val icon = display.icon
     val interaction = remember { MutableInteractionSource() }
     val focused by interaction.collectIsFocusedAsState()
+    if (focused) LaunchedEffect(Unit) { com.aeriotv.android.ui.tv.TvFocusTrace.focus(traceName) }
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -243,6 +314,8 @@ private fun ResultRow(result: SearchViewModel.Result, onClick: () -> Unit) {
                 if (focused) Modifier.border(2.dp, Color.White, RoundedCornerShape(10.dp))
                 else Modifier,
             )
+            .then(if (focusRequester != null) Modifier.focusRequester(focusRequester) else Modifier)
+            .then(if (upTarget != null) Modifier.upTo(upTarget) else Modifier)
             .clickable(interactionSource = interaction, indication = null, onClick = onClick)
             .padding(vertical = 8.dp, horizontal = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -255,16 +328,32 @@ private fun ResultRow(result: SearchViewModel.Result, onClick: () -> Unit) {
             contentAlignment = Alignment.Center,
         ) {
             if (poster != null) {
-                // EPG rows carry a channel LOGO (any aspect, often wide): fit it
-                // inside the box with breathing room. VOD posters are 2:3 art:
-                // crop-fill the box edge to edge.
+                // EPG rows show the program's guide art when it has one (Logan
+                // 2026-11-02) and fall back to the channel LOGO, also when the
+                // art fails to load. Both fit inside the fixed box so nothing
+                // shifts when the image arrives; the logo keeps its breathing
+                // room. VOD posters are 2:3 art: crop-fill the box edge to edge.
                 if (result is SearchViewModel.Result.Epg) {
-                    AsyncImage(
-                        model = poster,
-                        contentDescription = null,
-                        modifier = Modifier.fillMaxSize().padding(5.dp),
-                        contentScale = ContentScale.Fit,
-                    )
+                    var artFailed by remember(poster) { mutableStateOf(false) }
+                    val showArt = display.programArt && !artFailed
+                    val model = if (showArt) poster else display.fallbackPoster
+                    if (model != null) {
+                        AsyncImage(
+                            model = model,
+                            contentDescription = null,
+                            modifier = Modifier.fillMaxSize()
+                                .then(if (showArt) Modifier else Modifier.padding(5.dp)),
+                            contentScale = ContentScale.Fit,
+                            onError = { if (showArt) artFailed = true },
+                        )
+                    } else {
+                        Icon(
+                            imageVector = icon,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(24.dp),
+                        )
+                    }
                 } else {
                     AsyncImage(
                         model = poster,
@@ -325,6 +414,10 @@ private data class ResultDisplay(
      *  VOD plot (Logan 2026-08-06: results show real content data, not just a
      *  bare title + time). Omitted when the source has none. */
     val detail: String? = null,
+    /** True when [poster] is the program's own guide art (EPG rows). */
+    val programArt: Boolean = false,
+    /** Channel logo shown when the program art is missing or fails to load. */
+    val fallbackPoster: String? = null,
 )
 
 private fun resultDisplay(result: SearchViewModel.Result): ResultDisplay = when (result) {
@@ -353,6 +446,14 @@ private fun resultDisplay(result: SearchViewModel.Result): ResultDisplay = when 
     is SearchViewModel.Result.Epg -> {
         val range = timeFmt().format(Date(result.programme.startMillis)) +
             " - " + timeFmt().format(Date(result.programme.endMillis))
+        // Program art the app already holds, no extra fetch: the art the
+        // guide banner resolved this session (what the program info card opens
+        // with), then the XMLTV / grid program icon the EPG model stores.
+        val programArt = com.aeriotv.android.feature.livetv.grid.cachedPreviewArt(
+            result.programme.dispatcharrProgramId,
+            result.programme.title,
+        )?.takeIf { it.isNotBlank() }
+            ?: result.programme.iconUrl?.takeIf { it.isNotBlank() }
         ResultDisplay(
             title = result.programme.title,
             subtitle = listOfNotNull(
@@ -360,7 +461,9 @@ private fun resultDisplay(result: SearchViewModel.Result): ResultDisplay = when 
                 result.channelName,
                 range,
             ).joinToString("  ·  "),
-            poster = result.channelLogo,
+            poster = programArt ?: result.channelLogo,
+            programArt = programArt != null,
+            fallbackPoster = result.channelLogo,
             icon = if (result.isLive) Icons.Filled.LiveTv else Icons.Filled.CalendarMonth,
             detail = result.programme.description.takeIf { it.isNotBlank() },
         )
@@ -397,3 +500,13 @@ private fun CenterMessage(icon: ImageVector, title: String, subtitle: String? = 
 }
 
 private fun timeFmt() = com.aeriotv.android.core.ui.ClockFormat.short()
+
+/**
+ * D-pad Up moves to [target]. Explicit key handling, not focusProperties: on
+ * the TV shell the content group's exit redirect won over a custom Up target
+ * and sent the first result row to the nav bar (Streamer 2026-11-02).
+ */
+private fun Modifier.upTo(target: FocusRequester): Modifier = onPreviewKeyEvent { e ->
+    e.type == KeyEventType.KeyDown && e.key == Key.DirectionUp &&
+        runCatching { target.requestFocus() }.isSuccess
+}

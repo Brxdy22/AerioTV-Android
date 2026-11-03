@@ -298,7 +298,7 @@ class PlaylistRepository @Inject constructor(
          *  doesn't carry VOD so the field is ignored downstream for it. */
         val vodEnabled: Boolean = true,
         /** Days of already-aired EPG kept for catch-up browsing (task #135). */
-        val epgRetentionDays: Int = 7,
+        val epgRetentionDays: Int = com.aeriotv.android.core.data.db.entity.GUIDE_DAYS_ALL,
         /**
          * Per-playlist Dispatcharr User-Agent (Apple `customUserAgent`).
          * Blank = the app default. Null means "leave whatever the row has",
@@ -1138,6 +1138,30 @@ class PlaylistRepository @Inject constructor(
             .onFailure { Log.w(TAG_CAPS, "account facts reset failed", it) }
     }
 
+    /**
+     * Add-flow DVR access probe for a scanned Dispatcharr key, before any row
+     * exists: reads the same /api/accounts/users/me/ snapshot the capability
+     * probe uses and derives CanManageDvr exactly as a saved row would.
+     * Unknown on any failure (Unknown never hides an affordance).
+     */
+    suspend fun probeDvrManage(baseUrl: String, apiKey: String): CapabilityState {
+        val snap = runCatching { dispatcharrClient.fetchAccountSnapshot(baseUrl.trimEnd('/'), apiKey) }
+            .getOrNull() ?: return CapabilityState.Unknown
+        val caps = com.aeriotv.android.core.data.capability.deriveCapabilities(
+            com.aeriotv.android.core.data.capability.CapabilitySnapshot(
+                userLevel = snap.userLevel,
+                isStaff = snap.isStaff,
+                isSuperuser = snap.isSuperuser,
+                customPropertiesJson = snap.customPropertiesJson,
+                fetchedAtMillis = System.currentTimeMillis(),
+                schema = CAPABILITIES_SCHEMA,
+                isStale = false,
+                systemCatchupEnabled = null,
+            ),
+        )
+        return caps[Capability.CanManageDvr]
+    }
+
     suspend fun probeCapabilities(
         playlistId: String,
         force: Boolean = false,
@@ -1151,6 +1175,17 @@ class PlaylistRepository @Inject constructor(
         val pending = CompletableDeferred<Boolean>()
         val running = inFlightCapabilityProbes.putIfAbsent(playlistId, pending)
         if (running != null) return running.await()
+        // Back-to-back passes (Streamer 2026-10-27 14:25:42: "playlist refresh"
+        // at .068 and "cold launch" at .779, two probe OK and two PermsRefresh
+        // lines): a pass that SUCCEEDED within [PROBE_COALESCE_MS] already
+        // answered, so a later trigger reuses it instead of re-reading.
+        val okAt = lastCapabilityProbeOkAt[playlistId] ?: 0L
+        if (System.currentTimeMillis() - okAt < PROBE_COALESCE_MS) {
+            inFlightCapabilityProbes.remove(playlistId, pending)
+            pending.complete(true)
+            Log.i(TAG_PERMS, "probe coalesced trigger=$trigger (last pass ${System.currentTimeMillis() - okAt}ms ago)")
+            return true
+        }
         return try {
             val before = dao.byId(playlistId)
             val oldLevel = before?.permsLevelLabel() ?: "unknown"
@@ -1158,6 +1193,7 @@ class PlaylistRepository @Inject constructor(
                 (force || before.capabilitiesNeedProbe())
             if (willProbe) lastCapabilityProbeAt[playlistId] = System.currentTimeMillis()
             val result = probeCapabilitiesUncoalesced(playlistId, force)
+            if (willProbe && result) lastCapabilityProbeOkAt[playlistId] = System.currentTimeMillis()
             if (willProbe) {
                 val newLevel = dao.byId(playlistId)?.permsLevelLabel() ?: "unknown"
                 Log.i(
@@ -1384,6 +1420,8 @@ class PlaylistRepository @Inject constructor(
     /** When each playlist was last probed this process (throttles the
      *  foreground and gate-check triggers; nothing polls on its own). */
     private val lastCapabilityProbeAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private val lastCapabilityProbeOkAt = java.util.concurrent.ConcurrentHashMap<String, Long>()
+    private val PROBE_COALESCE_MS = 10_000L
 
     /** Milliseconds since [playlistId] was last probed this process. */
     fun msSinceCapabilityProbe(playlistId: String): Long =
@@ -1435,7 +1473,15 @@ class PlaylistRepository @Inject constructor(
         runCatching { probeCapabilities(playlist.id, due, trigger) }
     }
 
-    suspend fun refresh(playlist: PlaylistEntity): Result<List<M3UChannel>> = runCatching {
+    suspend fun refresh(
+        playlist: PlaylistEntity,
+        /** The profile this refresh belongs to, captured when it starts (or
+         *  earlier by the caller). A different active profile at write time
+         *  drops the result with [com.aeriotv.android.core.profiles.ScopeMovedException]. */
+        binding: com.aeriotv.android.core.profiles.ScopeBinding =
+            com.aeriotv.android.core.profiles.ScopeBinding.capture(playlist.id),
+    ): Result<List<M3UChannel>> = runCatching {
+        binding.ensureCurrent("channel refresh")
         val sourceType = playlist.resolvedSourceType()
         val base = effectiveBaseUrl(playlist)
         // Dispatcharr branches go through the AuthBroker so a rotated api_key
@@ -1504,12 +1550,18 @@ class PlaylistRepository @Inject constructor(
             // re-coalesced) here.
             dispatcharrServerVersion = liveVersion ?: fresh.dispatcharrServerVersion,
         )
+        // Bound to the profile it started under: a switch while the fetch
+        // was in flight drops the result instead of writing it under the new
+        // profile's snapshot key.
+        binding.ensureCurrent("channel refresh")
         dao.update(refreshed)
         // Persist the freshly-fetched channels so the next cold launch repaints
         // the rail INSTANTLY from disk (Phase 130 channel snapshot cache).
         // Best-effort: a cache-write failure must NOT fail the refresh.
         try {
-            saveChannelsToCache(playlist.id, channels)
+            saveChannelsToCache(playlist.id, channels, binding)
+        } catch (t: com.aeriotv.android.core.profiles.ScopeMovedException) {
+            throw t
         } catch (t: Throwable) {
             android.util.Log.w("PlaylistRepository", "saveChannelsToCache failed (refresh)", t)
         }
@@ -1518,9 +1570,11 @@ class PlaylistRepository @Inject constructor(
     }
 
     /**
-     * Dispatcharr-only follow-up that fans `/api/epg/programs/<id>/` requests
-     * for every channel's currently-airing programme, in parallel with a cap
-     * of 4 concurrent in-flight fetches. Mirrors iOS
+     * Dispatcharr-only follow-up that backfills categories for every
+     * channel's currently-airing programme with ONE bulk
+     * `/api/epg/programs/search/?airing_at=<now>` request (paged at 500).
+     * Servers without the search action (404/405) fall back to one
+     * `/api/epg/programs/<id>/` per programme, capped at 4 in flight. Mirrors iOS
      * `EPGGuideView.enrichDispatcharrCategories` (post v1.6.22), the bulk
      * `/api/epg/grid/` endpoint deliberately strips `<category>` for perf, so
      * we lazily backfill the category on the now-airing program per channel
@@ -1532,6 +1586,12 @@ class PlaylistRepository @Inject constructor(
      * Failures on individual program fetches are swallowed silently, a
      * single 404 shouldn't blank out the whole channel's tint.
      */
+    private val nowAiringCategoryCache by lazy { NowAiringCategoryCache(context) }
+
+    /** Base URLs whose /api/epg/programs/search/ answered 404/405 this
+     *  session (older Dispatcharr); those use the per-program detail call. */
+    private val nowAiringSearchUnsupported: MutableSet<String> = ConcurrentHashMap.newKeySet()
+
     suspend fun enrichNowPlayingCategories(
         playlist: PlaylistEntity,
         programmes: List<EPGProgramme>,
@@ -1557,8 +1617,49 @@ class PlaylistRepository @Inject constructor(
         // Anything higher and Dispatcharr starts shedding connections; lower
         // and a thousand-channel playlist takes minutes to fully tint.
         val gate = Semaphore(4)
-        val categoryByProgramId: Map<Int, String> = coroutineScope {
-            nowPlayingByChannel.values.mapNotNull { p ->
+        // 10-minute TTL, persisted (NowAiringCategoryCache): a relaunch or a
+        // second refresh inside the window makes zero detail calls. Empty
+        // answers are cached too. Before this, nothing cached a miss and a
+        // fresh grid fetch arrives with categories stripped, so every launch
+        // re-asked for every now-airing programme (~280 calls on the
+        // Streamer, 2026-10-26).
+        val wanted = nowPlayingByChannel.values.mapNotNull { it.dispatcharrProgramId }.toSet()
+        val cached = nowAiringCategoryCache.fresh(playlist.id, wanted)
+        val misses = nowPlayingByChannel.values.filter { it.dispatcharrProgramId !in cached }
+        Log.i("PlaylistRepo", "[EPG-ENRICH] now-airing ${wanted.size}: ${cached.size} from cache, ${misses.size} to fetch (tid=${android.os.Process.myTid()})")
+        // One bulk search answers every now-airing programme (categories
+        // included). Per-id detail calls remain only for servers without the
+        // search action (404/405, remembered per server for the session).
+        var bulk: Map<Int, String> = emptyMap()
+        var useDetailFallback = base in nowAiringSearchUnsupported
+        if (misses.isNotEmpty() && !useDetailFallback) {
+            val iso = java.time.Instant.ofEpochMilli(now)
+                .truncatedTo(java.time.temporal.ChronoUnit.SECONDS).toString()
+            runCatching {
+                dispatcharrAuth.withApiKeyRetry(playlist.id) { key ->
+                    dispatcharrClient.getNowAiringCategories(base, key, iso)
+                }
+            }.onSuccess { result ->
+                if (result == null) {
+                    nowAiringSearchUnsupported.add(base)
+                    useDetailFallback = true
+                    Log.i("PlaylistRepo", "[EPG-ENRICH] bulk now-airing unsupported (404/405); per-program fallback for this session (tid=${android.os.Process.myTid()})")
+                } else {
+                    // Every miss gets an answer: a programme the server does
+                    // not list as airing right now records blank, so it is
+                    // not re-asked inside the cache window.
+                    bulk = misses.mapNotNull { it.dispatcharrProgramId }
+                        .associateWith { result.categories[it].orEmpty() }
+                    Log.i("PlaylistRepo", "[EPG-ENRICH] bulk now-airing: ${result.categories.size} programs in ${result.requests} request${if (result.requests == 1) "" else "s"} (tid=${android.os.Process.myTid()})")
+                }
+            }.onFailure {
+                // Transient failure: nothing cached, the next refresh retries.
+                Log.w("PlaylistRepo", "[EPG-ENRICH] bulk now-airing failed: ${it.message} (tid=${android.os.Process.myTid()})")
+            }
+        }
+        val detailMisses = if (useDetailFallback) misses else emptyList()
+        val fetchedDetail: Map<Int, String> = coroutineScope {
+            detailMisses.mapNotNull { p ->
                 val pid = p.dispatcharrProgramId ?: return@mapNotNull null
                 async {
                     gate.withPermit {
@@ -1571,12 +1672,15 @@ class PlaylistRepository @Inject constructor(
                                 ?.filter { it.isNotBlank() }
                                 ?.joinToString(",")
                                 .orEmpty()
-                            if (joined.isNotBlank()) pid to joined else null
+                            pid to joined
                         }
                     }
                 }
             }.awaitAll().filterNotNull().toMap()
         }
+        val fetched: Map<Int, String> = bulk + fetchedDetail
+        if (fetched.isNotEmpty()) nowAiringCategoryCache.put(playlist.id, fetched)
+        val categoryByProgramId: Map<Int, String> = (cached + fetched).filterValues { it.isNotBlank() }
 
         if (categoryByProgramId.isEmpty()) return programmes
 
@@ -1736,7 +1840,11 @@ class PlaylistRepository @Inject constructor(
         }
         if (programmes.isEmpty()) return 0
         runCatching { saveEpgToCache(playlist.id, programmes, authoritative = authoritative) }
-            .onFailure { Log.w("PlaylistRepo", "grid window merge failed", it) }
+            .getOrElse {
+                if (it is CancellationException) throw it
+                Log.w("PlaylistRepo", "grid window merge failed; stopping", it)
+                return null
+            }
         return programmes.size
     }
 
@@ -1819,7 +1927,9 @@ class PlaylistRepository @Inject constructor(
      * feeds "what was just on" in the guide.
      */
     private suspend fun maxCatchupReachMs(playlistId: String): Long {
-        val days = runCatching { channelSnapshotDao.maxCatchupDays(playlistId) }
+        // Server-wide (every profile's snapshot): the EPG rows are shared, so
+        // one profile's narrower archive must not bound another's history.
+        val days = runCatching { channelSnapshotDao.maxCatchupDaysAllProfiles(playlistId) }
             .getOrNull() ?: 0
         return maxOf(1, minOf(days, GUIDE_DAYS_ALL_MAX_BACK)) * 86_400_000L
     }
@@ -1847,24 +1957,31 @@ class PlaylistRepository @Inject constructor(
      * Runs on the background-priority EPG dispatcher; the future side of Guide
      * Days is untouched.
      */
-    suspend fun pruneEpgBeyondCatchupReach(playlistId: String) = withContext(layeringDispatcher) {
+    suspend fun pruneEpgBeyondCatchupReach(playlistId: String) = com.aeriotv.android.core.app.BackgroundSweep.serial {
         val now = System.currentTimeMillis()
         val dayMs = 86_400_000L
-        val snapshot = runCatching { channelSnapshotDao.forPlaylist(playlistId) }
+        // Every profile's snapshot of this playlist: the programme rows are
+        // the SERVER's, so a channel only one profile sees, or a wider archive
+        // on another profile, must keep its history (2026-10-27).
+        val snapshot = runCatching { channelSnapshotDao.forPlaylistAllProfiles(playlistId) }
             .getOrElse {
                 Log.w("PlaylistRepo", "[EPG] catch-up reach prune: channel snapshot unreadable", it)
-                return@withContext
+                return@serial
             }
-        if (snapshot.isEmpty()) return@withContext
+        if (snapshot.isEmpty()) return@serial
         // Bucket the guide keys by the retention that applies to them. The key
         // is the canonical guide channel id, which is what cached programmes
-        // carry after the ingest bridge rewrote their channelId.
-        val keysByDays = HashMap<Int, MutableList<String>>()
+        // carry after the ingest bridge rewrote their channelId. A key seen in
+        // several profiles takes the widest window any of them has.
+        val daysByKey = HashMap<String, Int>()
         for (row in snapshot) {
             val days = minOf(maxOf(row.catchupDays, 0), GUIDE_DAYS_ALL_MAX_BACK)
             val key = row.toChannel().guideChannelId().value
-            keysByDays.getOrPut(days) { mutableListOf() }.add(key)
+            val prior = daysByKey[key]
+            if (prior == null || days > prior) daysByKey[key] = days
         }
+        val keysByDays = HashMap<Int, MutableList<String>>()
+        for ((key, days) in daysByKey) keysByDays.getOrPut(days) { mutableListOf() }.add(key)
         var deleted = 0
         for ((days, keys) in keysByDays) {
             // days == 0 means no archive: keep only the last 24 h.
@@ -2087,7 +2204,11 @@ class PlaylistRepository @Inject constructor(
                 var refreshed = 0
                 for ((start, end) in chunks) {
                     awaitSweepWindow()
-                    val n = fetchGridChunk(playlist, base, start, end, authoritative = true)
+                    // One chunk at a time on the background serial lane, so
+                    // it never runs beside the VOD sweep or the EPG compare.
+                    val n = com.aeriotv.android.core.app.BackgroundSweep.serial {
+                        fetchGridChunk(playlist, base, start, end, authoritative = true)
+                    }
                     if (n == null) {
                         // A failed chunk stops the sweep exactly like the
                         // incremental walk stops: the fingerprint is NOT
@@ -2168,6 +2289,8 @@ class PlaylistRepository @Inject constructor(
      *
      * [liveProgrammeCount] is the base grid's size, recorded on the live
      * window's coverage rows so they read as non-empty bookkeeping.
+     * Like the source-change sweep, missing-day requests wait while the app
+     * is backgrounded or a tune is waiting for its first frame.
      */
     private fun extendGridWindowInBackground(
         playlist: PlaylistEntity,
@@ -2246,6 +2369,7 @@ class PlaylistRepository @Inject constructor(
                         if (isCovered(chunkStart)) {
                             cached++
                         } else {
+                            awaitSweepWindow()
                             val n = fetchAndRecordChunk(playlist, base, chunkStart, cursor)
                             if (n == null) { stopped = true; break }
                             fetched++
@@ -2263,6 +2387,7 @@ class PlaylistRepository @Inject constructor(
                         if (isCovered(cursor)) {
                             cached++
                         } else {
+                            awaitSweepWindow()
                             val n = fetchAndRecordChunk(playlist, base, cursor, chunkEnd)
                             if (n == null) { stopped = true; break }
                             fetched++
@@ -2307,6 +2432,7 @@ class PlaylistRepository @Inject constructor(
                 var stopped = false
                 for ((start, end) in chunks) {
                     if (isCovered(start)) { cached++; continue }
+                    awaitSweepWindow()
                     val n = fetchAndRecordChunk(playlist, base, start, end)
                     if (n == null) { stopped = true; break }
                     fetched++
@@ -2793,6 +2919,82 @@ class PlaylistRepository @Inject constructor(
                 .map { it.toProgramme() }
         }
 
+    /** Sub-timings of the last [loadCachedEpgTimed] call, for the launch
+     *  paint log line: wait = time until the read started running, query =
+     *  the Room read, map = entity to domain mapping. */
+    data class CachedEpgRead(
+        val programmes: List<EPGProgramme>,
+        val waitMs: Long,
+        val queryMs: Long,
+        val mapMs: Long,
+    )
+
+    /**
+     * Launch-paint variant of the windowed [loadCachedEpg]. Runs on
+     * Dispatchers.IO, NOT the background-priority two-thread EpgWork pool:
+     * at cold launch that pool is busy with CPU-bound layering/parse work
+     * that never yields, so every hop onto it (entering the read, resuming
+     * after Room, mapping) queued behind a whole parse step. The read is a
+     * few thousand rows, short, and is the critical path of the guide paint.
+     * Same query, same rows, same order as [loadCachedEpg].
+     */
+    suspend fun loadCachedEpgTimed(
+        playlistId: String,
+        fromMillis: Long,
+        toMillis: Long,
+    ): CachedEpgRead {
+        val calledAt = android.os.SystemClock.elapsedRealtime()
+        return withContext(Dispatchers.IO) {
+            val startedAt = android.os.SystemClock.elapsedRealtime()
+            logPaintQueryPlanOnce()
+            val rows = epgProgrammeDao.paintRowsInWindow(playlistId, fromMillis, toMillis)
+            val queriedAt = android.os.SystemClock.elapsedRealtime()
+            val out = ArrayList<EPGProgramme>(rows.size)
+            for (r in rows) out.add(
+                EPGProgramme(
+                    channelId = r.channelId,
+                    title = r.title,
+                    description = "",
+                    startMillis = r.startMillis,
+                    endMillis = r.endMillis,
+                    category = r.category,
+                    dispatcharrProgramId = r.dispatcharrProgramId,
+                    subTitle = r.subTitle,
+                    season = r.season,
+                    episode = r.episode,
+                    isNew = r.isNew,
+                    isLiveBroadcast = r.isLiveBroadcast,
+                    isPremiere = r.isPremiere,
+                    isFinale = r.isFinale,
+                    isRepeat = r.isRepeat,
+                    iconUrl = r.iconUrl,
+                ),
+            )
+            val mappedAt = android.os.SystemClock.elapsedRealtime()
+            CachedEpgRead(out, startedAt - calledAt, queriedAt - startedAt, mappedAt - queriedAt)
+        }
+    }
+
+    @Volatile private var paintPlanLogged = false
+
+    /** One EXPLAIN QUERY PLAN of the launch paint query per process, so the
+     *  index choice is on record in the log. */
+    private fun logPaintQueryPlanOnce() {
+        if (paintPlanLogged) return
+        paintPlanLogged = true
+        runCatching {
+            database.openHelper.readableDatabase.query(
+                "EXPLAIN QUERY PLAN SELECT id FROM epg_programme WHERE playlistId = ? " +
+                    "AND endMillis > ? AND startMillis < ?",
+                arrayOf<Any?>("x", 0L, 1L),
+            ).use { c ->
+                val plan = StringBuilder()
+                while (c.moveToNext()) plan.append(c.getString(c.columnCount - 1)).append(" | ")
+                android.util.Log.i("PlaylistRepository", "[EPG-PAINT] plan: $plan")
+            }
+        }
+    }
+
     suspend fun newestEpgFetch(playlistId: String): Long? =
         epgProgrammeDao.newestFetchedAt(playlistId)
 
@@ -2846,6 +3048,24 @@ class PlaylistRepository @Inject constructor(
             .onFailure { Log.w("PlaylistRepo", "purgeEpgCache: coverage purge failed", it) }
     }
 
+    /**
+     * REKEYED identity verdict (2026-10-27): delete only the cached rows of
+     * the re-keyed channels (plus any raw-keyed legacy rows), never the whole
+     * server's guide and history. Coverage is dropped so the next walk
+     * refetches every day for the purged channels; the other channels' rows
+     * stay and keep painting. Returns the rows deleted.
+     */
+    suspend fun purgeEpgForChannels(playlistId: String, canonicalIds: Collection<String>): Int {
+        var deleted = 0
+        canonicalIds.toList().chunked(900).forEach { chunk ->
+            deleted += epgProgrammeDao.deleteForChannels(playlistId, chunk)
+        }
+        deleted += runCatching { epgProgrammeDao.deleteNonCanonical(playlistId) }.getOrDefault(0)
+        runCatching { epgChunkCoverageDao.deleteForPlaylist(playlistId) }
+            .onFailure { Log.w("PlaylistRepo", "purgeEpgForChannels: coverage purge failed", it) }
+        return deleted
+    }
+
     suspend fun saveEpgToCache(
         playlistId: String,
         programmes: List<EPGProgramme>,
@@ -2887,6 +3107,41 @@ class PlaylistRepository @Inject constructor(
                 playlistId,
                 now - retentionDays * 24L * 60L * 60L * 1000L,
             )
+        }
+    }
+
+    /** (id, channel, start, end, title) for the cached rows overlapping
+     *  [fromMs]..[toMs]; one indexed projection read on the caller's thread. */
+    fun epgKeysInSpanBlocking(playlistId: String, fromMs: Long, toMs: Long) =
+        epgProgrammeDao.keysInSpanBlocking(playlistId, fromMs, toMs)
+
+    /**
+     * Delta save for a warm cache: delete [deleteIds] (superseded present /
+     * future rows) and write only [programmes] (new or changed), in one
+     * transaction, on the background serial lane. Unchanged rows are not
+     * rewritten, so their categories stay.
+     */
+    suspend fun applyEpgDelta(playlistId: String, deleteIds: List<Long>, programmes: List<EPGProgramme>) {
+        if (deleteIds.isEmpty() && programmes.isEmpty()) return
+        val now = System.currentTimeMillis()
+        DeletedPlaylists.ensureAlive(playlistId, "EPG delta")
+        com.aeriotv.android.core.app.BackgroundSweep.serial {
+            val rows = programmes.mapNotNull { p ->
+                if (p.endMillis - p.startMillis < 30_000L) null else p.toCacheEntity(playlistId, now)
+            }
+            epgProgrammeDao.applyDeltaBlocking(deleteIds, rows)
+        }
+    }
+
+    /** Category backfill: one batched UPDATE transaction on the background
+     *  serial lane (was a REPLACE insert per row on Room's shared pool). */
+    suspend fun updateEpgCategoriesInCache(playlistId: String, programmes: List<EPGProgramme>): Int {
+        if (programmes.isEmpty()) return 0
+        val now = System.currentTimeMillis()
+        DeletedPlaylists.ensureAlive(playlistId, "EPG enrichment")
+        return com.aeriotv.android.core.app.BackgroundSweep.serial {
+            val rows = programmes.map { it.toCacheEntity(playlistId, now) }
+            epgProgrammeDao.updateCategoriesBlocking(playlistId, rows)
         }
     }
 
@@ -2963,7 +3218,13 @@ class PlaylistRepository @Inject constructor(
     suspend fun newestChannelFetch(playlistId: String): Long? =
         channelSnapshotDao.newestFetchedAt(playlistId)
 
-    suspend fun saveChannelsToCache(playlistId: String, rawChannels: List<M3UChannel>) {
+    suspend fun saveChannelsToCache(
+        playlistId: String,
+        rawChannels: List<M3UChannel>,
+        /** Snapshot key and profile captured when the fetch started. */
+        binding: com.aeriotv.android.core.profiles.ScopeBinding =
+            com.aeriotv.android.core.profiles.ScopeBinding.capture(playlistId),
+    ) {
         val now = System.currentTimeMillis()
         // Drop exact-duplicate streams (same URL) before persisting so the cache
         // stays clean and reloads never feed a duplicate key to the url-keyed
@@ -2981,11 +3242,12 @@ class PlaylistRepository @Inject constructor(
         // autoGenerate with only a NON-unique index on playlistId, so REPLACE
         // never dedups, chunked inserts without it would duplicate every row.
         database.withTransaction {
-            channelSnapshotDao.deleteForPlaylist(playlistId)
+            binding.ensureCurrent("channel snapshot write")
+            channelSnapshotDao.deleteForPlaylistKey(binding.cacheKey)
             var position = 0
             for (chunk in channels.asSequence().chunked(CHANNEL_CACHE_CHUNK)) {
                 channelSnapshotDao.insertAll(
-                    chunk.map { ch -> ch.toCacheEntity(com.aeriotv.android.core.profiles.ProfileScope.cacheKey(playlistId), position++, now) },
+                    chunk.map { ch -> ch.toCacheEntity(binding.cacheKey, position++, now) },
                 )
             }
             // Stamp the displayed count from the list ACTUALLY PERSISTED, in the
@@ -3000,9 +3262,11 @@ class PlaylistRepository @Inject constructor(
             // Doing it here means the count cannot drift from the snapshot by
             // construction, for every write path (add, refresh, switch-active,
             // background refresh worker).
-            dao.updateChannelCount(playlistId, channels.size)
+            // The playlist row is the SERVER's (default profile's) row: another
+            // profile's count lives with its own snapshot, never on the row.
+            if (binding.isDefaultProfile) dao.updateChannelCount(playlistId, channels.size)
         }
-        stampSnapshot(playlistId)
+        stampSnapshot(playlistId, binding)
     }
 
     /**
@@ -3010,13 +3274,14 @@ class PlaylistRepository @Inject constructor(
      * assignment this snapshot was fetched with, so a fast profile switch can
      * tell a stale snapshot (other user, changed assignment) from a fresh one.
      */
-    private suspend fun stampSnapshot(playlistId: String) {
+    private suspend fun stampSnapshot(playlistId: String, binding: com.aeriotv.android.core.profiles.ScopeBinding) {
         runCatching {
+            if (!binding.isCurrent()) return
             val row = dao.byId(playlistId) ?: return
             if (!row.isDispatcharrDirectConnect()) return
             val uid = com.aeriotv.android.core.profiles.ProfileScope.activeUserIdLookup?.invoke(playlistId) ?: 0
             snapshotStamps.put(
-                com.aeriotv.android.core.profiles.ProfileScope.cacheKey(playlistId),
+                binding.cacheKey,
                 com.aeriotv.android.core.profiles.SnapshotStamp(uid, row.dispatcharrAccountProfileIds),
             )
         }
@@ -3290,6 +3555,22 @@ class PlaylistRepository @Inject constructor(
     suspend fun allOnce(): List<PlaylistEntity> = dao.allOnce()
 
     /**
+     * Cache-first switch (2026-10-27): the target row and its stored channel
+     * snapshot (current scope's key), or null when nothing is cached. With
+     * [makeActive] the row becomes the active one first (one local write, no
+     * network), so every reader agrees on the active playlist while the
+     * cached paint is up and [switchActive] refreshes behind it.
+     */
+    suspend fun cachedSwitchTarget(playlistId: String, makeActive: Boolean): Pair<PlaylistEntity, List<M3UChannel>>? {
+        if (dao.byId(playlistId) == null) return null
+        val cached = loadCachedChannels(playlistId)
+        if (cached.isEmpty()) return null
+        if (makeActive) dao.switchActive(playlistId)
+        val row = dao.byId(playlistId) ?: return null
+        return row to cached
+    }
+
+    /**
      * Make [playlistId] the active row and load its channels + EPG. Returns
      * the resolved entity + channel list, mirroring loadAndPersist's shape
      * so callers can drop a switch into the same state-update flow.
@@ -3302,6 +3583,10 @@ class PlaylistRepository @Inject constructor(
         expectedScopeToken: String? = null,
     ): Result<Pair<PlaylistEntity, List<M3UChannel>>> = runCatching {
         val t0 = System.currentTimeMillis()
+        val binding = com.aeriotv.android.core.profiles.ScopeBinding.capture(playlistId)
+        if (expectedScopeToken != null && binding.token != expectedScopeToken) {
+            throw com.aeriotv.android.core.profiles.ScopeMovedException("switch refresh")
+        }
         dao.switchActive(playlistId)
         // Capability probing is ACTIVE-PLAYLIST ONLY, so the row that just
         // became active is probed here: it may never have been probed at
@@ -3344,14 +3629,14 @@ class PlaylistRepository @Inject constructor(
                 entity.username, entity.password,
             )
         }
-        if (expectedScopeToken != null && com.aeriotv.android.core.profiles.ProfileScope.token.value != expectedScopeToken) {
-            throw IllegalStateException("profile changed during the background refresh")
-        }
+        binding.ensureCurrent("switch refresh")
         val updated = entity.copy(channelCount = channels.size, lastRefreshedAt = System.currentTimeMillis())
         dao.update(updated)
         // Cache the post-switch channel list (Phase 130 channel snapshot cache).
         try {
-            saveChannelsToCache(updated.id, channels)
+            saveChannelsToCache(updated.id, channels, binding)
+        } catch (t: com.aeriotv.android.core.profiles.ScopeMovedException) {
+            throw t
         } catch (t: Throwable) {
             android.util.Log.w("PlaylistRepository", "saveChannelsToCache failed (switchActive)", t)
         }
@@ -3921,8 +4206,8 @@ class PlaylistRepository @Inject constructor(
             channels
                 .filter { !it.uuid.isNullOrBlank() }
                 .sortedWith(compareBy(
-                    { it.channelNumber ?: Double.MAX_VALUE },
-                    { it.name.lowercase() },
+                    { it.displayChannelNumber ?: Double.MAX_VALUE },
+                    { it.displayName.lowercase() },
                 ))
                 .map { ch ->
                     // Stable ID derived from Dispatcharr's server UUID so the
@@ -3931,9 +4216,9 @@ class PlaylistRepository @Inject constructor(
                     // every fetch and orphaned existing FavoriteChannel rows.
                     M3UChannel(
                         id = "disp:${ch.uuid!!}",
-                        name = ch.name,
+                        name = ch.displayName,
                         url = dispatcharrClient.streamUrl(base, ch.uuid!!),
-                        groupTitle = ch.channelGroupId?.let { groups[it] }.orEmpty(),
+                        groupTitle = ch.displayChannelGroupId?.let { groups[it] }.orEmpty(),
                         tvgID = dispatcharrGuideKey(ch, epgDataById, epgSourceTypeById),
                         // GH #53: when the guide key above had to become the
                         // channel UUID, the channel's own tvg-id is still a
@@ -3941,13 +4226,13 @@ class PlaylistRepository @Inject constructor(
                         // custom XMLTV the user configured). Carry it so
                         // buildChannelEpgKeyBridge can still route those
                         // programmes onto this channel.
-                        rawAttributes = ch.tvgId?.trim()
+                        rawAttributes = ch.displayTvgId?.trim()
                             ?.takeIf { it.isNotBlank() }
                             ?.let { mapOf("tvg-id" to it) }
                             .orEmpty(),
-                        tvgName = ch.name,
-                        tvgLogo = ch.logoId?.let { dispatcharrClient.logoUrl(base, it) }.orEmpty(),
-                        channelNumber = ch.channelNumber?.formatChannelNumber(),
+                        tvgName = ch.displayName,
+                        tvgLogo = ch.displayLogoId?.let { dispatcharrClient.logoUrl(base, it) }.orEmpty(),
+                        channelNumber = ch.displayChannelNumber?.formatChannelNumber(),
                         dispatcharrChannelId = ch.id,
                         // Catch-up (task #133): Dispatcharr's /timeshift/
                         // endpoint identifies the channel by Channel.id (its
@@ -4134,7 +4419,7 @@ internal fun dispatcharrGuideKey(
     sourceTypeById: Map<Int, String?>?,
 ): String {
     val uuid = channel.uuid.orEmpty()
-    val legacyKey = channel.tvgId?.trim()?.takeIf { it.isNotBlank() } ?: uuid
+    val legacyKey = channel.displayTvgId?.trim()?.takeIf { it.isNotBlank() } ?: uuid
     // No metadata at all: keep the previous behaviour rather than guess.
     if (epgDataById == null) return legacyKey
     val assignmentId = channel.effectiveEpgDataId ?: channel.epgDataId

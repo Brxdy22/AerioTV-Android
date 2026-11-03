@@ -14,9 +14,13 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
@@ -83,6 +87,15 @@ fun FormFactorModal(
      * New sheet bounced at the end of its list for exactly that reason).
      */
     sheetExpandable: Boolean = false,
+    /**
+     * Touch sheets only (Logan 2026-10-29): keep the sheet's gestures so a
+     * downward swipe dismisses, but make an UPWARD drag inert. For a short
+     * sheet that already shows everything, an upward drag used to move the
+     * sheet and snap it back, which felt broken. See [DragDownOnlyModifier]
+     * for the mechanism. Use with sheetGesturesEnabled = true and
+     * sheetExpandable = false.
+     */
+    sheetDragDownOnly: Boolean = false,
     /** Name for the TV focus trace ([SETTINGS] sheet open / close). */
     traceName: String = "modal",
     /**
@@ -136,9 +149,10 @@ fun FormFactorModal(
         // anchor, and the sheet bounces up and down -- the same class of loop
         // as 45483dd5. Keeping only the BOTTOM inset makes the measured
         // height independent of the offset, so both anchors are stable.
+        val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = !sheetExpandable)
         ModalBottomSheet(
             onDismissRequest = onDismiss,
-            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = !sheetExpandable),
+            sheetState = sheetState,
             sheetGesturesEnabled = sheetGesturesEnabled,
             containerColor = if (sheetContainerColor != androidx.compose.ui.graphics.Color.Unspecified) {
                 sheetContainerColor
@@ -151,7 +165,17 @@ fun FormFactorModal(
             // (the compact Record from Now sheet, Nothing Phone recording
             // 2026-10-02 15:23) every scroll re-measured the content and the
             // sheet jumped between two heights.
-            contentWindowInsets = { WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom) },
+            // Drag-down-only sheets take NO sheet insets and pad the bottom
+            // inset inside the filtered column instead, so the filter covers
+            // the whole sheet surface including the bottom safe-area strip.
+            contentWindowInsets = {
+                if (sheetDragDownOnly) WindowInsets(0, 0, 0, 0)
+                else WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom)
+            },
+            // Drag-down-only sheets draw the handle inside the guarded
+            // content (below), so an upward drag that starts on the handle
+            // is filtered too. Same look: BottomSheetDefaults.DragHandle.
+            dragHandle = if (sheetDragDownOnly) null else ({ androidx.compose.material3.BottomSheetDefaults.DragHandle() }),
         ) {
             // Bound the content column to the window height.
             //
@@ -194,6 +218,16 @@ fun FormFactorModal(
             Column(
                 modifier = Modifier
                     .then(
+                        if (sheetDragDownOnly) {
+                            Modifier
+                                .fillMaxWidth()
+                                .dragDownOnly { sheetState.requireOffset() }
+                                .windowInsetsPadding(WindowInsets.safeDrawing.only(WindowInsetsSides.Bottom))
+                        } else {
+                            Modifier
+                        },
+                    )
+                    .then(
                         if (sheetMaxWidth != null) {
                             Modifier
                                 .fillMaxWidth()
@@ -207,8 +241,68 @@ fun FormFactorModal(
                         if (sheetExpandable) Modifier.height(expandedContentHeight)
                         else Modifier.heightIn(max = maxSheetHeight),
                     ),
-                content = content,
-            )
+            ) {
+                if (sheetDragDownOnly) {
+                    // Full-width filter column: with sheetMaxWidth the
+                    // width cap below still applies to this same column.
+                    androidx.compose.material3.BottomSheetDefaults.DragHandle(
+                        modifier = Modifier.align(Alignment.CenterHorizontally),
+                    )
+                }
+                content()
+            }
+        }
+    }
+}
+
+/**
+ * Makes upward drags inert while the sheet rests at its expanded anchor, and
+ * leaves every other move alone (Material3 1.4.0, compose BOM 2026.05.00).
+ *
+ * Mechanism: in 1.4.0 the sheet's drag is an `anchoredDraggable` on the
+ * sheet Surface, a PARENT of this content. Compose delivers the Main pointer
+ * pass child first, so this modifier sees each move before the sheet does,
+ * and the sheet's drag detector ignores consumed changes.
+ *
+ * Per gesture it records the sheet offset at touch-down (the resting,
+ * expanded offset) and reads the live offset on every move:
+ *  - Sheet pulled down (live offset > rest): nothing is consumed, up or
+ *    down, so the sheet tracks the finger and can be pulled back to open.
+ *    anchoredDraggable clamps at the expanded anchor, so it stops at the top.
+ *  - Sheet at rest: upward moves are consumed once the finger has travelled
+ *    upward past touch slop (taps with jitter still click). An upward start
+ *    never begins a sheet drag; reaching the top and continuing up cancels
+ *    the drag, which settles at Expanded where the sheet already is.
+ * The finger position used for slop is local to this content, which only
+ * equals screen movement while the sheet is not moving, which is exactly
+ * when it is used. Sheet displacement comes from the sheet offset itself.
+ *
+ * Rejected: (a) a nestedScroll connection eating negative deltas only
+ * covers drags that go through a scrollable child; the short sheet has no
+ * scroll container, so the connection would never see the drag. (c)
+ * confirmValueChange only vetoes target STATES, not the live offset during
+ * the drag, and the move-then-snap-back is anchoredDraggable offset
+ * tracking, not a Compose overscroll effect, so disabling overscroll does
+ * nothing here.
+ */
+private fun Modifier.dragDownOnly(sheetOffset: () -> Float): Modifier = pointerInput(Unit) {
+    val slop = viewConfiguration.touchSlop
+    awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false)
+        val restOffset = runCatching(sheetOffset).getOrNull() ?: return@awaitEachGesture
+        var upTravel = 0f
+        while (true) {
+            val event = awaitPointerEvent(androidx.compose.ui.input.pointer.PointerEventPass.Main)
+            val change = event.changes.firstOrNull { it.id == down.id } ?: break
+            if (!change.pressed) break
+            val displaced = (runCatching(sheetOffset).getOrNull() ?: restOffset) - restOffset > 0.5f
+            val dy = change.position.y - change.previousPosition.y
+            if (displaced) {
+                upTravel = 0f
+                continue
+            }
+            upTravel = (upTravel - dy).coerceAtLeast(0f)
+            if (dy < 0f && upTravel > slop) change.consume()
         }
     }
 }

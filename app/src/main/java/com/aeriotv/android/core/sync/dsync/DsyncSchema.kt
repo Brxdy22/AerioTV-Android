@@ -54,8 +54,11 @@ enum class DsyncKey(
 }
 
 object DsyncLimits {
-    const val KEY_BYTES = 32 * 1024
-    const val TOTAL_BYTES = 128 * 1024
+    // Dispatcharr dev c1920131 (2026-10-18): one DB row per (user, key); caps
+    // raised from 32 KiB per key and 128 KiB per user. The server still answers
+    // 413 with value_too_large / total_too_large; trimming stays 413-driven.
+    const val KEY_BYTES = 128 * 1024
+    const val TOTAL_BYTES = 1024 * 1024
     const val FAVORITES = 1000
     const val RECENTS = 50
     const val PROGRESS = 300
@@ -237,10 +240,79 @@ data class ProfileRow(
     val pinSalt: String,
     /** "admin" | "user" | "child"; "" = absent (older writer), reader keeps its own. */
     val role: String = "",
-    /** Unix seconds of the last change to this row's name, PIN, or role; 0 = absent (older writer). */
+    /** Unix seconds of the last change to this row's name, PIN, role, or avatar; 0 = absent (older writer). */
     val updatedAt: Long = 0L,
+    /** Position 8, `{"icon","color"}`; null = absent (older writer, reader keeps its own). */
+    val avatar: com.aeriotv.android.core.profiles.AvatarSpec? = null,
+    /** Position 9, list position (0 first); -1 = absent (older writer, insertion order). */
+    val order: Int = -1,
     val tail: Tail = Tail(),
 )
+
+/** A profile removal carried in the synced `profiles` payload (schema 4.12). */
+data class ProfileTombstone(
+    /** Lowercased username. */
+    val username: String,
+    /** Unix seconds of the removal. */
+    val removedAt: Long,
+    val userId: Int? = null,
+)
+
+/**
+ * Removal tombstones for `profiles` (schema 4.12). Pure logic, so the merge
+ * rules are unit tested: a tombstone beats every row whose `updatedAt` is at
+ * or before it, a row edited after it wins and clears it, and tombstones
+ * expire after [WINDOW_S].
+ */
+object ProfileTombstones {
+    const val WINDOW_S = 90L * 86_400L
+
+    /** Union by username; the newer removal wins. */
+    fun union(a: List<ProfileTombstone>, b: List<ProfileTombstone>): List<ProfileTombstone> =
+        (a + b).groupBy { it.username.lowercase() }.map { (u, l) ->
+            val top = l.maxBy { it.removedAt }
+            top.copy(username = u, userId = top.userId ?: l.firstNotNullOfOrNull { it.userId })
+        }
+
+    fun expire(t: List<ProfileTombstone>, now: Long): List<ProfileTombstone> = t.filter { now - it.removedAt <= WINDOW_S }
+
+    fun find(t: List<ProfileTombstone>, username: String): ProfileTombstone? =
+        t.firstOrNull { it.username.equals(username, ignoreCase = true) }
+
+    /** True when a tombstone removes a row last changed at [updatedAt]. */
+    fun kills(t: List<ProfileTombstone>, username: String, updatedAt: Long): Boolean =
+        find(t, username)?.let { it.removedAt >= updatedAt } == true
+
+    data class Resolved(val rows: List<ProfileRow>, val removed: List<ProfileTombstone>, val dropped: List<ProfileRow>)
+
+    /** Drop tombstoned rows; a row newer than its tombstone keeps the row and clears the tombstone. */
+    fun resolve(rows: List<ProfileRow>, removed: List<ProfileTombstone>): Resolved {
+        val (dropped, kept) = rows.partition { kills(removed, it.username, it.updatedAt) }
+        val revived = kept.map { it.username.lowercase() }.toSet()
+        return Resolved(kept, removed.filter { it.username !in revived }, dropped)
+    }
+
+    /**
+     * Stale-device guard (schema 4.12): a local row the server list does not
+     * carry is NOT re-sent when it has no unsent local change
+     * (`updatedAt <= lastPushedAt`) and either it is older than the server
+     * payload's `updatedAt`, or every local row is older than the server's
+     * newest row by more than [WINDOW_S].
+     */
+    fun staleLocal(
+        row: ProfileRow,
+        serverRows: List<ProfileRow>,
+        serverUpdatedAt: Long,
+        localNewest: Long,
+        lastPushedAt: Long,
+    ): Boolean {
+        if (serverRows.isEmpty()) return false
+        if (serverRows.any { it.username.equals(row.username, ignoreCase = true) }) return false
+        if (row.updatedAt > lastPushedAt) return false
+        val serverNewest = serverRows.maxOf { it.updatedAt }
+        return row.updatedAt < serverUpdatedAt || serverNewest - localNewest > WINDOW_S
+    }
+}
 
 /**
  * Codecs. Each `decodeX` returns null on a wrong shape (the caller logs
@@ -386,6 +458,37 @@ object DsyncPayloads {
         val obj = v as? JsonObject ?: return null
         return obj.mapNotNull { (k, e) -> (e as? JsonPrimitive)?.takeIf { it != JsonNull }?.let { k to it } }.toMap()
     }
+    /**
+     * `settings` lanes (4.9): `v` (all devices), `tv`, and `mobile`. Absent
+     * lanes decode as empty; a lane that is not an object is malformed.
+     */
+    fun decodeSettingsLanes(data: JsonObject): Map<String, Map<String, JsonPrimitive>>? {
+        val out = LinkedHashMap<String, Map<String, JsonPrimitive>>()
+        for (lane in SETTINGS_LANES) {
+            val e = data[lane] ?: continue
+            val obj = e as? JsonObject ?: return null
+            out[lane] = obj.mapNotNull { (k, x) -> (x as? JsonPrimitive)?.takeIf { it != JsonNull }?.let { k to it } }.toMap()
+        }
+        return out
+    }
+
+    /** Writes [lanes] over [base]'s lanes; every name not written round-trips untouched. */
+    fun encodeSettingsLanes(base: JsonObject?, lanes: Map<String, Map<String, JsonPrimitive>>): JsonObject {
+        var out = base ?: JsonObject(emptyMap())
+        for (lane in SETTINGS_LANES) {
+            val mine = lanes[lane].orEmpty()
+            val prev = base?.get(lane) as? JsonObject
+            if (mine.isEmpty() && prev == null) continue
+            val m = LinkedHashMap<String, JsonElement>()
+            prev?.forEach { (k, e) -> m[k] = e }
+            mine.forEach { (k, e) -> m[k] = e }
+            out = out.with(lane to JsonObject(m))
+        }
+        return out
+    }
+
+    val SETTINGS_LANES = listOf("v", "tv", "mobile")
+
     fun encodeSettings(base: JsonObject?, owned: Set<String>, values: Map<String, JsonPrimitive>): JsonObject {
         val prev = base?.get("v") as? JsonObject
         val m = LinkedHashMap<String, JsonElement>()
@@ -445,9 +548,30 @@ object DsyncPayloads {
             pinSalt = r.getOrNull(5).asStr() ?: "",
             role = r.getOrNull(6).asStr()?.takeIf { it in ROLES } ?: "",
             updatedAt = r.getOrNull(7).asLong() ?: 0L,
-            tail = tailOf(r, 8),
+            avatar = decodeAvatar(r.getOrNull(8)),
+            order = r.getOrNull(9).asInt()?.takeIf { it >= 0 } ?: -1,
+            tail = tailOf(r, 10),
         )
     }
+    /** `removed` (schema 4.12): `[[usernameLowercase, removedAt, userId?], ...]`; absent = none. */
+    fun decodeProfileTombstones(data: JsonObject?): List<ProfileTombstone> =
+        (data?.get("removed") as? JsonArray).orEmpty().mapNotNull { el ->
+            val r = el as? JsonArray ?: return@mapNotNull null
+            val u = r.getOrNull(0).asStr()?.lowercase()?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
+            val at = r.getOrNull(1).asLong()?.takeIf { it > 0 } ?: return@mapNotNull null
+            ProfileTombstone(u, at, r.getOrNull(2).asInt()?.takeIf { it > 0 })
+        }
+
+    /** [encodeProfiles] plus the `removed` list; an empty list drops the member. */
+    fun encodeProfiles(base: JsonObject?, rows: List<ProfileRow>, removed: List<ProfileTombstone>): JsonObject {
+        val m = LinkedHashMap(encodeProfiles(base, rows))
+        m.remove("removed")
+        if (removed.isNotEmpty()) m["removed"] = JsonArray(removed.distinctBy { it.username }.map {
+            JsonArray(listOfNotNull(JsonPrimitive(it.username), JsonPrimitive(it.removedAt), it.userId?.let { id -> JsonPrimitive(id) }))
+        })
+        return JsonObject(m)
+    }
+
     fun encodeProfiles(base: JsonObject?, rows: List<ProfileRow>): JsonObject =
         base.with("rows" to JsonArray(rows.distinctBy { it.userId }.take(DsyncLimits.PROFILES).map {
             val none = it.pinType == "none"
@@ -460,9 +584,32 @@ object DsyncPayloads {
                     JsonPrimitive(if (none) "" else it.pinSalt),
                     JsonPrimitive(it.role.takeIf { r -> r in ROLES } ?: "user"),
                     JsonPrimitive(it.updatedAt),
+                    encodeAvatar(it.avatar),
+                    JsonPrimitive(it.order.coerceAtLeast(0)),
                 ),
             ).plusTail(it.tail)
         }))
+
+    /** `{}` or a non-object reads as the default; unknown ids fall back per field. */
+    fun decodeAvatar(el: JsonElement?): com.aeriotv.android.core.profiles.AvatarSpec? {
+        if (el == null || el is JsonNull) return null
+        val o = el as? JsonObject ?: return com.aeriotv.android.core.profiles.AvatarSpec()
+        val cat = com.aeriotv.android.core.profiles.AvatarCatalog
+        return com.aeriotv.android.core.profiles.AvatarSpec(
+            icon = o["icon"].asStr()?.takeIf { it in cat.ICONS } ?: cat.INITIAL,
+            color = o["color"].asStr()?.takeIf { it in cat.COLORS } ?: "",
+        )
+    }
+
+    fun encodeAvatar(a: com.aeriotv.android.core.profiles.AvatarSpec?): JsonObject {
+        val n = com.aeriotv.android.core.profiles.AvatarCatalog.normalize(a) ?: return JsonObject(emptyMap())
+        return JsonObject(
+            buildMap {
+                if (n.icon != com.aeriotv.android.core.profiles.AvatarCatalog.INITIAL) put("icon", JsonPrimitive(n.icon))
+                if (n.color.isNotEmpty()) put("color", JsonPrimitive(n.color))
+            },
+        )
+    }
 
     /** Carry trailing positions from the last pulled rows onto our rebuilt rows (rule 6.2). */
     fun <T> carryTails(ours: List<T>, remote: List<T>?, id: (T) -> Any, tail: (T) -> Tail, withTail: (T, Tail) -> T): List<T> {
@@ -545,7 +692,7 @@ object DsyncGate {
 
 /**
  * Section 8 trim order. Each step rewrites one key's `data`; the guards apply
- * steps in order until the key (32 KiB) or the user total (128 KiB) fits.
+ * steps in order until the key (128 KiB) or the user total (1 MiB) fits.
  */
 object DsyncTrim {
 
@@ -590,7 +737,7 @@ object DsyncTrim {
     fun stepsFor(key: DsyncKey): List<Step> = STEPS.filter { it.key == key }
 
     /**
-     * Fit one key under 32 KiB. [wrap] turns `data` into the full envelope.
+     * Fit one key under 128 KiB. [wrap] turns `data` into the full envelope.
      * Returns the fitted data, or null when every step ran and it still does
      * not fit (favorites, collections, groups, and profiles are never trimmed).
      */
@@ -605,7 +752,7 @@ object DsyncTrim {
     }
 
     /**
-     * Fit the user total under 128 KiB. [datas] are this device's keys,
+     * Fit the user total under 1 MiB. [datas] are this device's keys,
      * [otherBytes] the server sizes of keys not in [datas]. Steps run in the
      * global order across keys. Returns the trimmed map (changed keys only
      * differ) or null if it cannot fit.
@@ -643,4 +790,229 @@ object DsyncPinHash {
         require(hex.length % 2 == 0) { "odd hex" }
         return ByteArray(hex.length / 2) { i -> hex.substring(i * 2, i * 2 + 2).toInt(16).toByte() }
     }
+}
+
+/**
+ * Coexistence with Google Drive sync (docs/DispatcharrSyncSchema.md,
+ * "Coexistence with Drive and iCloud"). Pure so the rules are unit tested.
+ */
+object DsyncCoexistence {
+    /** Drive categories that carry at least one Dispatcharr Sync key (Playlists and Credentials never do). */
+    val SHARED_CATEGORIES: Set<SyncCategory> = DsyncKey.entries.mapNotNull { it.category }.toSet()
+
+    /**
+     * Rule 1: Dispatcharr Sync owns [category] (Drive still pushes it but a
+     * Drive pull does not apply it) when the active playlist is Dispatcharr,
+     * Dispatcharr Sync is on for its active user, and this device has
+     * completed at least one Dispatcharr pull for that user.
+     */
+    fun owns(
+        category: SyncCategory,
+        activeIsDispatcharr: Boolean,
+        dispatcharrSyncOn: Boolean,
+        firstPullDoneForUser: Boolean,
+    ): Boolean = category in SHARED_CATEGORIES && activeIsDispatcharr && dispatcharrSyncOn && firstPullDoneForUser
+
+    /**
+     * Rule 2: on the first pull of [key] for a user on this device
+     * ([consumedBefore] false: no server stamp was ever applied here), a
+     * server envelope with empty data is not applied; local seeds the
+     * server instead. `profiles` merges per row and never seeds this way.
+     */
+    fun seedFromLocal(key: DsyncKey, consumedBefore: Boolean, data: JsonObject): Boolean =
+        key != DsyncKey.Profiles && !consumedBefore && isEmptyData(key, data)
+
+    /** No rows, ids, names, or lanes. A primitive is a real value, except groupOrder mode "default" with no order. */
+    fun isEmptyData(key: DsyncKey, data: JsonObject): Boolean {
+        if (key == DsyncKey.GroupOrder) {
+            val mode = data["mode"].asStr() ?: "default"
+            return mode == "default" && data.filterKeys { it != "mode" }.values.all { emptyElement(it) }
+        }
+        return data.values.all { emptyElement(it) }
+    }
+
+    /**
+     * Rule 4: the keys a "user chose Google Drive" replace pushes whole from
+     * local. Profiles (per-row merge), remoteMap, and radioDefault are excluded.
+     */
+    /**
+     * Pull before replace (section 10a): during the setup choice pull a shared
+     * key the stamp check calls "not newer" is applied anyway, unless this
+     * device holds an unsent change for it (that change is newer and goes up).
+     */
+    fun choiceApplies(remoteWins: Boolean, forceApply: Boolean, key: DsyncKey, dirty: Boolean): Boolean =
+        !remoteWins && forceApply && key != DsyncKey.Profiles && key in FORCE_KEYS && !dirty
+
+    val FORCE_KEYS: List<DsyncKey> = listOf(
+        DsyncKey.Favorites, DsyncKey.Recents, DsyncKey.Collections, DsyncKey.Progress, DsyncKey.Reminders,
+        DsyncKey.Watchlist, DsyncKey.HiddenTitles, DsyncKey.HiddenGroups, DsyncKey.GroupOrder, DsyncKey.Settings,
+    )
+
+    /**
+     * Rule 4 forced replace: every [FORCE_KEYS] category is written, an empty
+     * one included (never skipped), so the server mirrors the chosen side.
+     */
+    fun forcedWritesEmpty(force: Boolean, key: DsyncKey): Boolean = force && key in FORCE_KEYS
+
+    /**
+     * Rule 4 guard: the forced keys to disarm after the Drive apply, because
+     * their Sync Category did not apply ([applied] false or absent). The
+     * server copy of those stays; the prompt shows again next time.
+     */
+    fun cancelledForceKeys(applied: Map<SyncCategory, Boolean>): List<DsyncKey> =
+        FORCE_KEYS.filter { k -> k.category?.let { applied[it] } != true }
+
+    /** The forced keys to arm after the Drive apply: those whose Sync Category applied. */
+    fun armedForceKeys(applied: Map<SyncCategory, Boolean>): List<DsyncKey> = FORCE_KEYS - cancelledForceKeys(applied).toSet()
+
+    /**
+     * Rule 4 mirror: whether the Drive apply for the setup choice replaces
+     * local instead of merging. Every shared category does: Preferences
+     * (settings, recents, collections, hidden groups, group order) and the
+     * row files (progress, favorites, reminders, watchlist with hidden
+     * titles). A local row the backup lacks is removed, except rows the
+     * Drive count filters exclude (DriveCanon replace section), so the forced
+     * push sends exactly the Drive rows and both sides converge.
+     */
+    fun replaceOnForcedApply(category: SyncCategory): Boolean = category in SHARED_CATEGORIES
+
+    /** Rule 4: retry a deferred forced key now (it is armed, waiting, and its id cache is built). */
+    fun forcedRetryDue(armed: Boolean, awaiting: Boolean, cacheReady: Boolean): Boolean = armed && awaiting && cacheReady
+
+    /** The Rule 4 apply hold is on until [until] (0 = off). */
+    fun choiceHeld(until: Long, now: Long): Boolean = until > 0L && now < until
+
+    /**
+     * The Drive file that carries [key] (the Drive follow and converge push it).
+     * Recents and collections live in the Preferences file although their Sync
+     * Categories toggle is Favorites, so [DsyncKey.category] is the wrong
+     * lookup here (field run 2026-11-01: a recents follow was labeled
+     * Favorites). Every key with a category maps; an unmapped one throws
+     * (DriveFileMappingTest), never falls through to a default.
+     */
+    fun driveFileFor(key: DsyncKey): SyncCategory? = when (key) {
+        DsyncKey.Profiles -> null
+        DsyncKey.RemoteMap, DsyncKey.RadioDefault -> SyncCategory.Preferences
+        else -> com.aeriotv.android.core.sync.SetupSourceChoice.driveFile(key.suffix)
+            ?: error("no Drive file for ${key.suffix}")
+    }
+
+    /** Row categories whose forced build drops the server rows (no merge, no kept ids). */
+    val FORCE_ROW_KEYS: Set<DsyncKey> = setOf(
+        DsyncKey.Favorites, DsyncKey.Recents, DsyncKey.Collections, DsyncKey.Progress, DsyncKey.Reminders,
+        DsyncKey.Watchlist, DsyncKey.HiddenTitles,
+    )
+
+    /** Rows (or names) one category's data holds, for the setup prompt and the force-push log. */
+    fun rowCount(key: DsyncKey, data: JsonObject): Int = when (key) {
+        // Distinct channel ids: the same row definition the Drive side counts (DriveCanon.favorites, recentsCategory).
+        DsyncKey.Favorites -> DsyncPayloads.decodeFavorites(data)?.distinct()?.size ?: 0
+        DsyncKey.Recents -> DsyncPayloads.decodeRecents(data)?.distinctBy { it.channelId }?.size ?: 0
+        // Distinct canonical ids, the same count the Drive side reports (DriveCanon.progress).
+        DsyncKey.Progress -> DsyncPayloads.decodeProgress(data)?.distinctBy { it.type to it.vodId }?.size ?: 0
+        DsyncKey.Reminders -> DsyncPayloads.decodeReminders(data)?.size ?: 0
+        DsyncKey.Watchlist, DsyncKey.HiddenTitles -> DsyncPayloads.decodeVodMarks(data)?.distinctBy { it.type to it.vodId }?.size ?: 0
+        DsyncKey.Collections -> DsyncPayloads.decodeCollections(data)?.size ?: 0
+        DsyncKey.HiddenGroups -> DsyncPayloads.decodeHiddenGroups(data)?.let { it.live.size + it.movies.size + it.series.size } ?: 0
+        DsyncKey.GroupOrder -> DsyncPayloads.decodeGroupOrder(data)?.let { g ->
+            com.aeriotv.android.core.sync.DriveCanon.groupOrderRows(com.aeriotv.android.core.sync.DriveCanon.groupMode(g.mode), g.order)
+        } ?: 0
+        // Non-blank values only, the same count the Drive side reports (DriveCanon.settingsCategory).
+        DsyncKey.Settings -> DsyncPayloads.decodeSettingsLanes(data)?.let { com.aeriotv.android.core.sync.DriveCanon.dsyncSettings(it).first } ?: 0
+        else -> if (isEmptyData(key, data)) 0 else 1
+    }
+
+    /**
+     * A content fingerprint over the canonical row identities
+     * (com.aeriotv.android.core.sync.DriveCanon), which Drive snapshots carry
+     * too since the 2026-10-30 id migration: server channel ids, "m"/"e"/"s"
+     * plus server VOD ids, reminders by channel name and start, group names,
+     * and setting names with values. Null only for keys outside the prompt.
+     */
+    fun fingerprint(key: DsyncKey, data: JsonObject): String? {
+        val c = com.aeriotv.android.core.sync.DriveCanon
+        return when (key) {
+            DsyncKey.Favorites -> DsyncPayloads.decodeFavorites(data)?.let(c::dsyncFavorites)
+            DsyncKey.Recents -> DsyncPayloads.decodeRecents(data)?.let(c::dsyncRecents)
+            DsyncKey.Progress -> DsyncPayloads.decodeProgress(data)?.let(c::dsyncProgress)
+            DsyncKey.Reminders -> DsyncPayloads.decodeReminders(data)?.let(c::dsyncReminders)
+            DsyncKey.Watchlist, DsyncKey.HiddenTitles -> DsyncPayloads.decodeVodMarks(data)?.let(c::dsyncMarks)
+            DsyncKey.Collections -> DsyncPayloads.decodeCollections(data)?.let(c::dsyncCollections)
+            DsyncKey.HiddenGroups -> DsyncPayloads.decodeHiddenGroups(data)?.let(c::dsyncHiddenGroups)
+            DsyncKey.GroupOrder -> DsyncPayloads.decodeGroupOrder(data)?.let(c::dsyncGroupOrder)
+            DsyncKey.Settings -> DsyncPayloads.decodeSettingsLanes(data)?.let { c.dsyncSettings(it).second }
+            else -> null
+        }
+    }
+
+    /**
+     * The shared categories of one decoded bucket, summarized for Rule 4 (setup
+     * probe) and Rule 5 (converge): rows, time, and fingerprint per category,
+     * only the categories this device syncs ([scopes], Sync Categories), and
+     * settings without the names this device has Off. The Drive side
+     * (DriveSyncManager.readSharedSummary) applies the same filters.
+     */
+    fun summarize(
+        bucket: DsyncV2.Bucket,
+        scopes: Map<String, com.aeriotv.android.core.sync.SyncScope>,
+        keep: ((String, Int) -> Boolean)? = null,
+        excluded: MutableMap<String, Int>? = null,
+    ): com.aeriotv.android.core.sync.SetupSourceChoice.Summary {
+        val sc = com.aeriotv.android.core.sync.SetupSourceChoice
+        val out = LinkedHashMap<String, com.aeriotv.android.core.sync.SetupSourceChoice.Category>()
+        FORCE_KEYS.forEach { key ->
+            val env = (DsyncV2.category(bucket, key) as? DsyncDecode.Ok)?.envelope ?: return@forEach
+            out[key.suffix] = if (key == DsyncKey.Settings) {
+                val lanes = DsyncPayloads.decodeSettingsLanes(env.data)
+                    ?.let { com.aeriotv.android.core.sync.DriveCanon.lanesOn(it) { n -> sc.nameOff(scopes, n) } }
+                val (n, f) = lanes?.let { com.aeriotv.android.core.sync.DriveCanon.dsyncSettings(it) } ?: (0 to null)
+                com.aeriotv.android.core.sync.SetupSourceChoice.Category(n, env.updatedAt * 1000, f)
+            } else if (keep != null && key in DsyncHeld.VOD_KEYS) {
+                // Section 10a: only rows this device can represent on both providers.
+                val (c, gone) = DsyncHeld.vodCategory(key, env.data, env.updatedAt * 1000, keep)
+                if (gone > 0) excluded?.put(key.suffix, gone)
+                c
+            } else if (keep != null && key == DsyncKey.Recents) {
+                val (c, gone) = DsyncHeld.recentsCategory(env.data, env.updatedAt * 1000, keep)
+                if (gone > 0) excluded?.put(key.suffix, gone)
+                c
+            } else com.aeriotv.android.core.sync.SetupSourceChoice.Category(rowCount(key, env.data), env.updatedAt * 1000, fingerprint(key, env.data))
+        }
+        return sc.forDevice(com.aeriotv.android.core.sync.SetupSourceChoice.Summary(out)) { sc.itemOff(scopes, it) }
+    }
+
+    private fun emptyElement(e: JsonElement): Boolean = when (e) {
+        is JsonNull -> true
+        is JsonArray -> e.isEmpty()
+        is JsonObject -> e.values.all { emptyElement(it) }
+        else -> false
+    }
+}
+
+/**
+ * Settings > Sync manual actions (section 10a, "Manual push and pull",
+ * owner decision 2026-11-02). Pure rules, shared by the screen and the
+ * manager so the unit test pins them.
+ */
+object DsyncManual {
+    /** Which manual rows Settings > Sync shows. */
+    data class Rows(val pushPullDispatcharr: Boolean, val pushToBoth: Boolean)
+
+    fun rows(dispatcharrOn: Boolean, dispatcharrPlaylist: Boolean, driveOn: Boolean, driveSignedIn: Boolean): Rows {
+        val d = dispatcharrOn && dispatcharrPlaylist
+        return Rows(pushPullDispatcharr = d, pushToBoth = d && driveOn && driveSignedIn)
+    }
+
+    /**
+     * The shared keys a manual push or pull covers: every forced-replace key
+     * whose Sync Categories item is not Off. `settings` is always included
+     * (its lanes are gated per name, so an all-Off device writes nothing).
+     * Profiles, remoteMap, and radioDefault are never forced.
+     */
+    fun keys(scopes: Map<String, com.aeriotv.android.core.sync.SyncScope>): List<DsyncKey> =
+        DsyncCoexistence.FORCE_KEYS.filter { key ->
+            if (key == DsyncKey.Settings) return@filter true
+            val item = com.aeriotv.android.core.sync.SyncItemCatalog.itemForDsync(key.suffix)
+            item == null || scopes[item.id] != com.aeriotv.android.core.sync.SyncScope.Off
+        }
 }

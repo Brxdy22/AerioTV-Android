@@ -227,6 +227,9 @@ object RemoteControlHints {
             }
         }
         if (miniActive) {
+            // The mini owns Back on TV (TvMiniPlayerOverlay, fixed, not in the
+            // remote map): a single Back returns the mini to full screen.
+            add(RemoteHint(slotLabel(RemoteSlot.BACK_SHORT), "Full screen"))
             add(RemoteHint("Double Back", "Top channel"))
         } else {
             for (slot in listOf(RemoteSlot.BACK_SHORT, RemoteSlot.BACK_LONG)) {
@@ -242,11 +245,18 @@ object RemoteControlHints {
             add(RemoteHint(slotLabel(RemoteSlot.RIGHT_LONG), "Stop"))
         }
         if (miniActive) {
-            map.guideSlotFor(GuideRemoteAction.RESUME_PLAYER)?.let {
-                add(RemoteHint(slotLabel(it), "Resume"))
+            // MainActivity dispatches the guide Play/Pause and Hold Right slots
+            // from this same map while the mini is up, so the named button is
+            // the one that expands it.
+            // One "Full screen" entry only, and "Close" for the mini: five
+            // pairs clipped the last one at 1080p (Streamer 2026-11-02).
+            if (none { it.action == "Full screen" }) {
+                map.guideSlotFor(GuideRemoteAction.RESUME_PLAYER)?.let {
+                    add(RemoteHint(slotLabel(it), "Full screen"))
+                }
             }
             map.guideSlotFor(GuideRemoteAction.CLOSE_MINI_PLAYER)?.let {
-                add(RemoteHint(slotLabel(it), "Close mini"))
+                add(RemoteHint(slotLabel(it), "Close"))
             }
         }
     }.take(MAX_PAIRS)

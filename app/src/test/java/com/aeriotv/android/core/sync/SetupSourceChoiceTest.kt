@@ -1,0 +1,229 @@
+package com.aeriotv.android.core.sync
+
+import com.aeriotv.android.core.sync.SetupSourceChoice.Category
+import com.aeriotv.android.core.sync.SetupSourceChoice.Decision
+import com.aeriotv.android.core.sync.SetupSourceChoice.Source
+import com.aeriotv.android.core.sync.SetupSourceChoice.Summary
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+class SetupSourceChoiceTest {
+    private fun sum(vararg c: Pair<String, Category>) = Summary(mapOf(*c))
+
+    @Test fun bothEmptyUsesDispatcharr() {
+        assertEquals(Decision.UseDispatcharr, SetupSourceChoice.decide(Summary.EMPTY, Summary.EMPTY))
+    }
+
+    @Test fun zeroRowCategoriesCountAsEmpty() {
+        val d = sum("favorites" to Category(0, 5_000))
+        val x = sum("favorites" to Category(3, 1_000))
+        assertEquals(Decision.UseDispatcharr, SetupSourceChoice.decide(d, x))
+    }
+
+    @Test fun dispatcharrEmptyUsesDrive() {
+        assertEquals(Decision.UseDrive, SetupSourceChoice.decide(sum("favorites" to Category(2, 1)), Summary.EMPTY))
+    }
+
+    @Test fun driveEmptyUsesDispatcharr() {
+        assertEquals(Decision.UseDispatcharr, SetupSourceChoice.decide(Summary.EMPTY, sum("progress" to Category(4, 1))))
+    }
+
+    @Test fun equalFingerprintsPreferDispatcharr() {
+        val fp = SetupSourceChoice.fingerprint(listOf("ESPN|100", "CNN|200"))
+        val d = sum("reminders" to Category(2, 10, SetupSourceChoice.fingerprint(listOf("cnn|200", "espn|100"))), "favorites" to Category(0, 0))
+        val x = sum("reminders" to Category(2, 20, fp))
+        assertEquals(Decision.UseDispatcharr, SetupSourceChoice.decide(d, x))
+    }
+
+    @Test fun differingFingerprintsAsk() {
+        val d = sum("reminders" to Category(2, 10, SetupSourceChoice.fingerprint(listOf("a|1", "b|2"))))
+        val x = sum("reminders" to Category(2, 20, SetupSourceChoice.fingerprint(listOf("a|1", "c|3"))))
+        assertTrue(SetupSourceChoice.decide(d, x) is Decision.Ask)
+    }
+
+    @Test fun sameCountsWithoutFingerprintAsk() {
+        // No fingerprint (a row did not resolve to its canonical id): equality cannot be proven.
+        val d = sum("favorites" to Category(5, 10))
+        val x = sum("favorites" to Category(5, 10))
+        val r = SetupSourceChoice.decide(d, x)
+        assertTrue(r is Decision.Ask)
+        assertEquals(d, (r as Decision.Ask).drive)
+        assertEquals(x, r.dsync)
+    }
+
+    @Test fun differentCountsAsk() {
+        val fp = "x"
+        assertTrue(SetupSourceChoice.decide(sum("progress" to Category(3, 1, fp)), sum("progress" to Category(4, 1, fp))) is Decision.Ask)
+    }
+
+    @Test fun categoryOnOneSideOnlyAsks() {
+        val d = sum("favorites" to Category(2, 1))
+        val x = sum("progress" to Category(2, 1, "p"))
+        assertTrue(SetupSourceChoice.decide(d, x) is Decision.Ask)
+    }
+
+    @Test fun defaultSelectionIsAlwaysDispatcharr() {
+        val older = sum("favorites" to Category(1, 1_000))
+        val newer = sum("favorites" to Category(1, 9_000))
+        assertEquals(Source.Dispatcharr, SetupSourceChoice.defaultSelection(drive = newer, dsync = older))
+        assertEquals(Source.Dispatcharr, SetupSourceChoice.defaultSelection(drive = older, dsync = newer))
+        assertEquals(Source.Dispatcharr, SetupSourceChoice.defaultSelection(drive = older, dsync = older))
+    }
+
+    @Test fun recencyIgnoresEmptyCategories() {
+        val d = sum("favorites" to Category(1, 1_000), "settings" to Category(0, 99_000))
+        assertEquals(1_000L, d.updatedAt)
+    }
+
+    @Test fun convergeEqualCountsOnlyLoggedSkips() {
+        // A skip reason on a category that is equal anyway gets no skip line, so it is not counted.
+        val fp = "fp"
+        val d = sum("progress" to Category(3, 1, fp), "recents" to Category(2, 1, "r"))
+        val x = sum("progress" to Category(3, 1, fp), "recents" to Category(2, 1, "r"))
+        val skips = SetupSourceChoice.convergeSkips(d, x, mapOf("progress" to "dirty"), emptyMap())
+        assertEquals(emptyList<Pair<String, String>>(), skips)
+        assertEquals("[SYNC] converge equal categories=2 skipped=0", SetupSourceChoice.convergeEqualLine(2, skips))
+        // An Off item is filtered out of both sides: not compared, not counted.
+        val off = SetupSourceChoice.forDevice(sum("favorites" to Category(1, 1, "a"), "progress" to Category(3, 1, fp))) { it == "favorites" }
+        assertTrue("favorites" !in off.categories)
+        assertTrue(SetupSourceChoice.convergeSkips(off, off, mapOf("favorites" to "unread"), emptyMap()).isEmpty())
+    }
+
+    @Test fun replaceSnapshotWaitsForLocalProgress() {
+        val h = com.aeriotv.android.core.sync.dsync.DsyncHeld
+        assertTrue(h.progressSettled(0, catalogReady = false))
+        assertTrue(!h.progressSettled(3, catalogReady = false))
+        assertTrue(h.progressSettled(3, catalogReady = true))
+    }
+
+    @Test fun countLineShowsNonZeroInOrder() {
+        val s = sum(
+            "reminders" to Category(3, 1),
+            "favorites" to Category(12, 1),
+            "progress" to Category(8, 1),
+            "watchlist" to Category(0, 1),
+        )
+        assertEquals("12 favorites, 8 in progress, 3 reminders", SetupSourceChoice.countLine(s))
+    }
+
+    @Test fun countLineCapsAtFourThenAndMore() {
+        val s = sum(
+            "favorites" to Category(12, 1), "progress" to Category(8, 1), "reminders" to Category(3, 1),
+            "watchlist" to Category(2, 1), "settings" to Category(40, 1),
+        )
+        assertEquals("12 favorites, 8 in progress, 3 reminders, 2 in Watchlist, and more", SetupSourceChoice.countLine(s))
+    }
+
+    @Test fun countLineExactlyFourHasNoAndMore() {
+        val s = sum(
+            "favorites" to Category(1, 1), "progress" to Category(1, 1), "reminders" to Category(1, 1), "collections" to Category(1, 1),
+        )
+        assertEquals("1 favorite, 1 in progress, 1 reminder, 1 collection", SetupSourceChoice.countLine(s))
+    }
+
+    @Test fun countLineEmpty() {
+        assertEquals("Nothing saved yet", SetupSourceChoice.countLine(Summary.EMPTY))
+    }
+
+    @Test fun updatedLine() {
+        val now = 10_000_000_000L
+        assertEquals("Updated just now", SetupSourceChoice.updatedLine(now - 5_000, now))
+        assertEquals("Updated 1 minute ago", SetupSourceChoice.updatedLine(now - 60_000, now))
+        assertEquals("Updated 5 minutes ago", SetupSourceChoice.updatedLine(now - 300_000, now))
+        assertEquals("Updated 2 hours ago", SetupSourceChoice.updatedLine(now - 7_200_000, now))
+        assertEquals("Updated 3 days ago", SetupSourceChoice.updatedLine(now - 3L * 86_400_000, now))
+        assertEquals("Not updated yet", SetupSourceChoice.updatedLine(0, now))
+    }
+
+    @Test fun allSharedCategoriesProvablyEqualPreferDispatcharr() {
+        // Every shared category now carries a canonical fingerprint on both sides.
+        val cats = SetupSourceChoice.SHARED.mapIndexed { i, n -> n to Category(i + 1, 10, "fp$i") }
+        val d = Summary(cats.toMap())
+        val x = Summary(cats.associate { (n, c) -> n to c.copy(updatedAt = 99) })
+        assertEquals(Decision.UseDispatcharr, SetupSourceChoice.decide(d, x))
+    }
+
+    @Test fun oneUnresolvedCategoryStillAsks() {
+        val cats = SetupSourceChoice.SHARED.mapIndexed { i, n -> n to Category(i + 1, 10, "fp$i") }.toMap()
+        val d = Summary(cats + ("favorites" to Category(1, 10, null)))
+        assertTrue(SetupSourceChoice.decide(d, Summary(cats)) is Decision.Ask)
+    }
+
+    @Test fun backupUpdateCopy() {
+        assertEquals("Your backup needs an update", SetupSourceChoice.UPDATE_TITLE)
+        assertEquals("Update backup", SetupSourceChoice.UPDATE_ACCEPT)
+        assertEquals("Not now", SetupSourceChoice.UPDATE_NOT_NOW)
+        assertEquals(
+            "AerioTV backups changed format. Updating keeps your backup working with the newest version of AerioTV " +
+                "on every device. This takes a moment and does not change your favorites, progress, or settings.",
+            SetupSourceChoice.UPDATE_BODY,
+        )
+        assertTrue(!SetupSourceChoice.UPDATE_BODY.contains("Dispatcharr"))
+    }
+
+    @Test fun backupUpdateOfferDeclineAndSettingsOncePerSession() {
+        BackupUpdateOffer.resetForTest()
+        assertTrue(BackupUpdateOffer.shouldOffer(true, accepted = false, playlistId = "p"))
+        assertTrue(!BackupUpdateOffer.shouldOffer(false, false, "p"))
+        assertTrue(!BackupUpdateOffer.shouldOffer(true, accepted = true, playlistId = "p"))
+        assertTrue(!BackupUpdateOffer.shouldOfferInSettings(driveOn = false, true, false, "p"))
+        assertTrue(BackupUpdateOffer.shouldOfferInSettings(true, true, false, "p"))
+        BackupUpdateOffer.markSettingsShown("p")
+        assertTrue(!BackupUpdateOffer.shouldOfferInSettings(true, true, false, "p"))
+        BackupUpdateOffer.decline("q")
+        assertTrue(!BackupUpdateOffer.shouldOffer(true, false, "q"))
+        BackupUpdateOffer.resetForTest()
+    }
+
+    @Test fun decisionNamesArePlain() {
+        assertEquals("UseDrive", SetupSourceChoice.decisionName(Decision.UseDrive))
+        assertEquals("UseDispatcharr", SetupSourceChoice.decisionName(Decision.UseDispatcharr))
+        assertEquals("Ask", SetupSourceChoice.decisionName(Decision.Ask(Summary.EMPTY, Summary.EMPTY)))
+    }
+
+    @Test fun forcedReplacePushesEmptyCategories() {
+        // Choosing Google Drive: an empty category is written (server mirrors Drive), not skipped.
+        com.aeriotv.android.core.sync.dsync.DsyncCoexistence.FORCE_KEYS.forEach { key ->
+            assertTrue(com.aeriotv.android.core.sync.dsync.DsyncCoexistence.forcedWritesEmpty(true, key))
+            assertTrue(!com.aeriotv.android.core.sync.dsync.DsyncCoexistence.forcedWritesEmpty(false, key))
+        }
+        assertTrue(!com.aeriotv.android.core.sync.dsync.DsyncCoexistence.forcedWritesEmpty(true, com.aeriotv.android.core.sync.dsync.DsyncKey.Profiles))
+        val empty = kotlinx.serialization.json.JsonObject(mapOf("rows" to kotlinx.serialization.json.JsonArray(emptyList())))
+        assertTrue(com.aeriotv.android.core.sync.dsync.DsyncCoexistence.isEmptyData(com.aeriotv.android.core.sync.dsync.DsyncKey.Progress, empty))
+    }
+
+    @Test fun forcedReplaceCancelledWhereDriveDidNotApply() {
+        val c = com.aeriotv.android.core.sync.dsync.DsyncCoexistence
+        val all = SyncCategory.entries.associateWith { true }
+        assertEquals(emptyList<Any>(), c.cancelledForceKeys(all))
+        // Watch Progress failed, Reminders was not run: their keys disarm, the rest stay.
+        val r = c.cancelledForceKeys(all + (SyncCategory.WatchProgress to false) - SyncCategory.Reminders)
+        assertEquals(setOf(com.aeriotv.android.core.sync.dsync.DsyncKey.Progress, com.aeriotv.android.core.sync.dsync.DsyncKey.Reminders), r.toSet())
+        // Favorites failing disarms favorites, recents, and collections.
+        assertEquals(setOf(com.aeriotv.android.core.sync.dsync.DsyncKey.Favorites, com.aeriotv.android.core.sync.dsync.DsyncKey.Recents, com.aeriotv.android.core.sync.dsync.DsyncKey.Collections), c.cancelledForceKeys(all + (SyncCategory.Favorites to false)).toSet())
+        // Arming happens after the apply, for the applied categories only.
+        val failed = all + (SyncCategory.WatchProgress to false)
+        val armed = c.armedForceKeys(failed).toSet()
+        assertTrue(com.aeriotv.android.core.sync.dsync.DsyncKey.Progress !in armed)
+        assertEquals(c.FORCE_KEYS.toSet(), armed + c.cancelledForceKeys(failed))
+        assertTrue(armed.intersect(c.cancelledForceKeys(failed).toSet()).isEmpty())
+    }
+
+    @Test fun choiceHoldIsTimeBounded() {
+        val c = com.aeriotv.android.core.sync.dsync.DsyncCoexistence
+        assertTrue(!c.choiceHeld(0L, 5))
+        assertTrue(c.choiceHeld(10L, 5))
+        assertTrue(!c.choiceHeld(10L, 10))
+    }
+
+    @Test fun driveLastWriteDrivesUpdatedLine() {
+        val d = Summary(mapOf("favorites" to Category(2, 1_000), "settings" to Category(0, 9_000)), lastWrite = 9_000)
+        assertEquals(9_000L, d.updatedAt)
+        assertEquals(0L, Summary(emptyMap(), lastWrite = 5).updatedAt)
+    }
+
+    @Test fun copyHasNoEmDash() {
+        listOf(SetupSourceChoice.TITLE, SetupSourceChoice.FOOTER, SetupSourceChoice.UPDATE_TITLE, SetupSourceChoice.UPDATE_BODY).forEach { assertTrue(!it.contains('\u2014')) }
+    }
+}

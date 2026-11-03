@@ -9,6 +9,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsFocusedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -88,7 +89,16 @@ object GuidePreviewBanner {
      * copy of it, so they follow.
      */
     val height: Dp
-        @Composable get() = ProgramArtSlot.height + 5.dp * ProgramArtSlot.scale
+        @Composable get() = ProgramArtSlot.height + 5.dp * ProgramArtSlot.scale + DESCRIPTION_RESERVE * ProgramArtSlot.scale
+
+    /**
+     * Room reserved under the art (2026-10-26) so the worst case fits: title,
+     * channel, subtitle, meta row, and 3 description lines. The banner height
+     * is the same for every program, so the guide's time row never moves.
+     * The copy lines carry explicit line heights (the theme's 24 sp body
+     * line height made every small line 24 sp tall and left one line).
+     */
+    private val DESCRIPTION_RESERVE = 32.dp
 
     /**
      * The TV lift: tvOS pulls the banner 28 pt up under the tab bar so eight
@@ -112,7 +122,7 @@ object GuidePreviewBanner {
      * keep the remote hint strip clear of that first line.
      */
     val firstTextInset: Dp
-        @Composable get() = height - 102.dp * ProgramArtSlot.scale
+        @Composable get() = 4.dp * ProgramArtSlot.scale
 }
 
 /** Session art cache keyed by program id or cleaned title; null = every source missed. */
@@ -215,6 +225,8 @@ fun GuidePreviewBanner(
         onDispose {
             com.aeriotv.android.feature.player.MiniPlayerChrome
                 .bannerArtBottomPx.value = 0f
+            com.aeriotv.android.feature.player.MiniPlayerChrome
+                .bannerArtTopPx.value = 0f
         }
     }
     val colors = MaterialTheme.colorScheme
@@ -230,7 +242,10 @@ fun GuidePreviewBanner(
             .height(GuidePreviewBanner.height)
             .background(colors.background)
             .padding(start = 20.dp, end = 20.dp, bottom = 4.dp),
-        verticalAlignment = Alignment.Bottom,
+        // Top-aligned (2026-10-28): the art's top edge lines up with the
+        // title. The banner grew for the 3-line description on 10/26 with
+        // the copy top-anchored, so a bottom-aligned art sat below the title.
+        verticalAlignment = Alignment.Top,
         horizontalArrangement = Arrangement.spacedBy(22.dp),
     ) {
         // The shared program-art slot. Channel logo only once every source
@@ -250,10 +265,15 @@ fun GuidePreviewBanner(
             // Off means both are square.
             containerCorner = GUIDE_ART_CORNER,
             rounded = guideRounded,
-            modifier = Modifier.onGloballyPositioned {
-                com.aeriotv.android.feature.player.MiniPlayerChrome
-                    .bannerArtBottomPx.value = it.boundsInRoot().bottom
-            },
+            modifier = Modifier
+                .padding(top = GuidePreviewBanner.firstTextInset)
+                .onGloballyPositioned {
+                    val b = it.boundsInRoot()
+                    com.aeriotv.android.feature.player.MiniPlayerChrome
+                        .bannerArtTopPx.value = b.top
+                    com.aeriotv.android.feature.player.MiniPlayerChrome
+                        .bannerArtBottomPx.value = b.bottom
+                },
             fallback = {
                 if (artKnown && channel != null && channel.tvgLogo.isNotBlank()) {
                     AsyncImage(
@@ -277,7 +297,7 @@ fun GuidePreviewBanner(
             },
         )
         if (program == null) {
-            Text("Select a program", fontSize = 13.sp.subtext(), fontWeight = FontWeight.Medium, color = colors.tertiary)
+            Text("Select a program", fontSize = 13.sp.subtext(), fontWeight = FontWeight.Medium, color = colors.tertiary, modifier = Modifier.padding(top = GuidePreviewBanner.firstTextInset))
         } else {
             // The mini (205 dp wide, 20 dp from the end) floats over the
             // banner's right end; the copy stops short of it rather than the
@@ -285,7 +305,16 @@ fun GuidePreviewBanner(
             Column(
                 modifier = Modifier
                     .weight(1f)
-                    .padding(end = if (miniActive) 211.dp else 0.dp),
+                    .fillMaxHeight()
+                    // Top-anchored: the title starts firstTextInset below the
+                    // banner top and the description takes what is left.
+                    .padding(
+                        top = GuidePreviewBanner.firstTextInset,
+                        // The mini mirrors the art card (same width at the
+                        // user's Text Size) 20 dp from the end; the copy stops
+                        // short of it.
+                        end = if (miniActive) ProgramArtSlot.maxWidth + 31.dp else 0.dp,
+                    ),
                 verticalArrangement = Arrangement.spacedBy(3.dp),
             ) {
                 // Apple parity (2026-10-12): the title wraps to 2 lines and the
@@ -296,19 +325,19 @@ fun GuidePreviewBanner(
                 var titleLines by remember(program.title) { androidx.compose.runtime.mutableIntStateOf(1) }
                 Text(
                     program.title, fontSize = 18.sp, fontWeight = FontWeight.Bold, color = colors.onBackground,
-                    maxLines = 2, overflow = TextOverflow.Ellipsis,
+                    lineHeight = 22.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
                     onTextLayout = { titleLines = it.lineCount },
                 )
                 if (channel != null) {
-                    Text(channel.name, fontSize = 11.sp, fontWeight = FontWeight.SemiBold, color = colors.textAccent, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(channel.name, fontSize = 11.sp, lineHeight = 15.sp, fontWeight = FontWeight.SemiBold, color = colors.textAccent, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
                 val sub = program.subTitle?.takeIf { !subtitleIsRedundant(it, program.title, program.description) }
                 if (sub != null) {
-                    Text(sub, fontSize = 11.sp.subtext(), fontWeight = FontWeight.Medium, fontStyle = FontStyle.Italic, color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Text(sub, fontSize = 11.sp.subtext(), lineHeight = 15.sp.subtext(), fontWeight = FontWeight.Medium, fontStyle = FontStyle.Italic, color = colors.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                Row(Modifier.height(16.dp * ProgramArtSlot.scale), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                     val range = fmt.format(Date(program.startMillis)) + " - " + fmt.format(Date(program.endMillis))
-                    Text(range, fontSize = 10.sp.subtext(), fontWeight = FontWeight.Medium, color = colors.onSurfaceVariant, maxLines = 1)
+                    Text(range, fontSize = 10.sp.subtext(), lineHeight = 14.sp.subtext(), fontWeight = FontWeight.Medium, color = colors.onSurfaceVariant, maxLines = 1)
                     if (program.startMillis <= nowMs && nowMs < program.endMillis) {
                         val left = ((program.endMillis - nowMs) / 60_000L).toInt().coerceAtLeast(1)
                         Text("·", fontSize = 10.sp.subtext(), color = colors.tertiary)
@@ -331,17 +360,22 @@ fun GuidePreviewBanner(
                 if (program.description.isNotBlank()) {
                     val interaction = remember { MutableInteractionSource() }
                     var focused by remember { androidx.compose.runtime.mutableStateOf(false) }
-                    Text(
-                        program.description, fontSize = 11.sp.subtext(), lineHeight = 14.sp.subtext(),
+                    // Up to 3 lines, as many as the fixed banner has room for
+                    // under the title, channel, and meta lines (a 2-line title
+                    // or a large Text Size gives up a line), ellipsis on the last.
+                    val descLineHeight = 14.sp.subtext()
+                    androidx.compose.foundation.layout.BoxWithConstraints(Modifier.weight(1f, fill = true)) {
+                    val fitLines = with(androidx.compose.ui.platform.LocalDensity.current) {
+                        ((maxHeight - 4.dp).toPx() / descLineHeight.toPx()).toInt().coerceIn(0, 3)
+                    }
+                    // No room for even one whole line: draw nothing rather than a clipped line.
+                    if (fitLines > 0) Text(
+                        program.description, fontSize = 11.sp.subtext(), lineHeight = descLineHeight,
                         // The banner height is fixed (drawer math + mini
                         // baseline), so large Text Sizes trade a description
                         // line for room instead of pushing the title out the top.
                         color = colors.onBackground.copy(alpha = 0.85f).forText(),
-                        // Up to 2 lines (Apple), 1 when the title wrapped or
-                        // a large Text Size needs the room.
-                        maxLines = (androidx.compose.ui.platform.LocalDensity.current.fontScale * com.aeriotv.android.ui.scale.LocalSubtextScale.current).let { fs ->
-                            if (fs >= 1.1f || titleLines > 1) 1 else 2
-                        },
+                        maxLines = fitLines,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier
                             // tvOS BannerTextButtonStyle: the platter's inset
@@ -369,6 +403,7 @@ fun GuidePreviewBanner(
                             .clickable(interactionSource = interaction, indication = null, onClick = onOpenInfo)
                             .padding(horizontal = 6.dp, vertical = 2.dp),
                     )
+                    }
                 }
             }
         }

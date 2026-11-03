@@ -16,6 +16,11 @@ import javax.inject.Singleton
  */
 object VodIdSink {
     @Volatile var onEpisodes: ((List<Pair<String, Int>>) -> Unit)? = null
+
+    /** One tick per "[VOD-CAT] page written" (conflated); Dispatcharr Sync re-checks deferred keys on it. */
+    val pageWritten = kotlinx.coroutines.flow.MutableSharedFlow<Unit>(
+        extraBufferCapacity = 1, onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST,
+    )
 }
 
 /**
@@ -36,6 +41,20 @@ class VodIdResolver @Inject constructor(
     private val prefs = context.getSharedPreferences("aerio_vod_ids", Context.MODE_PRIVATE)
     private val fetchedSeries = java.util.concurrent.ConcurrentHashMap.newKeySet<Int>()
 
+    /**
+     * Movie ids (and uuids) the catalog did not hold, remembered for this
+     * process per catalog state (review 2026-10-27): every pull re-scanned
+     * the whole catalog for rows of movies this catalog never had. The
+     * stamp is identity + generation + row count, so any sweep page that
+     * lands invalidates the memo and the next lookup scans again.
+     */
+    private val missMemo = MissMemo()
+
+    private suspend fun catalogStamp(key: String): String {
+        val gen = catalog.state(key, VodCatalogStore.KIND_MOVIE)?.generation ?: -1L
+        return "$key|$gen|${catalog.count(key, VodCatalogStore.KIND_MOVIE)}"
+    }
+
     init {
         VodIdSink.onEpisodes = { pairs -> record("e", pairs) }
     }
@@ -44,18 +63,48 @@ class VodIdResolver @Inject constructor(
         if (pairs.isEmpty()) return
         val e = prefs.edit()
         pairs.forEach { (uuid, id) ->
-            if (uuid.isBlank()) return@forEach
+            // Held placeholders (DsyncHeld) are never a local uuid.
+            if (uuid.isBlank() || DsyncHeld.isPlaceholder(uuid)) return@forEach
             e.putInt("$kind:$uuid", id).putString("${kind.uppercase()}:$id", uuid)
         }
         e.apply()
     }
 
+    /**
+     * Canonical ids a Google Drive snapshot carries (format 2, docs section
+     * 10a): the Dispatcharr id a push resolved for a movie or episode uuid.
+     * Recorded on every Drive apply so a forced push translates those rows
+     * without the movie catalog or an episode list (field run 2026-11-01:
+     * 7 of 8 restored rows waited on a sweep that never covered them).
+     */
+    fun recordCanonical(movies: Map<String, Int>, episodes: Map<String, Int>) {
+        record("m", movies.toList())
+        record("e", episodes.toList())
+    }
+
     fun catalogKey(row: PlaylistEntity): String = snapshots.identity(row)
+
+    /**
+     * True once [row]'s movie catalog has completed a sweep (or VOD is off for
+     * the playlist, so no catalog will come). Until then a movie uuid that is
+     * not yet translated may simply not be loaded yet (DsyncReadiness).
+     */
+    suspend fun moviesReady(row: PlaylistEntity): Boolean {
+        if (!row.vodEnabled) return true
+        catalog.migrateIdentitiesToV2()
+        val st = catalog.state(catalogKey(row), VodCatalogStore.KIND_MOVIE) ?: return false
+        return st.completedAtMs > 0L
+    }
 
     /** Movie uuid -> Dispatcharr movie id. */
     suspend fun movieId(row: PlaylistEntity, uuid: String): Int? {
         if (prefs.contains("m:$uuid")) return prefs.getInt("m:$uuid", 0)
-        val id = catalog.movie(catalogKey(row), uuid)?.id ?: return null
+        catalog.migrateIdentitiesToV2()
+        val key = catalogKey(row)
+        val stamp = catalogStamp(key)
+        if (missMemo.isMiss(stamp, "u:$uuid")) return null
+        val id = catalog.movie(key, uuid)?.id
+        if (id == null) { missMemo.addMisses(stamp, listOf("u:$uuid")); return null }
         record("m", listOf(uuid to id))
         return id
     }
@@ -66,9 +115,16 @@ class VodIdResolver @Inject constructor(
         val missing = HashSet<Int>()
         ids.forEach { id -> prefs.getString("M:$id", null)?.let { out[id] = it } ?: missing.add(id) }
         if (missing.isNotEmpty()) {
-            val found = catalog.movieUuidsByIds(catalogKey(row), missing)
-            record("m", found.map { (id, uuid) -> uuid to id })
-            out += found
+            catalog.migrateIdentitiesToV2()
+            val key = catalogKey(row)
+            val stamp = catalogStamp(key)
+            val toScan = missing.filterTo(HashSet()) { !missMemo.isMiss(stamp, "i:$it") }
+            if (toScan.isNotEmpty()) {
+                val found = catalog.movieUuidsByIds(key, toScan)
+                record("m", found.map { (id, uuid) -> uuid to id })
+                out += found
+                missMemo.addMisses(stamp, (toScan - found.keys).map { "i:$it" })
+            }
         }
         return out
     }
@@ -79,6 +135,15 @@ class VodIdResolver @Inject constructor(
         if (seriesId == null || !loadSeries(base, apiKey, seriesId)) return null
         return if (prefs.contains("e:$uuid")) prefs.getInt("e:$uuid", 0) else null
     }
+
+    /** Episode uuid -> id from the saved map only (no network): Drive pushes never wait on a fetch. */
+    fun episodeIdCached(uuid: String): Int? = if (prefs.contains("e:$uuid")) prefs.getInt("e:$uuid", 0) else null
+
+    /** Movie id -> local uuid from the saved map only (no catalog scan): the Drive progress snapshot. */
+    fun movieUuidCached(id: Int): String? = prefs.getString("M:$id", null)
+
+    /** Episode id -> local uuid from the saved map only (no network): the setup probe filter. */
+    fun episodeUuidCached(id: Int): String? = prefs.getString("E:$id", null)
 
     /** Episode id -> local uuid; loads [seriesId]'s episode list once when unknown. */
     suspend fun episodeUuid(base: String, apiKey: String, id: Int, seriesId: Int?): String? {
@@ -93,7 +158,25 @@ class VodIdResolver @Inject constructor(
             val page = client.getSeriesEpisodesFirstPage(base, apiKey, seriesId)
             record("e", page.results.map { it.uuid to it.id })
             true
-        }.onFailure { Log.w("AerioDsync", "[DSYNC] episode ids for series $seriesId: ${it.javaClass.simpleName}") }
+        }.onFailure {
+            // A failed load (offline at the first push) must not block this
+            // series for the rest of the process: the next build tries again.
+            fetchedSeries.remove(seriesId)
+            Log.w("AerioDsync", "[DSYNC] episode ids for series $seriesId: ${it.javaClass.simpleName}")
+        }
             .getOrDefault(false)
+    }
+}
+
+/** Lookup misses valid for one catalog stamp; a new stamp starts empty. */
+internal class MissMemo {
+    private var stamp: String? = null
+    private val misses = HashSet<String>()
+
+    @Synchronized fun isMiss(stamp: String, key: String): Boolean = this.stamp == stamp && key in misses
+
+    @Synchronized fun addMisses(stamp: String, keys: Collection<String>) {
+        if (this.stamp != stamp) { this.stamp = stamp; misses.clear() }
+        misses += keys
     }
 }

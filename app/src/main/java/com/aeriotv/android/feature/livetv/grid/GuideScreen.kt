@@ -353,21 +353,28 @@ fun GuideScreen(
             groups.map { it to com.aeriotv.android.feature.livetv.groupDisplayName(it) } +
             end.map { ChannelCollection.token(it.id) to it.name }
     }
-    val groupedChannels by produceState(
-        initialValue = computeDisplayChannels(
+    // Program search (Logan 2026-11-01): phones and tablets also match
+    // program titles from the loaded guide map; TV keeps its Search tab.
+    val searchEpg = if (isTv) null else state.epgByChannel
+    val guideSearch by produceState(
+        initialValue = com.aeriotv.android.feature.livetv.computeLiveSearch(
             state.channels, state.selectedGroup, state.searchQuery, state.sortMode,
             allGroupNames, groupSortMode, effectiveHidden, favoriteIds, collections, recentChannelIds,
         ),
         state.channels, state.selectedGroup, state.searchQuery, state.sortMode,
         allGroupNames, groupSortMode, effectiveHidden, favoriteIds, collections, recentChannelIds,
+        searchEpg,
     ) {
+        if (state.searchQuery.isNotBlank()) kotlinx.coroutines.delay(com.aeriotv.android.feature.livetv.LIVE_SEARCH_DEBOUNCE_MS)
         value = withContext(Dispatchers.Default) {
-            computeDisplayChannels(
+            com.aeriotv.android.feature.livetv.computeLiveSearch(
                 state.channels, state.selectedGroup, state.searchQuery, state.sortMode,
                 allGroupNames, groupSortMode, effectiveHidden, favoriteIds, collections, recentChannelIds,
+                searchEpg,
             )
         }
     }
+    val groupedChannels = guideSearch.channels
     // favoritesOnly: the starred channels in the user's favorites order,
     // joined against the loaded playlist so stale rows fall away.
     val favoriteChannels = remember(favoritesList, state.channels) {
@@ -515,10 +522,17 @@ fun GuideScreen(
     // phone keeps building fresh rows.
     // Plain holder, not state: written by the rows calc, read by the install log.
     val windowRoll = remember { LongArray(1) }
-    val rows = remember(displayChannels, state.epgByChannel, windowStartMs, windowEndMs) {
+    val rows = remember(displayChannels, state.epgByChannel, windowStartMs, windowEndMs, state.guidePaintPending) {
         val held = grid.rows
         val roll = windowStartMs - held.windowStartMs
-        if (isTv && !held.isEmpty &&
+        if (state.guidePaintPending && state.epgByChannel !is GuideCatalog) {
+            // Cold launch over a warm cache: the cached catalog is a few
+            // hundred ms out. Installing the channel rows now (name cells
+            // only) cost a full install that the catalog then replaced
+            // (2026-10-27); hold what is there until it lands.
+            windowRoll[0] = 0L
+            held
+        } else if (isTv && !held.isEmpty &&
             held.catalog === (state.epgByChannel as? GuideCatalog) &&
             roll >= 0L && roll <= WINDOW_ROLL_REUSE_MAX_MS &&
             windowEndMs - held.windowEndMs == roll &&
@@ -669,6 +683,25 @@ fun GuideScreen(
         }
     }
     val snapToNow: () -> Unit = { jumpTargetMs = null; pendingJumpScroll = false; grid.anchorToNow(System.currentTimeMillis()) }
+
+    // Profile switch (Logan 2026-10-27): the guide comes up exactly as at
+    // launch. The tick fires when the scrim goes up, before the reload, so
+    // the reset happens under the scrim: no focus or viewport carried over,
+    // no per-group viewports from the previous profile, viewport at now and
+    // the next rows install lands on row 0 of the new launch group.
+    val profileSwitchTick by com.aeriotv.android.core.profiles.ProfileSwitchFocus.switches.collectAsState()
+    val seenProfileSwitchTick = remember { longArrayOf(profileSwitchTick) }
+    LaunchedEffect(profileSwitchTick) {
+        if (profileSwitchTick == seenProfileSwitchTick[0]) return@LaunchedEffect
+        seenProfileSwitchTick[0] = profileSwitchTick
+        groupViewport.saved.clear()
+        // A sentinel, never a real token: the next install runs the group
+        // change path (focus on row 0, list scrolled to its top).
+        groupViewport.installedGroup = PROFILE_SWITCH_GROUP
+        snapToNow()
+        grid.resetForEntry(grid.viewportStartMs)
+        android.util.Log.i("AerioProfiles", "[PROFILE] guide reset for switch (viewport at now, focus row 0 on next install)")
+    }
 
     // The guide always opens and resumes at now (Logan 2026-10-10). The
     // composition (and the retained grid) survives the app being backgrounded
@@ -1357,7 +1390,7 @@ fun GuideScreen(
                     onValueChange = viewModel::onSearchQueryChange,
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
                     singleLine = true,
-                    placeholder = { Text("Search channels") },
+                    placeholder = { Text("Search channels and programs") },
                     leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null) },
                     trailingIcon = if (state.searchQuery.isNotEmpty()) {
                         { IconButton(onClick = { viewModel.onSearchQueryChange("") }) { Icon(Icons.Filled.Close, contentDescription = "Clear search") } }
@@ -1502,6 +1535,8 @@ fun GuideScreen(
             val gridContent: @Composable () -> Unit = {
             androidx.compose.runtime.CompositionLocalProvider(
                 com.aeriotv.android.core.category.LocalCategoryPalette provides categoryPalette,
+                com.aeriotv.android.feature.livetv.LocalGuideSearchMatches provides
+                    if (favoritesOnly) emptyMap() else guideSearch.programMatches,
             ) {
             GuideGrid(
                 state = grid,
@@ -2062,3 +2097,6 @@ internal class GuideGroupViewport {
 
 /** Matches GuideGrid's LANE_ROWS: focus deeper than this would move the restored first row. */
 private const val GROUP_RESTORE_LANE_ROWS = 6
+
+/** [GuideGroupViewport.installedGroup] after a profile switch; matches no group. */
+private const val PROFILE_SWITCH_GROUP = "\u0000profile-switch"

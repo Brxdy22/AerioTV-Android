@@ -301,6 +301,9 @@ fun RemoteControlSettingsScreen(
     val showRemoteHints by viewModel.showRemoteHints.collectAsStateWithLifecycle(
         initialValue = true,
     )
+    val exitFocusExit by viewModel.exitDialogFocusExit.collectAsStateWithLifecycle(
+        initialValue = false,
+    )
     val menuGuard = rememberTvMenuGuard()
 
     fun saveEdited(newMap: RemoteControlMap) {
@@ -327,6 +330,15 @@ fun RemoteControlSettingsScreen(
                         checked = showRemoteHints,
                         onCheckedChange = { viewModel.setShowRemoteHints(it) },
                     )
+                    // TV only: the Exit AerioTV? confirm is a D-pad prompt.
+                    if (com.aeriotv.android.ui.settings.rememberIsTvDevice()) {
+                        SettingsToggleRow(
+                            title = "Exit Prompt Starts on Exit",
+                            subtitle = "When you press Back to leave AerioTV, Exit is highlighted instead of Cancel.",
+                            checked = exitFocusExit,
+                            onCheckedChange = { viewModel.setExitDialogFocusExit(it) },
+                        )
+                    }
                 }
 
                 // Pick-one rows rather than a value row + dialog, matching the

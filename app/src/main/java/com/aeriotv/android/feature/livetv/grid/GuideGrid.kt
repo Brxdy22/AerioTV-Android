@@ -404,6 +404,7 @@ fun GuideGrid(
                             }
                         }
                         rightDownSeen = false
+                        android.util.Log.i("AerioFocus", "[GUIDE] step-Right up cell=r${state.focusRow} @${state.focusCellStartMs} end=${state.focusedCell()?.endMillis} viewport=${state.viewportStartMs}..${state.viewportStartMs + state.viewportDurationMs}")
                     }
                     true
                 }
@@ -437,6 +438,7 @@ fun GuideGrid(
                             }
                         }
                         leftDownSeen = false
+                        android.util.Log.i("AerioFocus", "[GUIDE] step-Left up cell=r${state.focusRow} @${state.focusCellStartMs} end=${state.focusedCell()?.endMillis} viewport=${state.viewportStartMs}..${state.viewportStartMs + state.viewportDurationMs}")
                     }
                     true
                 }
@@ -726,9 +728,21 @@ private fun TimeHeader(
                     if (isTv) drawLine(rule, Offset(x, 0f), Offset(x, size.height), strokeWidth = 1f)
                     val label = fmt.format(Date(t)).lowercase(Locale.getDefault())
                     // The edge sits at now (Logan 2026-10-08), so the first slot is
-                    // partial: only half-hour marks at or right of the edge get a label.
+                    // partial and its mark is left of the edge. It used to be culled
+                    // (x >= -1f only), which dropped the label of the column holding
+                    // now: restored to 1:12pm the header read "1:30pm" first while the
+                    // current program filled the 1:00pm column (Streamer 2026-10-27).
+                    // The partial slot's label is pinned to the edge instead, and only
+                    // skipped when the next mark is too close for both to fit.
+                    val y = (size.height - 16.sp.toPx()) / 2f
                     if (x >= -1f) {
-                        drawText(textMeasurer, label, topLeft = Offset(x.coerceAtLeast(0f) + 6f, (size.height - 16.sp.toPx()) / 2f), style = labelStyle, maxLines = 1)
+                        drawText(textMeasurer, label, topLeft = Offset(x.coerceAtLeast(0f) + 6f, y), style = labelStyle, maxLines = 1)
+                    } else {
+                        val w = textMeasurer.measure(label, style = labelStyle, maxLines = 1).size.width
+                        val nextX = (t + slot - vs) * pxPerMs
+                        if (nextX >= w + 12f) {
+                            drawText(textMeasurer, label, topLeft = Offset(6f, y), style = labelStyle, maxLines = 1)
+                        }
                     }
                     t += slot
                 }
@@ -847,7 +861,11 @@ private fun GridRow(
     // measuring through TextMeasurer on every draw was ~1 ms per row.
     // Keyed on fontScale too: cached layouts are measured in sp, so a live
     // Text Size change must re-measure instead of drawing stale sizes.
-    val textCache = remember(state.rows, row, showBadges, showSubtitles, clockMode, rail, LocalDensity.current.fontScale, subScale, textContrast, accent) { HashMap<Long, CellText>() }
+    // Live TV search (Logan 2026-11-01): the "why it matched" line for a
+    // program-only match, same text as the list row. Phones and tablets only.
+    val searchMatchText = if (isTv) null else com.aeriotv.android.feature.livetv.LocalGuideSearchMatches.current[channel.url]
+        ?.let { com.aeriotv.android.feature.livetv.searchMatchLine(it, nowMs / 60_000L * 60_000L) }
+    val textCache = remember(state.rows, row, searchMatchText, showBadges, showSubtitles, clockMode, rail, LocalDensity.current.fontScale, subScale, textContrast, accent) { HashMap<Long, CellText>() }
     val rangeCache = remember(state.rows, row, clockMode) { HashMap<Long, String>() }
     val railWidthPx = with(LocalDensity.current) { railWidth.toPx() }
     val logos = LocalLogoCache.current
@@ -864,12 +882,15 @@ private fun GridRow(
     val railSmallBandNumberStyle = TextStyle(color = tertiary, fontSize = 11.sp, fontWeight = FontWeight.Bold)
     // TalkBack: one node per row (channel + what is on now). Read in
     // composition on the 30 s tick only, never per press.
-    val rowDescription = remember(channel.id, nowMs / 60_000L) {
+    // The search match line is drawn on the Canvas, so it joins the row's
+    // description here for screen readers.
+    val rowDescription = remember(channel.id, nowMs / 60_000L, searchMatchText) {
         val onNow = state.rows.cellAt(row, nowMs)?.takeIf { !it.isPlaceholder }?.title
         buildString {
             channel.channelNumber?.let { append(it).append(", ") }
             append(channel.name)
             if (onNow != null) append(", now: ").append(onNow)
+            if (searchMatchText != null) append(", matched: ").append(searchMatchText)
         }
     }
     Canvas(
@@ -1165,6 +1186,28 @@ private fun GridRow(
         // Neutral hairlines (tvOS: the app background shows through a 1 pt
         // gap; accent-tinted rules read as heavy borders, Logan 2026-09-10).
         // Phone / tablet: Apple iOS rail rule, accentPrimary 0.20.
+        // Search match line: single line, accent, ellipsized to the rail,
+        // pinned to the rail's bottom on a surface backing so it reads over
+        // the logo.
+        if (searchMatchText != null) {
+            val matchW = (railWidthPx - 2 * railStart).toInt().coerceAtLeast(1)
+            val match = textCache.getOrPut(RAIL_MATCH_KEY) {
+                CellText(
+                    textMeasurer.measure(
+                        searchMatchText,
+                        style = TextStyle(color = accent, fontSize = 9.sp, fontWeight = FontWeight.SemiBold),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        constraints = Constraints(maxWidth = matchW),
+                    ),
+                    null,
+                )
+            }.title
+            val pad = 2.dp.toPx()
+            val top = (size.height - match.size.height - pad).coerceAtLeast(0f)
+            drawRect(surface.copy(alpha = 0.92f), topLeft = Offset(0f, top - pad), size = Size(railWidthPx, size.height - top + pad))
+            drawText(match, topLeft = Offset(railStart, top))
+        }
         drawLine(if (isTv) Color.White.copy(alpha = 0.08f) else accent.copy(alpha = 0.2f), Offset(railWidthPx - 0.5f, 0f), Offset(railWidthPx - 0.5f, size.height), strokeWidth = 1.dp.toPx())
 
         // Programme strip.
@@ -1505,6 +1548,7 @@ private const val CELL_TEXT_CACHE_SOFT_CAP = 48
 private const val CELL_TEXT_EVICT_MARGIN_MS = 12 * 3_600_000L
 private const val RAIL_NAME_KEY = Long.MIN_VALUE + 2
 private const val RAIL_UNDER_NUMBER_KEY = Long.MIN_VALUE + 3
+private const val RAIL_MATCH_KEY = Long.MIN_VALUE + 4
 
 // Grown rail logo (number and/or name hidden): inset from the rail edges,
 // top clearance under the 12 dp corner icons (4 dp top + 12 dp + 2 dp), and

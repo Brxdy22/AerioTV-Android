@@ -60,6 +60,8 @@ class DriveSyncWorker @AssistedInject constructor(
         // blank fresh install would overwrite a populated Drive backup with
         // empty snapshots (user report). The pull below sets the flag, so
         // the next cycle pushes normally.
+        // Rule 4 one-time id migration (DriveSyncManager.migrateCanonicalIds); never fails the sync.
+        runCatching { sync.migrateCanonicalIds(token, enabled) }
         val initialPullDone = prefs.syncInitialPullDone.first()
         val pushed = if (initialPullDone) {
             sync.pushAll(token, enabled)
@@ -109,6 +111,16 @@ class DriveSyncWorker @AssistedInject constructor(
          * 15s delay + unique-name REPLACE debounces bursts of closes
          * into one run. */
         private const val ONESHOT_NAME = "aeriotv-drive-sync-oneshot"
+
+        private val follows = HashMap<SyncCategory, LinkedHashSet<String>>()
+
+        /** Dispatcharr Sync follow (Rule 5): remembered until the next push of [category] logs it. */
+        fun noteFollow(category: SyncCategory, why: String) {
+            synchronized(follows) { follows.getOrPut(category) { LinkedHashSet() } += why }
+        }
+
+        fun takeFollows(category: SyncCategory): List<String> =
+            synchronized(follows) { follows.remove(category)?.toList().orEmpty() }
 
         fun enqueueOneShotPush(context: Context) {
             val constraints = Constraints.Builder()

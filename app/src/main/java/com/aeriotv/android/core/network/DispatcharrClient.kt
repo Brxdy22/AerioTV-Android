@@ -461,6 +461,49 @@ class DispatcharrClient @Inject constructor() {
         }
     }
 
+    /**
+     * Profiles > Enable API access (Admin only): POST
+     * /api/accounts/api-keys/generate/ with `{"user_id": id}` mints a key for
+     * that user (a second call overwrites it). Returns the raw key. The key is
+     * a credential: never log it. Throws [DispatcharrError.Transport] with the
+     * HTTP code and the server's reason on a non-2xx.
+     */
+    suspend fun generateUserApiKey(baseUrl: String, apiKey: String, userId: Int): String {
+        val url = "${baseUrl.trimEnd('/')}/api/accounts/api-keys/generate/"
+        val response: HttpResponse = client.post(url) {
+            applyAuth(apiKey)
+            contentType(ContentType.Application.Json)
+            setBody(JsonObject(mapOf("user_id" to JsonPrimitive(userId))))
+        }
+        val text = runCatching { response.bodyAsText() }.getOrNull()
+        if (!response.status.isSuccess()) {
+            val reason = dispatcharrErrorReason(text)
+            throw DispatcharrError.Transport("Enable API access: HTTP ${response.status.value}" + (reason?.let { " ($it)" } ?: ""))
+        }
+        val root = runCatching { json.parseToJsonElement(text.orEmpty()) as? JsonObject }.getOrNull()
+        fun str(o: JsonObject?, k: String) = (o?.get(k) as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
+        return str(root, "key") ?: str(root, "api_key") ?: str(root?.get("user") as? JsonObject, "api_key")
+            ?: throw DispatcharrError.Transport("Enable API access: the server sent no key")
+    }
+
+    /**
+     * Profiles > Enable API access off (Admin only): POST
+     * /api/accounts/api-keys/revoke/ with `{"user_id": id}` clears that
+     * user's key. Throws [DispatcharrError.Transport] on a non-2xx.
+     */
+    suspend fun revokeUserApiKey(baseUrl: String, apiKey: String, userId: Int) {
+        val url = "${baseUrl.trimEnd('/')}/api/accounts/api-keys/revoke/"
+        val response: HttpResponse = client.post(url) {
+            applyAuth(apiKey)
+            contentType(ContentType.Application.Json)
+            setBody(JsonObject(mapOf("user_id" to JsonPrimitive(userId))))
+        }
+        if (!response.status.isSuccess()) {
+            val reason = dispatcharrErrorReason(runCatching { response.bodyAsText() }.getOrNull())
+            throw DispatcharrError.Transport("Revoke API access: HTTP ${response.status.value}" + (reason?.let { " ($it)" } ?: ""))
+        }
+    }
+
     data class AccountPermissions(
         val dvrAccess: String?,
         val vodMoviesEnabled: Boolean,
@@ -846,6 +889,46 @@ class DispatcharrClient @Inject constructor() {
             throw DispatcharrError.Transport("Program detail failed: HTTP ${response.status.value}")
         }
         return response.body()
+    }
+
+    /**
+     * GET /api/epg/programs/search/?airing_at=<now>&fields=id,custom_properties
+     * -- every programme airing right now, categories included, in one paged
+     * request (DRF PageNumberPagination, page_size max 500). Replaces one
+     * /api/epg/programs/<id>/ call per now-airing programme. Returns null
+     * when the server has no search action (HTTP 404/405, older builds) so
+     * the caller can fall back to the per-id detail call. Pages are walked by
+     * `page=N` rather than following `next`, which carries the server's own
+     * view of its host and scheme (wrong behind a reverse proxy).
+     */
+    suspend fun getNowAiringCategories(
+        baseUrl: String,
+        apiKey: String,
+        airingAtIso: String,
+        maxPages: Int = 20,
+    ): NowAiringSearchResult? = withContext(Dispatchers.IO) {
+        val all = HashMap<Int, String>()
+        var page = 1
+        var requests = 0
+        val at = java.net.URLEncoder.encode(airingAtIso, "UTF-8")
+        while (page <= maxPages) {
+            val url = "${baseUrl.trimEnd('/')}/api/epg/programs/search/" +
+                "?airing_at=$at&fields=id,custom_properties&page_size=500&page=$page"
+            val response: HttpResponse = client.get(url) { applyAuth(apiKey) }
+            requests += 1
+            unauthorizedCheck(response, url)
+            val code = response.status.value
+            if (code == 404 && page == 1 || code == 405) return@withContext null
+            if (!response.status.isSuccess()) {
+                if (all.isEmpty()) throw DispatcharrError.Transport("Now-airing search failed: HTTP $code")
+                break
+            }
+            val parsed = NowAiringSearchParser.parse(response.bodyAsText())
+            all.putAll(parsed.categories)
+            if (!parsed.hasNext) break
+            page += 1
+        }
+        NowAiringSearchResult(all, requests)
     }
 
     /**
@@ -2653,7 +2736,34 @@ data class DispatcharrChannel(
     /** Read-only: [isRadio] after the channel-profile override. Preferred. */
     @SerialName("effective_is_radio")
     val effectiveIsRadio: Boolean? = null,
+    /*
+     * GH #160 / Apple #97: Dispatcharr's ChannelSerializer returns the raw
+     * provider columns (name, channel_number, logo_id, channel_group_id,
+     * tvg_id) next to `effective_*` fields that coalesce the user's
+     * ChannelOverride over them. Its own M3U and XC outputs render the
+     * effective values, so Direct Connect read the raw provider value of an
+     * auto-synced channel where M3U showed the override. All nullable so
+     * servers without overrides still parse; the accessors below fall back
+     * to the raw column.
+     */
+    @SerialName("effective_name")
+    val effectiveName: String? = null,
+    @SerialName("effective_channel_number")
+    val effectiveChannelNumber: Double? = null,
+    @SerialName("effective_logo_id")
+    val effectiveLogoId: Int? = null,
+    @SerialName("effective_channel_group_id")
+    val effectiveChannelGroupId: Int? = null,
+    @SerialName("effective_tvg_id")
+    val effectiveTvgId: String? = null,
 ) {
+    /** Channel-level values with the user's override applied (GH #160). */
+    val displayName: String get() = effectiveName?.takeIf { it.isNotBlank() } ?: name
+    val displayChannelNumber: Double? get() = effectiveChannelNumber ?: channelNumber
+    val displayLogoId: Int? get() = effectiveLogoId ?: logoId
+    val displayChannelGroupId: Int? get() = effectiveChannelGroupId ?: channelGroupId
+    val displayTvgId: String? get() = effectiveTvgId?.takeIf { it.isNotBlank() } ?: tvgId
+
     /** effective_is_radio, falling back to is_radio on servers without it. */
     val radio: Boolean get() = effectiveIsRadio ?: isRadio ?: false
 }
@@ -3757,4 +3867,42 @@ fun dispatcharrErrorReason(body: String?): String? {
     val text = body.take(200).trim()
     if (text.isEmpty() || text.startsWith("<")) return null
     return text
+}
+
+/** Answer of [DispatcharrClient.getNowAiringCategories]: program id to
+ *  comma-joined categories (blank = none), and how many requests it took. */
+data class NowAiringSearchResult(val categories: Map<Int, String>, val requests: Int)
+
+/** Pure parser for one page of /api/epg/programs/search/ with
+ *  fields=id,custom_properties. Accepts the DRF envelope
+ *  `{count, next, previous, results:[{id, custom_properties:{categories:[..]}}]}`
+ *  and a flat array. custom_properties may be null or lack categories. */
+object NowAiringSearchParser {
+    data class Page(val categories: Map<Int, String>, val hasNext: Boolean)
+
+    private val parser = Json { ignoreUnknownKeys = true; isLenient = true }
+
+    fun parse(body: String): Page {
+        val root = runCatching { parser.parseToJsonElement(body) }.getOrNull() ?: return Page(emptyMap(), false)
+        val (rows, hasNext) = when (root) {
+            is JsonArray -> root to false
+            is JsonObject -> {
+                val next = root["next"] as? JsonPrimitive
+                ((root["results"] as? JsonArray) ?: JsonArray(emptyList())) to
+                    (next != null && next.isString && next.content.isNotBlank())
+            }
+            else -> JsonArray(emptyList()) to false
+        }
+        val out = LinkedHashMap<Int, String>()
+        rows.forEach { row ->
+            val o = row as? JsonObject ?: return@forEach
+            val id = (o["id"] as? JsonPrimitive)?.content?.toIntOrNull() ?: return@forEach
+            val cats = ((o["custom_properties"] as? JsonObject)?.get("categories") as? JsonArray)
+                ?.mapNotNull { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.content?.trim() }
+                ?.filter { it.isNotBlank() }
+                .orEmpty()
+            out[id] = cats.joinToString(",")
+        }
+        return Page(out, hasNext)
+    }
 }

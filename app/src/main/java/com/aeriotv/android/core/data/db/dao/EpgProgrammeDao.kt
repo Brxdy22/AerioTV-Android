@@ -73,6 +73,26 @@ interface EpgProgrammeDao {
     ): List<EpgProgrammeEntity>
 
     /**
+     * Launch paint read: [forPlaylistInWindow] without the description column
+     * (the long text that made each row several hundred bytes and the result
+     * span several CursorWindows). The quick paint draws cells only; the full
+     * window rebuild that follows reads whole rows, and GuideCatalog list
+     * equality includes description, so every cell is replaced by its full row.
+     */
+    @Transaction
+    @Query(
+        "SELECT id, channelId, title, startMillis, endMillis, category, dispatcharrProgramId, " +
+            "subTitle, season, episode, isNew, isLiveBroadcast, isPremiere, isFinale, isRepeat, iconUrl " +
+            "FROM epg_programme WHERE playlistId = :playlistId " +
+            "AND endMillis > :fromMillis AND startMillis < :toMillis"
+    )
+    suspend fun paintRowsInWindow(
+        playlistId: String,
+        fromMillis: Long,
+        toMillis: Long,
+    ): List<EpgPaintRow>
+
+    /**
      * EPG-scope search for the global Search surface (parity task #41 / iOS
      * SearchView EPG scope). Matches title OR description, case-insensitive
      * (Room LIKE is case-insensitive for ASCII), time-windowed to now-forward
@@ -107,6 +127,18 @@ interface EpgProgrammeDao {
 
     @Query("DELETE FROM epg_programme WHERE playlistId = :playlistId")
     suspend fun deleteForPlaylist(playlistId: String)
+
+    /** REKEYED identity purge (2026-10-27): only the re-keyed channels' rows. */
+    @Query("DELETE FROM epg_programme WHERE playlistId = :playlistId AND channelId IN (:channelIds)")
+    suspend fun deleteForChannels(playlistId: String, channelIds: List<String>): Int
+
+    /** Rows stored under a raw feed key (pre-canonical builds): no identity
+     *  check can vouch for which channel they attach to after a re-key. */
+    @Query(
+        "DELETE FROM epg_programme WHERE playlistId = :playlistId " +
+            "AND channelId NOT LIKE 'disp:%' AND channelId NOT LIKE 'm3u:%'"
+    )
+    suspend fun deleteNonCanonical(playlistId: String): Int
 
     /** Prune one source's programmes that ended before its retention cutoff
      *  (catch-up task #135: retention is per playlist now, so the old blanket
@@ -192,6 +224,46 @@ interface EpgProgrammeDao {
      * healed. Scoping the delete to the incoming feed's channels lets the
      * sources compose instead of clobber.
      */
+    /**
+     * Key projection for the fetch-vs-cache compare: four small columns over
+     * the fetched span, one indexed range read, instead of materializing
+     * every entity (Streamer 2026-10-27 14:38:06: 18573 full rows read to
+     * find 74 new ones). Blocking on purpose: it runs on the caller's
+     * background-priority thread, not on Room's shared I/O pool.
+     */
+    @Query(
+        "SELECT id, channelId, startMillis, endMillis, title FROM epg_programme " +
+            "WHERE playlistId = :playlistId AND endMillis > :fromMs AND startMillis < :toMs",
+    )
+    fun keysInSpanBlocking(playlistId: String, fromMs: Long, toMs: Long): List<EpgKeyRow>
+
+    @Query("UPDATE epg_programme SET category = :category WHERE playlistId = :playlistId AND channelId = :channelId AND startMillis = :startMillis")
+    fun updateCategoryBlocking(playlistId: String, channelId: String, startMillis: Long, category: String): Int
+
+    /** Category backfill as UPDATEs in ONE transaction: no delete+insert
+     *  per row (REPLACE), no index churn beyond the category column. */
+    @Transaction
+    fun updateCategoriesBlocking(playlistId: String, rows: List<EpgProgrammeEntity>): Int {
+        var n = 0
+        for (r in rows) n += updateCategoryBlocking(playlistId, r.channelId, r.startMillis, r.category)
+        return n
+    }
+
+    @Query("DELETE FROM epg_programme WHERE id IN (:ids)")
+    fun deleteByIdsBlocking(ids: List<Long>): Int
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    fun insertAllBlocking(rows: List<EpgProgrammeEntity>)
+
+    /** Delta save: drop the superseded rows and write only the new and
+     *  changed ones, in one transaction. Rows already stored are untouched,
+     *  so their enriched categories survive. */
+    @Transaction
+    fun applyDeltaBlocking(deleteIds: List<Long>, rows: List<EpgProgrammeEntity>) {
+        deleteIds.chunked(900).forEach { deleteByIdsBlocking(it) }
+        if (rows.isNotEmpty()) insertAllBlocking(rows)
+    }
+
     @Transaction
     suspend fun mergeForPlaylist(
         playlistId: String,
@@ -255,3 +327,32 @@ interface EpgProgrammeDao {
         insertAll(drawable)
     }
 }
+
+/** Projection for [EpgProgrammeDao.paintRowsInWindow]. */
+data class EpgPaintRow(
+    val id: Long,
+    val channelId: String,
+    val title: String,
+    val startMillis: Long,
+    val endMillis: Long,
+    val category: String,
+    val dispatcharrProgramId: Int?,
+    val subTitle: String?,
+    val season: Int?,
+    val episode: Int?,
+    val isNew: Boolean,
+    val isLiveBroadcast: Boolean,
+    val isPremiere: Boolean,
+    val isFinale: Boolean,
+    val isRepeat: Boolean,
+    val iconUrl: String?,
+)
+
+/** Projection for [EpgProgrammeDao.keysInSpanBlocking]. */
+data class EpgKeyRow(
+    val id: Long,
+    val channelId: String,
+    val startMillis: Long,
+    val endMillis: Long,
+    val title: String,
+)

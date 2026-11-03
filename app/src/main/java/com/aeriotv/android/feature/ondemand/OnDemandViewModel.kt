@@ -344,6 +344,7 @@ class OnDemandViewModel @Inject constructor(
     private suspend fun publishCatalogCount(isMovie: Boolean) {
         val key = catalogKeyFlow(isMovie).value
         val n = if (key == null) 0 else catalogStore.count(key, kindOf(isMovie))
+        if (n == 0 && key != null && libraryHeld(isMovie)) return
         _state.update { if (isMovie) it.copy(totalCount = n) else it.copy(seriesTotalCount = n) }
     }
 
@@ -460,12 +461,23 @@ class OnDemandViewModel @Inject constructor(
                 )
             }.collectLatest { spec ->
                 if (spec == (if (isMovie) lastMoviesSpec else lastSeriesSpec)) return@collectLatest
+                // Profile switch hold: a newly attached catalog with no rows
+                // yet (its first sweep is walking) does not replace the
+                // library on screen; the first stored page or the sweep's
+                // end does (review 2026-10-27).
+                if (libraryHeld(isMovie) && spec.catalogKey != null) {
+                    val rows = runCatching { catalogStore.count(spec.catalogKey, kindOf(isMovie)) }.getOrDefault(0)
+                    if (rows == 0) return@collectLatest
+                    if (isMovie) holdMoviesLibrary = false else holdSeriesLibrary = false
+                }
+                com.aeriotv.android.core.app.LaunchWorkHold.awaitPinPad(if (isMovie) "movies library build" else "series library build")
                 val pending = if (isMovie) _moviesLibraryPending else _seriesLibraryPending
                 pending.value = true
                 val built = runCatching { buildLibrary(isMovie, spec) }
                     .onFailure { warnUnlessCancelled("VOD library query failed", it) }
                     .getOrNull()
                 if (built != null) {
+                    Log.i(TAG, "[VOD-TAB] library published kind=${if (isMovie) "movies" else "series"} n=${built.items.size}")
                     if (isMovie) { lastMoviesSpec = spec; _moviesLibrary.value = built }
                     else { lastSeriesSpec = spec; _seriesLibrary.value = built }
                 }
@@ -517,6 +529,9 @@ class OnDemandViewModel @Inject constructor(
         initialLoadsStarted = true
         deferredStart?.cancel()
         deferredStart = null
+        val generation = ++restoreGeneration
+        val profileSwitch = profileSwitchRestore
+        profileSwitchRestore = false
         viewModelScope.launch {
             // Open from the stored catalog at once; re-sweep the provider only
             // when a kind's last finished sweep is older than the user's cadence
@@ -525,6 +540,16 @@ class OnDemandViewModel @Inject constructor(
             // and pull to refresh still sweep through refresh()/refreshSeries().
             val playlist = playlistRepository.activePlaylist()
             val identity = playlist?.let { snapshotStore.identity(it) }
+            if (playlist != null && identity != null) {
+                // v2 identity (no API key hash, review 2026-10-27): carry the
+                // v1 rows and metadata file forward once before reading them.
+                runCatching {
+                    catalogStore.migrateIdentitiesToV2()
+                    snapshotStore.migrateFrom(identity, snapshotStore.legacyIdentity(playlist))
+                    catalogStore.logProfileCountsOnce(playlist.id)
+                }.onFailure { warnUnlessCancelled("VOD identity migration failed", it) }
+            }
+            com.aeriotv.android.core.app.LaunchWorkHold.awaitPinPad("VOD restore")
             val decodeStartedAt = android.os.SystemClock.elapsedRealtime()
             val meta = identity?.let { loadSnapshotMetadata(it) }
             val decodeMs = android.os.SystemClock.elapsedRealtime() - decodeStartedAt
@@ -539,20 +564,35 @@ class OnDemandViewModel @Inject constructor(
             val seriesDenied = playlist != null &&
                 (!playlist.vodEnabled || !playlist.dispatcharrCanViewSeries())
             _state.update { it.copy(moviesDenied = moviesDenied, seriesDenied = seriesDenied) }
+            // Profile switch: the previous profile's library stayed on screen
+            // (see resetVodState). A half the new profile may not see clears
+            // NOW; an allowed half swaps when the new identity has rows.
+            if (profileSwitch) {
+                if (playlist == null || moviesDenied) releaseLibraryHold(isMovie = true, clear = true)
+                if (playlist == null || seriesDenied) releaseLibraryHold(isMovie = false, clear = true)
+            }
             if (playlist == null || identity == null) {
                 launchRestoreDone.complete(Unit)
+                // Network sweep: parked behind the launch picker / PIN gate.
+                com.aeriotv.android.core.app.LaunchWorkHold.awaitStage(com.aeriotv.android.core.app.LaunchWorkHold.STAGE_VOD, com.aeriotv.android.core.app.LaunchWorkHold.STAGE_VOD_NAME, "VOD first sweep", com.aeriotv.android.core.app.LaunchWorkHold.IDLE_VOD_MS)
                 refresh()
                 refreshSeries()
                 return@launch
             }
-            runCatching { catalogStore.pruneIdentities(playlistRepository.allOnce().mapTo(HashSet()) { it.id }, identity) }
-                .onFailure { warnUnlessCancelled("VOD catalog prune failed", it) }
+            // Only at launch and on a playlist switch: a profile switch keeps
+            // the same playlists, so the prune would find nothing new.
+            if (!profileSwitch) {
+                runCatching { catalogStore.pruneIdentities(playlistRepository.allOnce().mapTo(HashSet()) { it.id }, identity) }
+                    .onFailure { warnUnlessCancelled("VOD catalog prune failed", it) }
+            }
             val movieCount = catalogStore.count(identity, VodCatalogStore.KIND_MOVIE)
             val seriesCount = catalogStore.count(identity, VodCatalogStore.KIND_SERIES)
             if (movieCount == 0 && seriesCount == 0) {
                 // Nothing stored: there is nothing to show instantly, so this
                 // one sweep stays on the launch path.
                 launchRestoreDone.complete(Unit)
+                // Network sweep: parked behind the launch picker / PIN gate.
+                com.aeriotv.android.core.app.LaunchWorkHold.awaitStage(com.aeriotv.android.core.app.LaunchWorkHold.STAGE_VOD, com.aeriotv.android.core.app.LaunchWorkHold.STAGE_VOD_NAME, "VOD first sweep", com.aeriotv.android.core.app.LaunchWorkHold.IDLE_VOD_MS)
                 refresh()
                 refreshSeries()
                 return@launch
@@ -560,6 +600,8 @@ class OnDemandViewModel @Inject constructor(
             // A denied half is simply not attached to its catalog. The rows
             // stay in Room untouched, so a later grant reattaches instantly
             // (the Room-era replacement for shelving the JSON lists).
+            // Attaching the keys builds the library index: not under a pad.
+            com.aeriotv.android.core.app.LaunchWorkHold.awaitPinPad("VOD library index")
             if (!moviesDenied) movieCatalogKey.value = identity
             if (!seriesDenied) seriesCatalogKey.value = identity
             val movieGroups = if (moviesDenied) emptyList() else meta?.movieGroupNames.orEmpty()
@@ -624,6 +666,23 @@ class OnDemandViewModel @Inject constructor(
                 seriesProbeNewest = it.seriesProbeNewest
             }
             restoredFromSnapshot = true
+            // The art pass and the sweeps are network work: park them behind
+            // the launch picker / PIN gate, then make sure the profile picked
+            // there is the one this restore served (review 2026-10-27). A
+            // newer restore (a switch) supersedes this one; a pick the switch
+            // collector did not see re-runs the restore once for it.
+            com.aeriotv.android.core.app.LaunchWorkHold.awaitStage(com.aeriotv.android.core.app.LaunchWorkHold.STAGE_VOD, com.aeriotv.android.core.app.LaunchWorkHold.STAGE_VOD_NAME, "VOD art pass", com.aeriotv.android.core.app.LaunchWorkHold.IDLE_VOD_MS)
+            if (generation != restoreGeneration) {
+                launchRestoreDone.complete(Unit)
+                return@launch
+            }
+            val nowActive = playlistRepository.activePlaylist()?.let { snapshotStore.identity(it) }
+            if (nowActive != identity) {
+                Log.i(TAG, "[VOD-CACHE] active profile changed under the launch hold; restoring again")
+                launchRestoreDone.complete(Unit)
+                restartForSwitch(profileSwitch = nowActive != null && playlist?.id == playlistRepository.activePlaylist()?.id)
+                return@launch
+            }
             // The restored library is on screen NOW and is what the art
             // pass works from (Apple enriches on restore too). Nothing
             // sweeps on the foreground launch path any more (Logan
@@ -734,9 +793,11 @@ class OnDemandViewModel @Inject constructor(
         val hadMovieBaseline = moviesProbeCount > 0 || moviesProbeNewest.isNotBlank()
         val hadSeriesBaseline = seriesProbeCount > 0 || seriesProbeNewest.isNotBlank()
         val moviesChanged = movieProbe != null && hadMovieBaseline &&
-                (movieProbe.count != moviesProbeCount || movieProbe.newest != moviesProbeNewest)
+                (movieProbe.count != moviesProbeCount || movieProbe.newest != moviesProbeNewest) &&
+                !probeAlreadySwept(true, movieProbe)
         val seriesChanged = seriesProbe != null && hadSeriesBaseline &&
-                (seriesProbe.count != seriesProbeCount || seriesProbe.newest != seriesProbeNewest)
+                (seriesProbe.count != seriesProbeCount || seriesProbe.newest != seriesProbeNewest) &&
+                !probeAlreadySwept(false, seriesProbe)
         Log.i(
             TAG,
             "[VOD] change probe: movies ${moviesProbeCount}/${moviesProbeNewest} -> " +
@@ -749,6 +810,42 @@ class OnDemandViewModel @Inject constructor(
         // even when nothing is swept now.
         if (!moviesChanged && !seriesChanged) persistSnapshot()
         return moviesChanged to seriesChanged
+    }
+
+    /**
+     * True when the probe's "change" is already in the stored library: the
+     * catalog holds exactly the probe's count and the last completed sweep
+     * finished after the newest item was created. Heals a baseline a
+     * completed sweep never recorded (see [refreshProbeBaseline]).
+     */
+    private suspend fun probeAlreadySwept(isMovie: Boolean, probe: com.aeriotv.android.core.network.VODChangeProbe): Boolean {
+        val completedAt = if (isMovie) moviesCompletedAtMs else seriesCompletedAtMs
+        if (completedAt <= 0L) return false
+        val createdAt = runCatching { java.time.Instant.parse(probe.newest).toEpochMilli() }.getOrNull() ?: return false
+        if (createdAt >= completedAt) return false
+        val identity = catalogKeyFlow(isMovie).value ?: return false
+        val stored = runCatching { catalogStore.count(identity, kindOf(isMovie)) }.getOrNull() ?: return false
+        val swept = stored == probe.count
+        if (swept) Log.i(TAG, "[VOD] change probe: ${if (isMovie) "movies" else "series"} ${probe.count}/${probe.newest} already in the library (sweep completed after it); baseline updated")
+        return swept
+    }
+
+    /** Re-reads the [isMovie] change probe into the baseline (no gate). */
+    private suspend fun refreshProbeBaseline(isMovie: Boolean) {
+        val playlist = playlistRepository.activePlaylist() ?: return
+        val sourceType = playlist.sourceType.let { st -> SourceType.entries.firstOrNull { it.name == st } }
+        if (sourceType != SourceType.DispatcharrApiKey && sourceType != SourceType.DispatcharrUserPass) return
+        if (playlist.apiKey.isNullOrBlank()) return
+        val base = playlistRepository.effectiveBaseUrl(playlist)
+        val probe = runCatching {
+            dispatcharrAuth.withApiKeyRetry(playlist.id) { key ->
+                if (isMovie) dispatcharrClient.getVODMoviesChangeProbe(base, key)
+                else dispatcharrClient.getVODSeriesChangeProbe(base, key)
+            }
+        }.onFailure { warnUnlessCancelled("VOD change probe (baseline) failed", it) }.getOrNull() ?: return
+        if (isMovie) { moviesProbeCount = probe.count; moviesProbeNewest = probe.newest }
+        else { seriesProbeCount = probe.count; seriesProbeNewest = probe.newest }
+        Log.i(TAG, "[VOD] change probe baseline after ${if (isMovie) "movies" else "series"} sweep: ${probe.count}/${probe.newest}")
     }
 
     /** True when the launch served the saved library and skipped the sweep. */
@@ -851,6 +948,10 @@ class OnDemandViewModel @Inject constructor(
      */
     suspend fun heroBackdropUrl(artKey: String, tmdbId: String?, title: String, isMovie: Boolean): String? {
         tmdbArtCache.backdropUrl(artKey)?.let { return it }
+        // Per item: a PIN pad or the picker stops the hero loop here, and the
+        // loop resumes only with stage 4 (Streamer 2026-10-27 14:37:57: 14
+        // TMDB details lookups ran under the pad, on the main thread).
+        com.aeriotv.android.core.app.LaunchWorkHold.checkpointVod("hero backdrops (TMDB details)")
         val details = resolveTmdbDetails(tmdbId, title, isMovie) ?: return null
         tmdbArtCache.merge(
             key = artKey,
@@ -892,6 +993,19 @@ class OnDemandViewModel @Inject constructor(
         viewModelScope.launch {
             val playlist = playlistRepository.activePlaylist() ?: return@launch
             val st = _state.value
+            // Never let an empty or held in-memory library overwrite a
+            // populated file: during a profile switch the halves are held
+            // (old rows on screen, counts and group names not yet restored),
+            // and a save then wrote zero group names and a zero probe
+            // baseline over the real metadata (Streamer 2026-10-27, step1).
+            // A denied half is still recorded, since the denial is the point.
+            val held = holdMoviesLibrary || holdSeriesLibrary
+            val empty = st.totalCount == 0 && st.seriesTotalCount == 0 &&
+                st.movieGroupNames.isEmpty() && st.seriesGroupNames.isEmpty()
+            if (held || (empty && !st.moviesDenied && !st.seriesDenied)) {
+                Log.i(TAG, "[VOD-CACHE] save skipped (library empty/held) held=$held empty=$empty")
+                return@launch
+            }
             // Metadata only: the titles live in the Room catalog (GH #109),
             // so a denied half's rows are never at risk from the other half's
             // save (the shelving this replaces existed only to protect them in
@@ -949,7 +1063,9 @@ class OnDemandViewModel @Inject constructor(
             // waiting on it keeps round 2's finding and still puts the library
             // on screen many seconds earlier. [ensureLoaded] short-circuits
             // this entirely when the user opens the tab first.
-            settleGate.awaitGuidePainted()
+            // 2026-10-27: the Room restore does not wait for the launch hold;
+            // the network sweeps it may start still do (see startInitialLoads).
+            settleGate.awaitGuidePaintedForCachedRead()
             startInitialLoads()
         }
         // React to the active playlist changing (switch) or being deleted.
@@ -958,10 +1074,20 @@ class OnDemandViewModel @Inject constructor(
         // entries on screen. `drop(1)` skips the initial emission because the
         // `refresh()/refreshSeries()` above already kicked off the first load.
         viewModelScope.launch {
+            var previousId: String? = null
+            var first = true
             playlistRepository.observeActiveId()
-                .drop(1)
-                .collect {
-                    resetVodState()
+                .collect { id ->
+                    val prev = previousId
+                    previousId = id
+                    if (first) { first = false; return@collect }
+                    // Same playlist id re-emitted = a profile switch
+                    // (ProfileScope.token). The library on screen stays
+                    // until the new profile's restore has rows (review
+                    // 2026-10-27); another playlist resets at once.
+                    val profileSwitch = id != null && id == prev
+                    resetVodState(keepLibrary = profileSwitch)
+                    profileSwitchRestore = profileSwitch
                     // Go back through the STORED-CATALOG path, not straight to
                     // a sweep (Logan 2026-09-16): every playlist keeps its own
                     // vod_title / vod_sweep_state rows, so the newly active
@@ -1056,7 +1182,38 @@ class OnDemandViewModel @Inject constructor(
      * the UI state to empty so the next source starts clean. Mirrors iOS
      * `VODStore.clear()`.
      */
-    private fun resetVodState() {
+    private fun restartForSwitch(profileSwitch: Boolean) {
+        resetVodState(keepLibrary = profileSwitch)
+        profileSwitchRestore = profileSwitch
+        initialLoadsStarted = false
+        startInitialLoads()
+    }
+
+    /** Bumped by every [startInitialLoads]; a restore that sees a newer value was superseded. */
+    @Volatile private var restoreGeneration = 0
+    /** The next [startInitialLoads] serves a profile switch (keep the old library up). */
+    private var profileSwitchRestore = false
+    /** Per kind: keep the library on screen until the attached catalog has rows. */
+    @Volatile private var holdMoviesLibrary = false
+    @Volatile private var holdSeriesLibrary = false
+
+    private fun libraryHeld(isMovie: Boolean) = if (isMovie) holdMoviesLibrary else holdSeriesLibrary
+
+    /** End a [resetVodState] keepLibrary hold; [clear] empties the half now (denied). */
+    private fun releaseLibraryHold(isMovie: Boolean, clear: Boolean) {
+        if (isMovie) holdMoviesLibrary = false else holdSeriesLibrary = false
+        if (clear) {
+            catalogKeyFlow(isMovie).value = null
+            if (isMovie) { lastMoviesSpec = null; _moviesLibrary.value = MediaLibrary() }
+            else { lastSeriesSpec = null; _seriesLibrary.value = MediaLibrary() }
+            _state.update { if (isMovie) it.copy(totalCount = 0, movieGroupNames = emptyList())
+                else it.copy(seriesTotalCount = 0, seriesGroupNames = emptyList()) }
+        } else {
+            (if (isMovie) movieCatalogVersion else seriesCatalogVersion).update { it + 1 }
+        }
+    }
+
+    private fun resetVodState(keepLibrary: Boolean = false) {
         // A running sweep belongs to the OLD playlist: cancel it so the
         // single-flight guard in refresh()/refreshSeries() lets the new one run.
         movieSweepJob?.cancel()
@@ -1100,8 +1257,23 @@ class OnDemandViewModel @Inject constructor(
         providerNamesJob = null
         // The old playlist's catalog stays in Room (switching back opens it
         // at once); the grids detach from it until the new source's key is set.
-        movieCatalogKey.value = null; seriesCatalogKey.value = null
         catalogLookups.clear(); catalogMisses.clear()
+        if (keepLibrary) {
+            // Profile switch: the grids keep the current library (and its
+            // catalog key, counts and group names) until the new profile's
+            // catalog has rows; startInitialLoads clears a denied half at once.
+            holdMoviesLibrary = true; holdSeriesLibrary = true
+            _state.update {
+                UiState(
+                    totalCount = it.totalCount, seriesTotalCount = it.seriesTotalCount,
+                    movieGroupNames = it.movieGroupNames, seriesGroupNames = it.seriesGroupNames,
+                    moviesDenied = it.moviesDenied, seriesDenied = it.seriesDenied,
+                )
+            }
+            return
+        }
+        holdMoviesLibrary = false; holdSeriesLibrary = false
+        movieCatalogKey.value = null; seriesCatalogKey.value = null
         lastMoviesSpec = null; lastSeriesSpec = null
         _moviesLibrary.value = MediaLibrary(); _seriesLibrary.value = MediaLibrary()
         _heroBackdrops.value = emptyMap()
@@ -1611,6 +1783,7 @@ class OnDemandViewModel @Inject constructor(
             job.invokeOnCompletion {
                 if (movieSweepJob === job) {
                     _state.update { st -> st.copy(sweepingMovies = false) }
+                    if (holdMoviesLibrary) releaseLibraryHold(isMovie = true, clear = false)
                     // Backstop for a watcher of a VodResetBus rebuild (Edit
                     // Playlist's "Loading movies..." row): every terminal
                     // outcome lands here - denied, unsupported source, failed,
@@ -1717,6 +1890,7 @@ class OnDemandViewModel @Inject constructor(
             job.invokeOnCompletion {
                 if (seriesSweepJob === job) {
                     _state.update { st -> st.copy(sweepingSeries = false) }
+                    if (holdSeriesLibrary) releaseLibraryHold(isMovie = false, clear = false)
                     // See the movies half: terminal backstop for a rebuild
                     // watcher, guarded by job identity for the same reason.
                     vodResetBus.markSettled(VodResetBus.Kind.Series)
@@ -1828,8 +2002,19 @@ class OnDemandViewModel @Inject constructor(
                         val url = dispatcharrClient.vodListUrl(base, isMovie, lane.nextQuery!!)
                         var failure: Throwable? = null
                         val fetched = try {
-                            fetchPageWithRetry("VOD $label lane='${lane.lane}'") {
-                                fetchAndStoreLanePage(playlist, identity, isMovie, plan.generation, lane.lane, url)
+                            if (background) {
+                                // One lane page at a time on the background
+                                // serial lane (never beside the EPG work),
+                                // with a yield after each page.
+                                com.aeriotv.android.core.app.BackgroundSweep.serial {
+                                    fetchPageWithRetry("VOD $label lane='${lane.lane}'") {
+                                        fetchAndStoreLanePage(playlist, identity, isMovie, plan.generation, lane.lane, url)
+                                    }
+                                }
+                            } else {
+                                fetchPageWithRetry("VOD $label lane='${lane.lane}'") {
+                                    fetchAndStoreLanePage(playlist, identity, isMovie, plan.generation, lane.lane, url)
+                                }
                             }
                         } catch (u: DispatcharrError.Unauthorized) {
                             failure = u
@@ -1862,6 +2047,7 @@ class OnDemandViewModel @Inject constructor(
                     "[VOD-CAT] page written kind=$label lane='${lane.lane}' page=$pages " +
                         "rows=${page.written} runningTotal=$written serverCount=${page.count}",
                 )
+                com.aeriotv.android.core.sync.dsync.VodIdSink.pageWritten.tryEmit(Unit)
                 // A server whose `next` never ends must not walk forever.
                 val next = page.nextQuery?.takeIf { pages < LANE_PAGE_SAFETY }
                 val updated = lane.copy(
@@ -1878,7 +2064,14 @@ class OnDemandViewModel @Inject constructor(
                         if (isMovie) VodResetBus.Kind.Movies else VodResetBus.Kind.Series,
                     )
                 }
-                if (!background && page.written > 0) {
+                // The tabs observe the library snapshot, which is published
+                // from cache at launch and when a sweep COMPLETES (below),
+                // never per page: each publish rebuilt and recomposed the
+                // whole Movies / TV Shows tab (Streamer 2026-10-27, 1 to 2.6 s
+                // frames switching tabs mid sweep). The one exception is an
+                // empty tab whose initial sweep is filling it: first rows at
+                // once, then at most one publish every 5 s.
+                if (!background && startedEmpty && page.written > 0) {
                     if (!firstPainted) {
                         firstPainted = true
                         if (startedEmpty) {
@@ -1946,6 +2139,12 @@ class OnDemandViewModel @Inject constructor(
             else it.copy(isLoadingSeries = false, seriesError = failure, seriesNextCursor = null, seriesGroupNames = groups.ifEmpty { it.seriesGroupNames })
         }
         catalogChanged(isMovie, force = true)
+        // A completed sweep stores what the server looks like NOW as the
+        // change-probe baseline. Streamer 2026-10-27: the 14:31:35 sweep
+        // finished with 28211 movies stored, but the baseline kept the 28210
+        // from before (cadence runs never probe), so every later launch
+        // logged gate=changed and re-walked all 544 lanes.
+        if (closed) refreshProbeBaseline(isMovie)
         if (closed) persistSnapshot(if (isMovie) MediaSweep.Movies else MediaSweep.Series) else persistSnapshot()
         if (written > 0 || closed) enrichArt(isMovie = isMovie)
     }
@@ -3146,7 +3345,10 @@ class OnDemandViewModel @Inject constructor(
     private fun ensureXtreamProbe(playlist: PlaylistEntity) {
         if (xtreamProbeJob?.isActive == true) return
         xtreamPlaylist = playlist
-        xtreamProbeJob = viewModelScope.launch { probeXtream(playlist) }
+        // Off Main (review 2026-10-27): the probe maps and stores the whole
+        // library. The single foreground sweep thread keeps the VM's plain
+        // fields confined exactly as the background sweep does.
+        xtreamProbeJob = viewModelScope.launch(BackgroundSweep.foregroundDispatcher) { probeXtream(playlist) }
     }
 
     private enum class XcKind { MOVIE, SERIES }
@@ -3275,7 +3477,7 @@ class OnDemandViewModel @Inject constructor(
         val playlist = xtreamPlaylist ?: return
         val user = playlist.username ?: return
         val pass = playlist.password ?: return
-        xtreamItemsJob = viewModelScope.launch {
+        xtreamItemsJob = viewModelScope.launch(BackgroundSweep.foregroundDispatcher) {
             val base = playlistRepository.effectiveBaseUrl(playlist)
             _state.update { it.copy(isLoading = movieCats.isNotEmpty(), isLoadingSeries = seriesCats.isNotEmpty()) }
             Log.i(TAG, "XC On Demand: enumerating ${movieCats.size} movie + ${seriesCats.size} series categories (interleaved)")
@@ -3296,10 +3498,18 @@ class OnDemandViewModel @Inject constructor(
             val seriesPlan = if (seriesCats.isNotEmpty()) catalogStore.beginSweep(identity, VodCatalogStore.KIND_SERIES, emptyList()) { "" } else null
             var movieFailures = 0
             var seriesFailures = 0
+            // Progressive publishes only fill an EMPTY tab; a populated one
+            // keeps its snapshot until the sweep completes.
+            val moviesStartedEmpty = _state.value.totalCount == 0
+            val seriesStartedEmpty = _state.value.seriesTotalCount == 0
+            // At most XC_CATEGORY_CONCURRENCY categories in flight: launching
+            // every category at once flooded the panel and the request gate.
+            val fanOut = kotlinx.coroutines.sync.Semaphore(XC_CATEGORY_CONCURRENCY)
             coroutineScope {
                 work.forEach { (kind, cat) ->
                     launch {
-                        when (kind) {
+                        fanOut.acquire()
+                        try { when (kind) {
                             XcKind.MOVIE -> {
                                 val gen = moviePlan?.generation ?: return@launch
                                 val items = runCatching { xtreamApi.getVodStreams(base, user, pass, cat) }
@@ -3307,7 +3517,7 @@ class OnDemandViewModel @Inject constructor(
                                     .getOrDefault(emptyList())
                                 runCatching { catalogStore.writeMovies(identity, gen, items.map { it.toMovie(movieCategoryNames) }) }
                                     .onFailure { movieFailures++; warnUnlessCancelled("XC movies category $cat store failed", it) }
-                                catalogChanged(isMovie = true, force = false)
+                                if (moviesStartedEmpty) catalogChanged(isMovie = true, force = false)
                             }
                             XcKind.SERIES -> {
                                 val gen = seriesPlan?.generation ?: return@launch
@@ -3316,9 +3526,9 @@ class OnDemandViewModel @Inject constructor(
                                     .getOrDefault(emptyList())
                                 runCatching { catalogStore.writeSeries(identity, gen, items.map { it.toSeries(seriesCategoryNames) }) }
                                     .onFailure { seriesFailures++; warnUnlessCancelled("XC series category $cat store failed", it) }
-                                catalogChanged(isMovie = false, force = false)
+                                if (seriesStartedEmpty) catalogChanged(isMovie = false, force = false)
                             }
-                        }
+                        } } finally { fanOut.release() }
                     }
                 }
             }
@@ -3435,7 +3645,7 @@ class OnDemandViewModel @Inject constructor(
     private fun aLibraryIsOnScreen(): Boolean = visibleLibraries.get() > 0
 
     private fun sweepContext(background: Boolean) =
-        if (background) BackgroundSweep.dispatcher else kotlin.coroutines.EmptyCoroutineContext
+        if (background) BackgroundSweep.dispatcher else BackgroundSweep.foregroundDispatcher
 
     /**
      * Pause between catalog pages. A background sweep also waits out any tune
@@ -3456,6 +3666,8 @@ class OnDemandViewModel @Inject constructor(
          *  foreground walk, so a full library refresh costs the box almost
          *  nothing while the user watches TV. */
         private const val BG_WALK_PACE_MS = 500L
+        /** Xtream per-category walk: categories fetched at once. */
+        private const val XC_CATEGORY_CONCURRENCY = 4
         /** Pause between catalog pages (Streamer 2026-09-03): the unpaced walk
          *  ran at ~7 pages/s across both passes and held the box at 30%+ CPU
          *  for minutes, which starved the tabs' rendering. */
@@ -3494,7 +3706,7 @@ class OnDemandViewModel @Inject constructor(
         const val UNFILTERED_LANE = ""
 
         /** Minimum gap between progressive grid rebuilds during a sweep. */
-        const val CATALOG_PUBLISH_THROTTLE_MS = 2_000L
+        const val CATALOG_PUBLISH_THROTTLE_MS = 5_000L
 
         /**
          * Catalog pages in flight while a library is on screen (Logan

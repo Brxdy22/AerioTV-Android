@@ -34,6 +34,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.async
 import kotlinx.coroutines.launch
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -2099,10 +2100,35 @@ fun PlayerScreen(
     // during the outage auto-hides again. Without it in the keys, the
     // controls stayed stuck up after the stream came back (Streamer test
     // 2026-07-12).
-    LaunchedEffect(chromeVisible, lastInteractionAt, interactionLocked, streamUnavailable) {
+    // GH #148: a paused live channel showed a frozen frame with no controls,
+    // and a pause press never revealed them. Match recordings and VOD: any
+    // pause (Play/Pause, Select, the chrome button, a media key) shows the
+    // chrome and holds it while paused; resume restarts the countdown. Read
+    // from the player itself so every pause path is covered, on TV and touch.
+    var livePaused by remember { mutableStateOf(false) }
+    val pauseLifecycleOwner = LocalLifecycleOwner.current
+    LaunchedEffect(Unit) {
+        pauseLifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while (true) {
+                val p = exoHolder.player
+                livePaused = p != null && !p.playWhenReady &&
+                    p.playbackState != androidx.media3.common.Player.STATE_IDLE
+                delay(200)
+            }
+        }
+    }
+    LaunchedEffect(livePaused) {
+        if (livePaused) {
+            if (!chromeVisible) chromeReason = "paused"
+            chromeVisible = true
+        } else {
+            reportInteraction()
+        }
+    }
+    LaunchedEffect(chromeVisible, lastInteractionAt, interactionLocked, streamUnavailable, livePaused) {
         // Never auto-hide while the stream is unavailable: the chrome hosts the
         // Retry control the user needs, so it must stay put during an outage.
-        if (chromeVisible && !interactionLocked && !streamUnavailable) {
+        if (chromeVisible && !interactionLocked && !streamUnavailable && !livePaused) {
             delay(PLAYER_CHROME_HIDE_MS)
             chromeReason = "timer"
             chromeVisible = false
@@ -2672,6 +2698,8 @@ private fun PlayerSheets(
                             // Registers the target at once, so the follow-poller's next
                             // poll adopts this status change instead of re-following it.
                             targetStreamUrl = targetUrl,
+                            // Known codec change: sequential rebuild, not in place.
+                            targetVideoCodec = state.streams.firstOrNull { it.id == id }?.videoCodec,
                         )
                     }
                 }
@@ -3064,17 +3092,28 @@ private fun LiveRewindChromeSection(
             val chPk = ch.dispatcharrChannelId ?: return@PlayerChromeOverlay
             val uuid = ch.id.removePrefix("disp:")
             scope.launch {
-                // Re-read the user level before opening: an admin can promote
-                // or demote the account at any time, and the picker follows
-                // the live answer (fail closed), not the launch-time one.
-                if (!onRecheckSwitchStreamAllowed("Switch Stream open")) {
-                    Toast.makeText(
-                        context,
-                        SWITCH_DENIED_MESSAGE,
-                        Toast.LENGTH_LONG,
-                    ).show()
-                    return@launch
+                // Re-read the user level on open: an admin can promote or
+                // demote the account at any time, and the picker follows the
+                // live answer (fail closed), not the launch-time one. The
+                // re-read runs ALONGSIDE the list loads instead of before them
+                // (Streamer 2026-11-02: the serial probe held the sheet ~6 s);
+                // a denied answer closes the sheet, and the server refuses a
+                // switch from a non-admin regardless.
+                val openedAt = android.os.SystemClock.elapsedRealtime()
+                val allowed = async { onRecheckSwitchStreamAllowed("Switch Stream open") }
+                launch {
+                    if (!allowed.await()) {
+                        switchStream = null
+                        Toast.makeText(
+                            context,
+                            SWITCH_DENIED_MESSAGE,
+                            Toast.LENGTH_LONG,
+                        ).show()
+                    } else {
+                        Log.i(TAG, "[SwitchStream] permission re-read +${android.os.SystemClock.elapsedRealtime() - openedAt}ms")
+                    }
                 }
+                val currentAsync = async { onLoadCurrentStreamId(uuid) }
                 val streams = onLoadChannelStreams(chPk)
                 // Prefer the in-session selection for the radio mark: after an
                 // event-apply switch the server leaves /proxy/ts/status's stream_id
@@ -3085,7 +3124,8 @@ private fun LiveRewindChromeSection(
                 // not pick and the follow loop has adopted an external switch,
                 // switchedStreamId already holds the server's id. Otherwise
                 // the app's own pick wins over a stale event-apply stream_id.
-                val current = onLoadCurrentStreamId(uuid)
+                val current = currentAsync.await()
+                if (allowed.isCompleted && !allowed.await()) return@launch
                 val marked = switchedStreamId ?: current
                 if (current != null && marked == current) {
                     Log.i(TAG, "[SwitchStream] radio follows server stream_id=$current")
@@ -3094,6 +3134,7 @@ private fun LiveRewindChromeSection(
                     streams = streams,
                     currentStreamId = marked,
                 )
+                Log.i(TAG, "[SwitchStream] sheet open +${android.os.SystemClock.elapsedRealtime() - openedAt}ms")
             }
         },
         onShowSubtitles = {
