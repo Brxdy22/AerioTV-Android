@@ -2,8 +2,16 @@ name: AerioTV Fire OS 6 - Build upstream updates
 
 on:
   workflow_dispatch:
+    inputs:
+      channel:
+        description: 'What to build: "release" = latest official release tag, "main" = upstream main branch (unreleased, dev)'
+        type: choice
+        options:
+          - release
+          - main
+        default: release
   schedule:
-    - cron: '23 10 * * 1'  # Mondays at 10:23 UTC (GitHub may delay scheduled jobs)
+    - cron: '23 10 * * 1'  # Mondays at 10:23 UTC (GitHub may delay scheduled jobs) - always builds "release"
 
 permissions:
   contents: write  # Required only to publish your custom APK as a GitHub Release
@@ -13,35 +21,65 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - name: Check latest official AerioTV release
+      - name: Resolve what to build
         id: version
         env:
           GH_TOKEN: ${{ github.token }}
+          # Scheduled runs have no inputs, so they fall back to "release".
+          CHANNEL: ${{ inputs.channel || 'release' }}
         shell: bash
         run: |
           set -euo pipefail
-          upstream_tag=$(gh api repos/jonzey231/AerioTV-Android/releases/latest --jq '.tag_name')
-          if [[ ! "$upstream_tag" =~ ^v[0-9][A-Za-z0-9._-]*$ ]]; then
-            echo "Unexpected upstream release tag: $upstream_tag" >&2
-            exit 1
-          fi
-          local_tag="fireos6-${upstream_tag}"
-          echo "upstream_tag=$upstream_tag" >> "$GITHUB_OUTPUT"
-          echo "local_tag=$local_tag" >> "$GITHUB_OUTPUT"
+          upstream=jonzey231/AerioTV-Android
+          case "$CHANNEL" in
+            release)
+              upstream_ref=$(gh api "repos/$upstream/releases/latest" --jq '.tag_name')
+              if [[ ! "$upstream_ref" =~ ^v[0-9][A-Za-z0-9._-]*$ ]]; then
+                echo "Unexpected upstream release tag: $upstream_ref" >&2
+                exit 1
+              fi
+              local_tag="fireos6-${upstream_ref}"
+              label="$upstream_ref"
+              version_suffix=""
+              ;;
+            main)
+              # Pin the exact commit so the checkout matches what we tag.
+              upstream_ref=$(gh api "repos/$upstream/commits/main" --jq '.sha')
+              if [[ ! "$upstream_ref" =~ ^[0-9a-f]{40}$ ]]; then
+                echo "Unexpected upstream main SHA: $upstream_ref" >&2
+                exit 1
+              fi
+              short=${upstream_ref:0:7}
+              local_tag="fireos6-main-${short}"
+              label="main@${short}"
+              version_suffix="-main.${short}"
+              ;;
+            *)
+              echo "Unknown channel: $CHANNEL" >&2
+              exit 1
+              ;;
+          esac
+          {
+            echo "channel=$CHANNEL"
+            echo "upstream_ref=$upstream_ref"
+            echo "local_tag=$local_tag"
+            echo "label=$label"
+            echo "version_suffix=$version_suffix"
+          } >> "$GITHUB_OUTPUT"
           if gh release view "$local_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "already_built=true" >> "$GITHUB_OUTPUT"
-            echo "The custom Fire OS 6 build for $upstream_tag already exists. Nothing to do."
+            echo "The custom Fire OS 6 build for $label already exists ($local_tag). Nothing to do."
           else
             echo "already_built=false" >> "$GITHUB_OUTPUT"
-            echo "Will build Fire OS 6 APK for $upstream_tag."
+            echo "Will build Fire OS 6 APK for $label."
           fi
 
-      - name: Check out the upstream stable release
+      - name: Check out upstream source
         if: steps.version.outputs.already_built == 'false'
         uses: actions/checkout@v4
         with:
           repository: jonzey231/AerioTV-Android
-          ref: ${{ steps.version.outputs.upstream_tag }}
+          ref: ${{ steps.version.outputs.upstream_ref }}
           path: upstream
           persist-credentials: false
 
@@ -82,9 +120,12 @@ jobs:
 
       - name: Patch Android 7.1 compatibility and update version code
         if: steps.version.outputs.already_built == 'false'
+        env:
+          VERSION_SUFFIX: ${{ steps.version.outputs.version_suffix }}
         shell: bash
         run: |
           python3 - <<'PY'
+          import os
           import re
           import time
           from pathlib import Path
@@ -105,14 +146,25 @@ jobs:
               source = source.replace(old, new, 1)
 
           # Changes on every build; larger than the upstream app's normal versionCode.
-          # Keeps future APK updates in increasing order without changing package ID.
+          # Keeps future APK updates in increasing order without changing package ID,
+          # so release and main builds can be installed over each other in either direction.
           version_code = int(time.time() // 60)
           version_pattern = r'(?m)^(\s*versionCode\s*=\s*)\d+'
           if len(re.findall(version_pattern, source)) != 1:
               raise SystemExit('Upstream versionCode layout changed; stopping.')
           source = re.sub(version_pattern, lambda m: m.group(1) + str(version_code), source, count=1)
+
+          # main builds: tag the versionName (e.g. 0.5.13-main.abc1234) so the
+          # app's About screen shows which build is installed.
+          suffix = os.environ.get('VERSION_SUFFIX', '')
+          if suffix:
+              name_pattern = r'(?m)^(\s*versionName\s*=\s*")([^"]+)(")'
+              if len(re.findall(name_pattern, source)) != 1:
+                  raise SystemExit('Upstream versionName layout changed; stopping.')
+              source = re.sub(name_pattern, lambda m: m.group(1) + m.group(2) + suffix + m.group(3), source, count=1)
+
           path.write_text(source, encoding='utf-8')
-          print(f'Patched Android 7.1 (API 25), java.time support, versionCode={version_code}.')
+          print(f'Patched Android 7.1 (API 25), java.time support, versionCode={version_code}, versionName suffix={suffix or "(none)"}.')
           PY
 
       - name: Set up Gradle cache
@@ -146,7 +198,7 @@ jobs:
         if: steps.version.outputs.already_built == 'false'
         uses: actions/upload-artifact@v4
         with:
-          name: AerioTV-FireOS6-${{ steps.version.outputs.upstream_tag }}
+          name: AerioTV-FireOS6-${{ steps.version.outputs.local_tag }}
           path: |
             out/AerioTV-FireOS6.apk
             fireos6-apk-info.txt
@@ -156,15 +208,28 @@ jobs:
         if: steps.version.outputs.already_built == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
-          UPSTREAM_TAG: ${{ steps.version.outputs.upstream_tag }}
+          CHANNEL: ${{ steps.version.outputs.channel }}
+          UPSTREAM_REF: ${{ steps.version.outputs.upstream_ref }}
           LOCAL_TAG: ${{ steps.version.outputs.local_tag }}
+          LABEL: ${{ steps.version.outputs.label }}
         shell: bash
         run: |
           set -euo pipefail
+          if [ "$CHANNEL" = main ]; then
+            title="AerioTV $LABEL for Fire OS 6 (dev build from upstream main)"
+            source_url="https://github.com/jonzey231/AerioTV-Android/tree/$UPSTREAM_REF"
+            warning=" UNRELEASED: built from the upstream main branch, which may contain unfinished or reverted work."
+          else
+            title="AerioTV $LABEL for Fire OS 6 (experimental)"
+            source_url="https://github.com/jonzey231/AerioTV-Android/tree/$UPSTREAM_REF"
+            warning=""
+          fi
+          # Fork releases point at this repo's default branch; the source of truth
+          # is the upstream commit/tag linked in the notes.
           gh release create "$LOCAL_TAG" 'out/AerioTV-FireOS6.apk#AerioTV-FireOS6.apk' \
             --repo "$GITHUB_REPOSITORY" \
-            --title "AerioTV $UPSTREAM_TAG for Fire OS 6 (experimental)" \
-            --notes "Source: https://github.com/jonzey231/AerioTV-Android/tree/$UPSTREAM_TAG. Rebuilt for Android 7.1 / API 25, with Java time desugaring. Signed with the private key configured in this fork's Actions secrets. Review and test on Fire OS 6 before installing. The app does not silently self-update." \
+            --title "$title" \
+            --notes "Source: $source_url.$warning Rebuilt for Android 7.1 / API 25, with Java time desugaring. Signed with the private key configured in this fork's Actions secrets. Also installs on newer Android TV devices (minSdk 25). Review and test on Fire OS 6 before installing. The app does not silently self-update." \
             --prerelease
 
       - name: Upload build log on failure
