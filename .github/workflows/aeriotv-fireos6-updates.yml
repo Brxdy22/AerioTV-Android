@@ -232,13 +232,22 @@ jobs:
           app_version=$(sed -nE 's/^\s*versionName\s*=\s*"([^"-]+).*/\1/p' upstream/app/build.gradle.kts | head -1)
           [ -n "$app_version" ] || { echo 'Could not read versionName' >&2; exit 1; }
           title="AerioTV-Brxdy22Fork $app_version"
+          upstream=https://github.com/jonzey231/AerioTV-Android
           if [ "$CHANNEL" = main ]; then
-            source_url="https://github.com/jonzey231/AerioTV-Android/tree/$UPSTREAM_REF"
-            warning=" UNRELEASED: built from the upstream main branch, which may contain unfinished or reverted work."
+            source_line="Built from upstream \`main\` at [\`${UPSTREAM_REF:0:7}\`]($upstream/commit/$UPSTREAM_REF) ([changes since the last official release]($upstream/compare/$(gh api repos/jonzey231/AerioTV-Android/releases/latest --jq .tag_name)...$UPSTREAM_REF)). This is newer than the latest official release and may include unfinished work."
           else
-            source_url="https://github.com/jonzey231/AerioTV-Android/tree/$UPSTREAM_REF"
-            warning=""
+            source_line="Built from the official upstream release [\`$UPSTREAM_REF\`]($upstream/releases/tag/$UPSTREAM_REF)."
           fi
+          cat > release-notes.md <<EOF
+          $source_line
+
+          **What's different from official AerioTV**
+          - Runs on Android 7.1 and newer, so one APK covers the Fire TV Stick 4K (Fire OS 6) and newer Android TV / Google TV devices.
+          - Optimized release build (R8), not debuggable.
+          - Signed with this fork's own key, so it updates earlier AerioTV-Brxdy22Fork builds in place and keeps app data. It can't install over the official Play Store or GitHub AerioTV; uninstall that first.
+
+          **Install:** download \`AerioTV-FireOS6.apk\` below and sideload it, or let the LAN auto-updater install it.
+          EOF
           # Rebuild: replace the old release only now, after the new APK built and verified.
           if gh release view "$LOCAL_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "Replacing existing release $LOCAL_TAG"
@@ -249,7 +258,7 @@ jobs:
           gh release create "$LOCAL_TAG" 'out/AerioTV-FireOS6.apk#AerioTV-FireOS6.apk' \
             --repo "$GITHUB_REPOSITORY" \
             --title "$title" \
-            --notes "Source: $source_url.$warning Optimized (R8) build for Android 7.1 / API 25 and newer, with Java time desugaring, so one APK covers Fire OS 6 and newer Android TV devices. Signed with the private key configured in this fork's Actions secrets, so it installs over earlier builds of this fork without losing app data." \
+            --notes-file release-notes.md \
             --latest
 
       - name: Prune old main builds (keep the newest 5)
