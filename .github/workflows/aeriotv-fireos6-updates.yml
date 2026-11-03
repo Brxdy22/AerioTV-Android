@@ -229,11 +229,11 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$CHANNEL" = main ]; then
-            title="AerioTV-Brxdy22Fork $LABEL"
+            title="AerioTV-Brxdy22Fork"
             source_url="https://github.com/jonzey231/AerioTV-Android/tree/$UPSTREAM_REF"
             warning=" UNRELEASED: built from the upstream main branch, which may contain unfinished or reverted work."
           else
-            title="AerioTV-Brxdy22Fork $LABEL"
+            title="AerioTV-Brxdy22Fork"
             source_url="https://github.com/jonzey231/AerioTV-Android/tree/$UPSTREAM_REF"
             warning=""
           fi
