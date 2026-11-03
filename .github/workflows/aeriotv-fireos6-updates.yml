@@ -247,8 +247,8 @@ jobs:
           gh release create "$LOCAL_TAG" 'out/AerioTV-FireOS6.apk#AerioTV-FireOS6.apk' \
             --repo "$GITHUB_REPOSITORY" \
             --title "$title" \
-            --notes "Source: $source_url.$warning Rebuilt for Android 7.1 / API 25, with Java time desugaring. Signed with the private key configured in this fork's Actions secrets. Also installs on newer Android TV devices (minSdk 25). Review and test on Fire OS 6 before installing. The app does not silently self-update." \
-            --prerelease
+            --notes "Source: $source_url.$warning Optimized (R8) build for Android 7.1 / API 25 and newer, with Java time desugaring, so one APK covers Fire OS 6 and newer Android TV devices. Signed with the private key configured in this fork's Actions secrets, so it installs over earlier builds of this fork without losing app data." \
+            --latest
 
       - name: Prune old main builds (keep the newest 5)
         if: steps.version.outputs.already_built == 'false' && steps.version.outputs.channel == 'main'
