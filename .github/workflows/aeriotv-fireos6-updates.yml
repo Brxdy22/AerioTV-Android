@@ -228,12 +228,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # App version from the built source, without the "-main.<sha>" suffix (e.g. 0.5.13).
+          app_version=$(sed -nE 's/^\s*versionName\s*=\s*"([^"-]+).*/\1/p' upstream/app/build.gradle.kts | head -1)
+          [ -n "$app_version" ] || { echo 'Could not read versionName' >&2; exit 1; }
+          title="AerioTV-Brxdy22Fork $app_version"
           if [ "$CHANNEL" = main ]; then
-            title="AerioTV-Brxdy22Fork"
             source_url="https://github.com/jonzey231/AerioTV-Android/tree/$UPSTREAM_REF"
             warning=" UNRELEASED: built from the upstream main branch, which may contain unfinished or reverted work."
           else
-            title="AerioTV-Brxdy22Fork"
             source_url="https://github.com/jonzey231/AerioTV-Android/tree/$UPSTREAM_REF"
             warning=""
           fi
