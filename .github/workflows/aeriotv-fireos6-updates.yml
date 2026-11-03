@@ -9,9 +9,11 @@ on:
         options:
           - release
           - main
-        default: release
+        default: main
   schedule:
-    - cron: '23 10 * * 1'  # Mondays at 10:23 UTC (GitHub may delay scheduled jobs) - always builds "release"
+    # Daily at 09:41 UTC (GitHub may delay scheduled jobs). Scheduled runs build
+    # "main"; a run with no new upstream commit exits early without building.
+    - cron: '41 9 * * *'
 
 permissions:
   contents: write  # Required only to publish your custom APK as a GitHub Release
@@ -25,8 +27,8 @@ jobs:
         id: version
         env:
           GH_TOKEN: ${{ github.token }}
-          # Scheduled runs have no inputs, so they fall back to "release".
-          CHANNEL: ${{ inputs.channel || 'release' }}
+          # Scheduled runs have no inputs, so they fall back to "main".
+          CHANNEL: ${{ inputs.channel || 'main' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -231,6 +233,21 @@ jobs:
             --title "$title" \
             --notes "Source: $source_url.$warning Rebuilt for Android 7.1 / API 25, with Java time desugaring. Signed with the private key configured in this fork's Actions secrets. Also installs on newer Android TV devices (minSdk 25). Review and test on Fire OS 6 before installing. The app does not silently self-update." \
             --prerelease
+
+      - name: Prune old main builds (keep the newest 5)
+        if: steps.version.outputs.already_built == 'false' && steps.version.outputs.channel == 'main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '[.[] | select(.tag_name | startswith("fireos6-main-"))] | sort_by(.published_at) | reverse | .[5:] | .[].tag_name' |
+          while read -r tag; do
+            [[ "$tag" =~ ^fireos6-main-[0-9a-f]{7}$ ]] || continue
+            echo "Deleting old dev build $tag"
+            gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
+          done
 
       - name: Upload build log on failure
         if: failure()
