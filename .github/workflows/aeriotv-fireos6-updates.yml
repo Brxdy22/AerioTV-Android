@@ -10,6 +10,10 @@ on:
           - release
           - main
         default: main
+      rebuild:
+        description: 'Rebuild even if a build for this commit/release already exists (replaces that release)'
+        type: boolean
+        default: false
   schedule:
     # Daily at 09:41 UTC (GitHub may delay scheduled jobs). Scheduled runs build
     # "main"; a run with no new upstream commit exits early without building.
@@ -29,6 +33,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           # Scheduled runs have no inputs, so they fall back to "main".
           CHANNEL: ${{ inputs.channel || 'main' }}
+          REBUILD: ${{ inputs.rebuild && 'true' || 'false' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -68,7 +73,10 @@ jobs:
             echo "label=$label"
             echo "version_suffix=$version_suffix"
           } >> "$GITHUB_OUTPUT"
-          if gh release view "$local_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          if [ "$REBUILD" = true ]; then
+            echo "already_built=false" >> "$GITHUB_OUTPUT"
+            echo "Rebuild requested for $label; an existing $local_tag release will be replaced after a successful build."
+          elif gh release view "$local_tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "already_built=true" >> "$GITHUB_OUTPUT"
             echo "The custom Fire OS 6 build for $label already exists ($local_tag). Nothing to do."
           else
@@ -173,21 +181,24 @@ jobs:
         if: steps.version.outputs.already_built == 'false'
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Build Fire OS 6-compatible PlayDebug APK
+      # "perf" = upstream's release settings (R8 optimization, not debuggable)
+      # signed with the debug key, so it installs over earlier debug builds
+      # signed with the same key without losing app data.
+      - name: Build Fire OS 6-compatible PlayPerf APK
         if: steps.version.outputs.already_built == 'false'
         working-directory: upstream
         shell: bash
         run: |
           set -euo pipefail
           chmod +x ./gradlew
-          ./gradlew :app:assemblePlayDebug --no-daemon --stacktrace --console=plain 2>&1 | tee ../fireos6-build.log
+          ./gradlew :app:assemblePlayPerf --no-daemon --stacktrace --console=plain 2>&1 | tee ../fireos6-build.log
 
       - name: Verify the APK and prepare distribution asset
         if: steps.version.outputs.already_built == 'false'
         shell: bash
         run: |
           set -euo pipefail
-          apk=$(find upstream/app/build/outputs/apk/play/debug -maxdepth 1 -name '*.apk' -print -quit)
+          apk=$(find upstream/app/build/outputs/apk/play/perf -maxdepth 1 -name '*.apk' -print -quit)
           test -n "$apk" || { echo 'No APK was generated' >&2; exit 1; }
           aapt="$ANDROID_HOME/build-tools/36.0.0/aapt"
           "$aapt" dump badging "$apk" | grep -E "^(package:|sdkVersion:|targetSdkVersion:)" | tee fireos6-apk-info.txt
@@ -225,6 +236,11 @@ jobs:
             title="AerioTV $LABEL for Fire OS 6 (experimental)"
             source_url="https://github.com/jonzey231/AerioTV-Android/tree/$UPSTREAM_REF"
             warning=""
+          fi
+          # Rebuild: replace the old release only now, after the new APK built and verified.
+          if gh release view "$LOCAL_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Replacing existing release $LOCAL_TAG"
+            gh release delete "$LOCAL_TAG" --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes
           fi
           # Fork releases point at this repo's default branch; the source of truth
           # is the upstream commit/tag linked in the notes.
