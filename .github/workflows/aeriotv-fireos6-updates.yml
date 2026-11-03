@@ -20,13 +20,27 @@ on:
     - cron: '41 9 * * *'
 
 permissions:
-  contents: write  # Required only to publish your custom APK as a GitHub Release
+  contents: write  # Publish the APK as a GitHub Release and sync this fork's main with upstream
 
 jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
+      # Keeps this fork's main branch matched with upstream (same as GitHub's
+      # "Sync fork" button). Builds always come straight from upstream, so a
+      # failed sync never blocks a build. GITHUB_TOKEN can't change workflow
+      # files: if upstream ever adds/changes .github/workflows, this step fails
+      # and the fork needs one manual "Sync fork" on GitHub.
+      - name: Sync fork main with upstream
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api -X POST "repos/$GITHUB_REPOSITORY/merge-upstream" -f branch=main --jq '"\(.merge_type): \(.message)"'
+
       - name: Resolve what to build
         id: version
         env:
