@@ -98,6 +98,14 @@ jobs:
             echo "Will build Fire OS 6 APK for $label."
           fi
 
+      - name: Check out this fork's release scripts
+        if: steps.version.outputs.already_built == 'false'
+        uses: actions/checkout@v4
+        with:
+          path: fork
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+
       - name: Check out upstream source
         if: steps.version.outputs.already_built == 'false'
         uses: actions/checkout@v4
@@ -272,8 +280,13 @@ jobs:
           else
             source_line="Built from the official upstream release [\`$UPSTREAM_REF\`]($upstream/releases/tag/$UPSTREAM_REF)."
           fi
+          # Upstream commits since the previous fork release (best effort: never fails the release).
+          changes=$(python3 fork/.github/scripts/release_changes.py --tag "$LOCAL_TAG" --new-ref "$UPSTREAM_REF") ||
+            changes="**What changed:** see the [upstream commits]($upstream/commits/$UPSTREAM_REF)."
           cat > release-notes.md <<EOF
           $source_line
+
+          $changes
 
           **What's different from official AerioTV**
           - Runs on Android 7.1 and newer, so one APK covers the Fire TV Stick 4K (Fire OS 6) and newer Android TV / Google TV devices.
