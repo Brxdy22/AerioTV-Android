@@ -245,7 +245,27 @@ jobs:
           # App version from the built source, without the "-main.<sha>" suffix (e.g. 0.5.13).
           app_version=$(sed -nE 's/^\s*versionName\s*=\s*"([^"-]+).*/\1/p' upstream/app/build.gradle.kts | head -1)
           [ -n "$app_version" ] || { echo 'Could not read versionName' >&2; exit 1; }
-          title="AerioTV-Brxdy22Fork $app_version"
+          # Release titles: the first build of a new upstream version is "0.5.14";
+          # later builds of that same version are "0.5.14-1", "0.5.14-2", ...
+          # A rebuild of an existing tag keeps its title. Tags/APK name are unchanged.
+          base="AerioTV-Brxdy22Fork $app_version"
+          existing_title=$(gh release view "$LOCAL_TAG" --repo "$GITHUB_REPOSITORY" --json name --jq .name 2>/dev/null || true)
+          if [ -n "$existing_title" ]; then
+            title="$existing_title"
+          elif [ "$CHANNEL" = release ]; then
+            title="$base"
+          else
+            next=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=100" --jq '.[].name' |
+              BASE="$base" python3 -c '
+          import os, re, sys
+          base = os.environ["BASE"]
+          nums = [0 if m.group(1) is None else int(m.group(1))
+                  for line in sys.stdin
+                  for m in [re.fullmatch(re.escape(base) + r"(?:-(\d+))?", line.strip())] if m]
+          print("" if not nums else max(nums) + 1)')
+            title="$base${next:+-$next}"
+          fi
+          echo "Release title: $title"
           upstream=https://github.com/jonzey231/AerioTV-Android
           if [ "$CHANNEL" = main ]; then
             source_line="Built from upstream \`main\` at [\`${UPSTREAM_REF:0:7}\`]($upstream/commit/$UPSTREAM_REF) ([changes since the last official release]($upstream/compare/$(gh api repos/jonzey231/AerioTV-Android/releases/latest --jq .tag_name)...$UPSTREAM_REF)). This is newer than the latest official release and may include unfinished work."
