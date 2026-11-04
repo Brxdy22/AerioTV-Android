@@ -3,6 +3,9 @@ package com.aeriotv.android.feature.devicesetup
 import android.content.Context
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
+import androidx.compose.ui.semantics.Role
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -67,7 +70,7 @@ import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 /**
- * Phone and tablet sender for "Set up a TV" (docs/DeviceSetupHandoff.md):
+ * Phone and tablet sender for "Set up another device" (docs/DeviceSetupHandoff.md):
  * pick a TV found on the network (or arrive from its QR code), confirm the
  * 6-digit code it shows, choose what to send, and send it sealed to that TV.
  */
@@ -81,6 +84,10 @@ class SetUpTvViewModel @Inject constructor(
 
     sealed interface Step {
         data object Pick : Step
+        /** First step for a target: "Copy entire setup from this device" or "Import this user only". */
+        data class Scope(val target: SetupTarget) : Step
+        /** "Import this user only" for a profile with no saved sign-in: the roster credential prompt. */
+        data class Credential(val target: SetupTarget, val profileId: String, val username: String) : Step
         data class Code(val target: SetupTarget, val error: String? = null) : Step
         data class Choose(val target: SetupTarget, val code: String) : Step
         data object Sending : Step
@@ -96,18 +103,19 @@ class SetUpTvViewModel @Inject constructor(
     private val _source = MutableStateFlow<SetupSender.Source?>(null)
     val source: StateFlow<SetupSender.Source?> = _source.asStateFlow()
     private var playlistId: String? = null
+    private val _userOnly = MutableStateFlow(false)
+    val userOnly: StateFlow<Boolean> = _userOnly.asStateFlow()
 
     fun load(pid: String?, link: String?, target: SetupTarget? = null) {
         if (playlistId != null) return
-        // Opened from the dock card: that TV is preselected, the code is still required.
-        if (target != null) _step.value = Step.Code(target)
         viewModelScope.launch {
             val id = pid ?: repository.activePlaylist()?.id
             playlistId = id
             _source.value = id?.let { sender.source(it) }
+            if (target != null) _step.value = afterTarget(target)
             link?.let(SetupProtocol::parseLink)?.let { l ->
-                val t = SetupTarget(l.name.ifBlank { "TV" }, l.ip, l.port, l.pk, code = l.code)
-                _step.value = Step.Choose(t, l.code)
+                val t = SetupTarget(l.name.ifBlank { "AerioTV" }, l.ip, l.port, l.pk, code = l.code)
+                _step.value = afterTarget(t)
             }
         }
     }
@@ -115,15 +123,54 @@ class SetUpTvViewModel @Inject constructor(
     /** A setup code read by the in-app scanner (or picked from Photos). */
     fun useLink(link: String) {
         val l = SetupProtocol.parseLink(link) ?: return
-        val t = SetupTarget(l.name.ifBlank { "TV" }, l.ip, l.port, l.pk, code = l.code)
-        _step.value = Step.Choose(t, l.code)
+        val t = SetupTarget(l.name.ifBlank { "AerioTV" }, l.ip, l.port, l.pk, code = l.code)
+        _step.value = afterTarget(t)
     }
 
-    fun pick(t: SetupTarget) { _step.value = if (t.code != null) Step.Choose(t, t.code) else Step.Code(t) }
+    private val isDispatcharr: Boolean get() = _source.value?.isDispatcharr == true
+
+    /** Scope applies to Dispatcharr only; other playlists go straight to the code. */
+    private fun afterTarget(t: SetupTarget): Step = when {
+        isDispatcharr -> Step.Scope(t)
+        t.code != null -> Step.Choose(t, t.code)
+        else -> Step.Code(t)
+    }
+
+    fun pick(t: SetupTarget) { _userOnly.value = false; _step.value = afterTarget(t) }
+
+    fun chooseScope(t: SetupTarget, userOnly: Boolean) {
+        _userOnly.value = userOnly
+        val id = playlistId
+        val active = id?.let { profiles.activeProfile(it) }
+        _step.value = when {
+            userOnly && active != null && !profiles.hasSavedCredential(active.id) -> Step.Credential(t, active.id, active.username)
+            t.code != null -> Step.Choose(t, t.code)
+            else -> Step.Code(t)
+        }
+    }
+
+    /** Roster prompt submit: null = saved, else the error to show. */
+    suspend fun saveCredential(s: Step.Credential, password: String?, apiKey: String?): String? {
+        val id = playlistId ?: return "This playlist could not be read."
+        return profiles.saveProfileCredential(id, s.profileId, password, apiKey).fold(
+            onSuccess = {
+                _source.value = sender.source(id)
+                _step.value = if (s.target.code != null) Step.Choose(s.target, s.target.code) else Step.Code(s.target)
+                null
+            },
+            onFailure = { it.message ?: "Could not sign in." },
+        )
+    }
+
+    fun cancelCredential(s: Step.Credential) { _step.value = Step.Scope(s.target) }
+
+    private fun afterTargetBack(t: SetupTarget): Step = if (isDispatcharr) Step.Scope(t) else Step.Pick
 
     fun back() {
         _step.value = when (val s = _step.value) {
-            is Step.Choose -> if (s.target.code != null) Step.Pick else Step.Code(s.target)
+            is Step.Choose -> if (s.target.code != null) afterTargetBack(s.target) else Step.Code(s.target)
+            is Step.Code -> afterTargetBack(s.target)
+            is Step.Credential -> Step.Scope(s.target)
             is Step.Error -> s.back
             else -> Step.Pick
         }
@@ -131,7 +178,7 @@ class SetUpTvViewModel @Inject constructor(
 
     fun submitCode(t: SetupTarget, code: String) {
         val c = code.filter(Char::isDigit)
-        if (c.length != 6) { _step.value = Step.Code(t, "Enter the 6-digit code shown on the TV."); return }
+        if (c.length != 6) { _step.value = Step.Code(t, "Enter the 6-digit code shown on the other device."); return }
         _step.value = Step.Choose(t, c)
     }
 
@@ -140,12 +187,12 @@ class SetUpTvViewModel @Inject constructor(
         val back = Step.Choose(t, code)
         _step.value = Step.Sending
         viewModelScope.launch {
-            val payload = sender.buildPayload(id, profileIds, sync)
+            val payload = sender.buildPayload(id, profileIds, sync, userOnly = _userOnly.value)
                 ?: run { _step.value = Step.Error("This playlist could not be read.", back); return@launch }
             _step.value = when (val r = sender.send(t, code, payload)) {
                 SetupSender.SendResult.Ok -> Step.Sent
-                SetupSender.SendResult.WrongCode -> Step.Code(t.copy(code = null), "The TV did not accept that code. Check the code on the TV and try again.")
-                SetupSender.SendResult.Refused -> Step.Error("The TV is no longer waiting for setup. Start setup on the TV again.", Step.Pick)
+                SetupSender.SendResult.WrongCode -> Step.Code(t.copy(code = null), "The device did not accept that code. Check the code on the device and try again.")
+                SetupSender.SendResult.Refused -> Step.Error("The device is no longer waiting. Start setup on the device again.", Step.Pick)
                 is SetupSender.SendResult.Failed -> Step.Error(r.message, back)
             }
         }
@@ -154,7 +201,7 @@ class SetUpTvViewModel @Inject constructor(
     override fun onCleared() { discovery.stop() }
 }
 
-/** Full-screen "Set up a TV" flow. [playlistId] null = the active playlist; [link] = a scanned aeriotv://setup URL. */
+/** Full-screen "Set up another device" flow. [playlistId] null = the active playlist; [link] = a scanned aeriotv://setup URL. */
 @Composable
 fun SetUpTvDialog(playlistId: String?, link: String? = null, target: SetupTarget? = null, onDismiss: () -> Unit) {
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
@@ -178,16 +225,27 @@ fun SetUpTvScreen(playlistId: String?, link: String?, onClose: () -> Unit, targe
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Column(Modifier.widthIn(max = 560.dp).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("Set up a TV", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onBackground)
+            Text("Set up another device", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onBackground)
             when (val s = step) {
                 SetUpTvViewModel.Step.Pick -> PickStep(tvs, vm::pick, vm::useLink)
+                is SetUpTvViewModel.Step.Scope -> ScopeStep(s, vm.userOnly.collectAsStateWithLifecycle().value, vm::chooseScope)
+                is SetUpTvViewModel.Step.Credential -> {
+                    ScopeStep(SetUpTvViewModel.Step.Scope(s.target), true) { _, _ -> }
+                    com.aeriotv.android.feature.settings.RosterCredentialDialog(
+                        username = s.username,
+                        onCancel = { vm.cancelCredential(s) },
+                        onSubmit = { pw, key -> vm.saveCredential(s, pw, key) },
+                        title = "Sign in as ${s.username}",
+                        confirmLabel = "Continue",
+                    )
+                }
                 is SetUpTvViewModel.Step.Code -> CodeStep(s, vm::submitCode)
-                is SetUpTvViewModel.Step.Choose -> ChooseStep(s, source, vm::send)
+                is SetUpTvViewModel.Step.Choose -> ChooseStep(s, source, vm.userOnly.collectAsStateWithLifecycle().value, vm::send)
                 SetUpTvViewModel.Step.Sending -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                    CircularProgressIndicator(Modifier.size(24.dp)); Text("Sending to the TV", color = MaterialTheme.colorScheme.onBackground)
+                    CircularProgressIndicator(Modifier.size(24.dp)); Text("Sending to the device", color = MaterialTheme.colorScheme.onBackground)
                 }
                 SetUpTvViewModel.Step.Sent -> {
-                    Text("Sent. The TV is finishing setup now.", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onBackground)
+                    Text("Sent. The device is finishing setup now.", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onBackground)
                     Button(onClick = onClose, modifier = Modifier.fillMaxWidth().heightIn(min = 54.dp)) { Text("Done") }
                 }
                 is SetUpTvViewModel.Step.Error -> {
@@ -208,14 +266,14 @@ fun SetUpTvScreen(playlistId: String?, link: String?, onClose: () -> Unit, targe
 @Composable
 private fun PickStep(tvs: List<SetupTarget>, onPick: (SetupTarget) -> Unit, onLink: (String) -> Unit) {
     Text(
-        "On the TV, open AerioTV and choose Set up from your phone. Then pick the TV below, or scan the code on the TV.",
+        "On the other device, open AerioTV and choose Set up from another device. Then pick it below, or scan the code it shows.",
         style = MaterialTheme.typography.bodyMedium.subtext(),
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
     if (tvs.isEmpty()) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
-            Text("Looking for TVs on this network", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("Looking for devices on this network", color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
     tvs.forEach { t ->
@@ -225,26 +283,50 @@ private fun PickStep(tvs: List<SetupTarget>, onPick: (SetupTarget) -> Unit, onLi
                 .clickable { onPick(t) }.padding(horizontal = 14.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Icon(Icons.Filled.Tv, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+            Icon(setupKindIcon(t.kind), contentDescription = null, tint = MaterialTheme.colorScheme.primary)
             Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
                 Text(t.name, style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onBackground)
-                Text("Check that the TV shows ${t.fingerprint}", style = MaterialTheme.typography.bodySmall.subtext(), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("Check that the device shows ${t.fingerprint}", style = MaterialTheme.typography.bodySmall.subtext(), color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             Icon(Icons.Filled.ChevronRight, contentDescription = null, tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
     com.aeriotv.android.feature.qrscan.QrScanActions(
-        prompt = "Point the camera at the code on the TV.",
+        prompt = "Point the camera at the code on the other device.",
         accept = { r ->
             when (r) {
                 is com.aeriotv.android.core.qr.ScannedCode.Result.SetupLink -> null
                 is com.aeriotv.android.core.qr.ScannedCode.Result.UserKey ->
-                    "This is a Dispatcharr user code. Scan the code shown on the TV."
+                    "This is a Dispatcharr user code. Scan the code shown on the other device."
                 com.aeriotv.android.core.qr.ScannedCode.Result.Invalid -> com.aeriotv.android.core.qr.ScannedCode.INVALID_MESSAGE
             }
         },
         onResult = { r -> if (r is com.aeriotv.android.core.qr.ScannedCode.Result.SetupLink) onLink(r.link) },
     )
+}
+
+@Composable
+private fun ScopeStep(s: SetUpTvViewModel.Step.Scope, userOnly: Boolean, onChoose: (SetupTarget, Boolean) -> Unit) {
+    var pickedUserOnly by remember(s.target.key) { mutableStateOf(userOnly) }
+    Text("Set up ${s.target.name}", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onBackground)
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp))
+            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.55f))
+            .selectableGroup(),
+    ) {
+        listOf(false to "Copy entire setup from this device", true to "Import this user only").forEach { (value, label) ->
+            Row(
+                Modifier.fillMaxWidth()
+                    .selectable(selected = pickedUserOnly == value, onClick = { pickedUserOnly = value }, role = Role.RadioButton)
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                androidx.compose.material3.RadioButton(selected = pickedUserOnly == value, onClick = null)
+                Text(label, modifier = Modifier.padding(start = 12.dp), color = MaterialTheme.colorScheme.onBackground)
+            }
+        }
+    }
+    Button(onClick = { onChoose(s.target, pickedUserOnly) }, modifier = Modifier.fillMaxWidth().heightIn(min = 54.dp)) { Text("Continue") }
 }
 
 @Composable
@@ -268,6 +350,7 @@ private fun CodeStep(s: SetUpTvViewModel.Step.Code, onSubmit: (SetupTarget, Stri
 private fun ChooseStep(
     s: SetUpTvViewModel.Step.Choose,
     source: SetupSender.Source?,
+    userOnly: Boolean,
     onSend: (SetupTarget, String, Set<String>, Boolean) -> Unit,
 ) {
     if (source == null) {
@@ -276,13 +359,14 @@ private fun ChooseStep(
     }
     val picked = remember(source) {
         androidx.compose.runtime.mutableStateListOf<String>().apply {
-            addAll(source.choices.filter { (it.isDefault || it.isCurrent) && it.credentialLabel != null }.map { it.profileId })
+            // Copy entire setup: every profile that can be sent.
+            addAll(source.choices.filter { it.isDefault || it.credentialLabel != null }.map { it.profileId })
         }
     }
-    var sync by remember(source) { mutableStateOf(source.isDispatcharr && source.syncOnHere) }
+    var sync by remember(source, userOnly) { mutableStateOf(source.isDispatcharr && !userOnly) }
     Text("Send to ${s.target.name}", style = MaterialTheme.typography.titleMedium, color = MaterialTheme.colorScheme.onBackground)
     Text("Playlist: ${source.playlist.name}", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onBackground)
-    if (source.isDispatcharr && source.choices.isNotEmpty()) {
+    if (source.isDispatcharr && source.choices.isNotEmpty() && !userOnly) {
         Text("Profiles", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onBackground)
         source.choices.forEach { c ->
             val enabled = c.credentialLabel != null && !c.isDefault
@@ -299,7 +383,7 @@ private fun ChooseStep(
                         when {
                             c.isDefault -> "Signs in with the playlist login. Always sent."
                             c.credentialLabel != null -> c.credentialLabel
-                            else -> "No saved sign-in on this device. Add it on the TV later."
+                            else -> "No saved sign-in on this device. Add it on the other device later."
                         },
                         style = MaterialTheme.typography.bodySmall.subtext(),
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -307,15 +391,17 @@ private fun ChooseStep(
                 }
             }
         }
+    }
+    if (source.isDispatcharr) {
         Row(Modifier.fillMaxWidth().clickable { sync = !sync }, verticalAlignment = Alignment.CenterVertically) {
             Checkbox(checked = sync, onCheckedChange = null)
-            Text("Turn on Dispatcharr Sync on the TV", modifier = Modifier.padding(start = 8.dp), color = MaterialTheme.colorScheme.onBackground)
+            Text("Turn on Dispatcharr Sync on the other device", modifier = Modifier.padding(start = 8.dp), color = MaterialTheme.colorScheme.onBackground)
         }
     }
     Spacer(Modifier.heightIn(min = 4.dp))
     Button(onClick = { onSend(s.target, s.code, picked.toSet(), sync) }, modifier = Modifier.fillMaxWidth().heightIn(min = 54.dp)) { Text("Send") }
     Text(
-        "Sent only to this TV over your network, encrypted with its code. Nothing goes through your server.",
+        "Sent only to this device over your network, encrypted with its code. Nothing goes through your server.",
         style = MaterialTheme.typography.bodySmall.subtext(),
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )

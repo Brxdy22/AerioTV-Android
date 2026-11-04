@@ -90,7 +90,7 @@ object Routes {
     const val BOOTSTRAP = "bootstrap"
     const val WELCOME = "welcome"
     const val CHOOSE_TYPE = "choose_type"
-    /** TV: "Set up from your phone" receiver (docs/DeviceSetupHandoff.md). */
+    /** "Set up from another device" receiver (every device) (docs/DeviceSetupHandoff.md). */
     const val TV_SETUP = "tv_setup"
     const val CONFIGURE = "configure/{type}"
     const val MAIN = "main"
@@ -988,14 +988,25 @@ fun AerioTVNavHost(
                     navController.getBackStackEntry(Routes.PLAYLIST_GRAPH)
                 }
                 val vm: PlaylistViewModel = hiltViewModel(parent)
-                com.aeriotv.android.feature.devicesetup.TvSetupScreen(
+                val toMain = {
+                    navController.navigate(Routes.MAIN) {
+                        popUpTo(Routes.PLAYLIST_GRAPH) { inclusive = false }
+                    }
+                }
+                // After a Dispatcharr handover: the onboarding Add Profiles step, so
+                // more users can be added (server list, search, QR import).
+                var addProfilesFor by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf<String?>(null) }
+                val addPid = addProfilesFor
+                if (addPid != null) {
+                    com.aeriotv.android.feature.onboarding.AddProfilesStepScreen(
+                        playlistId = addPid,
+                        onDone = { if (addProfilesFor != null) { addProfilesFor = null; toMain() } },
+                        onboarding = true,
+                    )
+                } else com.aeriotv.android.feature.devicesetup.TvSetupScreen(
                     addPlaylist = { req -> vm.addFromSetup(req) },
                     onCancel = { navController.popBackStack() },
-                    onDone = {
-                        navController.navigate(Routes.MAIN) {
-                            popUpTo(Routes.PLAYLIST_GRAPH) { inclusive = false }
-                        }
-                    },
+                    onDone = { pid -> if (pid != null) addProfilesFor = pid else toMain() },
                 )
             }
 
@@ -1007,7 +1018,7 @@ fun AerioTVNavHost(
                 val chooseIsTv = com.aeriotv.android.ui.settings.rememberIsTvDevice()
                 ChooseSourceTypeScreen(
                     onboarding = true,
-                    onSetUpFromPhone = if (chooseIsTv) ({ navController.navigate(Routes.TV_SETUP) }) else null,
+                    onSetUpFromPhone = { navController.navigate(Routes.TV_SETUP) },
                     onBack = { navController.popBackStack() },
                     onChoose = { type ->
                         // Welcome's Sync with Dispatcharr card arrives here with the flag

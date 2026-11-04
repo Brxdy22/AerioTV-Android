@@ -352,6 +352,14 @@ fun MediaTabContent(
     val posterUrlFor: (MediaItem) -> String? = remember(artVersion, viewModel) {
         { item -> viewModel.artPosterUrl(item.artKey) ?: item.posterUrl }
     }
+    // TMDB-first year and rating per card, re-read on the same art bumps
+    // (Logan 2026-11-03). Applied per cell, never to the whole catalog.
+    val metaFor: (MediaItem) -> MediaItem = remember(artVersion, viewModel) {
+        { item -> viewModel.withTmdbMeta(item) }
+    }
+    val heroMetaFor: (MediaHeroPage) -> MediaHeroPage = remember(artVersion, viewModel) {
+        { page -> viewModel.withTmdbMeta(page) }
+    }
 
     // Hero backdrops (Apple parity: TMDB backdrop per hero page when a key is
     // set); the cropped poster shows until one arrives. Cached per page key.
@@ -362,7 +370,7 @@ fun MediaTabContent(
         for (page in heroPages + watchlistPages) {
             if (viewModel.heroBackdropResolved(page.key)) continue
             val artKey = page.item?.artKey ?: tmdbArtKey(page.title, page.isMovie)
-            viewModel.putHeroBackdrop(page.key, viewModel.heroBackdropUrl(artKey, page.tmdbId, searchTitle(page.title), page.isMovie))
+            viewModel.putHeroBackdrop(page.key, viewModel.heroBackdropUrl(artKey, page.tmdbId, tmdbSearchTitle(page.title, page.year), page.isMovie))
         }
     }
 
@@ -372,7 +380,7 @@ fun MediaTabContent(
         if (heroPages.isEmpty()) return@LaunchedEffect
         val priority = heroPages.mapNotNull { page ->
             val t = searchTitle(page.title)
-            if (t.isBlank()) null else (page.item?.artKey ?: tmdbArtKey(t, page.isMovie)) to t
+            if (t.isBlank()) null else (page.item?.artKey ?: tmdbArtKey(t, page.isMovie)) to tmdbSearchTitle(t, page.year)
         }
         if (priority.isNotEmpty()) viewModel.enrichArt(priority, kind == MediaKind.Movies)
     }
@@ -405,7 +413,7 @@ fun MediaTabContent(
             else onEpisodeResumeFromStart(videoId)
         }
         MediaHeroCard(
-            page = backdrops[page.key]?.let { page.copy(artUrl = it) } ?: page,
+            page = heroMetaFor(backdrops[page.key]?.let { page.copy(artUrl = it) } ?: page),
             onPrimary = play,
             onPlayFromStart = playFromStart,
             onDetails = { page.item?.movieUuid?.let { u -> viewModel.noteMovieTitle(u, page.title); onMovieClick(u) } ?: page.item?.seriesId?.let(onSeriesClick) },
@@ -419,7 +427,7 @@ fun MediaTabContent(
     val wlCard: @Composable (MediaHeroPage) -> Unit = { page ->
         val item = page.item
         MediaHeroCard(
-            page = backdrops[page.key]?.let { page.copy(artUrl = it) } ?: page,
+            page = heroMetaFor(backdrops[page.key]?.let { page.copy(artUrl = it) } ?: page),
             onPrimary = {
                 item?.movieUuid?.let { u -> viewModel.noteMovieTitle(u, page.title); onPlayMovie(u) } ?: item?.seriesId?.let(onSeriesClick)
             },
@@ -490,6 +498,8 @@ fun MediaTabContent(
             // indexed key lookup for the return-from-detail restore.
             gridIndexOfKey = if (isSearching) null else libraryBuilt.indexOfKey,
             posterUrlFor = posterUrlFor,
+            metaFor = metaFor,
+            heroMetaFor = heroMetaFor,
             isSearching = isSearching, searchActive = searchActive, query = query,
             onQueryChange = { submitQuery(it) },
             onSearchToggle = { searchActive = !searchActive; if (!searchActive) submitQuery("") },
@@ -582,7 +592,7 @@ fun MediaTabContent(
         cell = { item ->
             val open = { item.movieUuid?.let(onMovieClick) ?: item.seriesId?.let(onSeriesClick); Unit }
             MediaPosterCard(
-                item = item,
+                item = metaFor(item),
                 posterUrl = posterUrlFor(item),
                 onClick = open,
                 menu = { close ->

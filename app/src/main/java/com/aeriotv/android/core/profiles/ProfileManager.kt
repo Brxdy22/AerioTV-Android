@@ -1058,6 +1058,64 @@ class ProfileManager @Inject constructor(
 
     // ---- Set up a TV from your phone (docs/DeviceSetupHandoff.md) ----
 
+    /** True when [profileId] has its own saved API key or password here (the default profile uses the playlist login). */
+    fun hasSavedCredential(profileId: String): Boolean =
+        store.byId(profileId)?.let { it.isDefault || !it.apiKey.isNullOrBlank() || !it.password.isNullOrBlank() } ?: false
+
+    /** Sign in once as [profileId]'s user and save the password or key on that profile. */
+    suspend fun saveProfileCredential(playlistId: String, profileId: String, password: String?, apiKey: String?): Result<Unit> = runCatching {
+        val p = store.byId(profileId) ?: error("Profile not found")
+        val row = playlistDao.rawById(playlistId) ?: error("Playlist not found")
+        val base = repository.effectiveBaseUrl(row)
+        val key = authenticate(playlistId, p.id, base, p.username, password, apiKey).key
+        val me = client.fetchMe(base, key) ?: error("Could not read ${p.username} from the server.")
+        if (!me.username.equals(p.username, ignoreCase = true)) error("This API key belongs to ${me.username}, not ${p.username}.")
+        store.update(profileId) { it.copy(password = password?.takeIf { s -> s.isNotBlank() } ?: it.password).applyMe(me, key) }
+        Log.i(TAG, "[PROFILE] credential saved for ${p.username}")
+    }
+
+    // ---- Show Dispatcharr User QR Code (docs/DeviceSetupHandoff.md) ----
+
+    /** The `user_api_key` QR text for [profileId], or null when no API key is saved here. Never log it. */
+    suspend fun userQrText(playlistId: String, profileId: String): String? {
+        val row = playlistDao.rawById(playlistId) ?: return null
+        if (!row.sourceType.startsWith("Dispatcharr")) return null
+        val p = store.byId(profileId)?.takeIf { it.playlistId == playlistId } ?: return null
+        val key = (if (p.isDefault) row.apiKey else p.apiKey)?.takeIf { it.isNotBlank() } ?: return null
+        val user = p.username.ifBlank { row.username.orEmpty() }
+        return com.aeriotv.android.core.qr.ScannedCode.userKeyText(key, row.urlString, user)
+    }
+
+    /** True when showing [profileId]'s QR needs a PIN: that profile's PIN or the Device Admin PIN. */
+    fun userQrNeedsPin(playlistId: String, profileId: String): Boolean =
+        pinStore.hasPin(profileId) || hasDeviceAdminPin(playlistId)
+
+    fun userQrPinType(playlistId: String, profileId: String): PinType? =
+        pinStore.type(profileId) ?: deviceAdminPinType(playlistId)
+
+    /** Either the profile's own PIN or the Device Admin PIN passes; each keeps its own backoff. */
+    @Synchronized
+    fun verifyUserQrPin(playlistId: String, profileId: String, entries: List<String>): PinCheck {
+        val ids = listOf(profileId, deviceAdminPinId(playlistId)).filter { pinStore.hasPin(it) }
+        if (ids.isEmpty()) return PinCheck.Ok
+        val now = System.currentTimeMillis()
+        var lock = Int.MAX_VALUE
+        var tried = false
+        for (id in ids) {
+            val b = pinStore.backoff(id)
+            val left = b.remainingSeconds(now)
+            if (left > 0) { lock = minOf(lock, left); continue }
+            tried = true
+            if (pinStore.check(id, entries)) { pinStore.saveBackoff(id, b.onOk()); return PinCheck.Ok }
+            val next = b.onWrong(now)
+            pinStore.saveBackoff(id, next)
+            next.remainingSeconds(now).takeIf { it > 0 }?.let { lock = minOf(lock, it) }
+        }
+        Log.i(TAG, "[PROFILE] user QR pin wrong")
+        val open = ids.any { pinStore.backoff(it).remainingSeconds(now) == 0 }
+        return if (tried && open) PinCheck.Wrong else PinCheck.Locked(if (lock == Int.MAX_VALUE) 1 else lock)
+    }
+
     /** Sender gate: an Admin profile, or the default profile, is active here. */
     fun canSetUpTv(playlistId: String): Boolean =
         RoleRules.isFullAccess(activeRole(playlistId)) || activeProfile(playlistId)?.isDefault != false

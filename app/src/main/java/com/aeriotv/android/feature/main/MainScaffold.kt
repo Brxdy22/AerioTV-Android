@@ -2989,6 +2989,8 @@ private fun SettingsTabContent(
             is AddPlaylistWizardStep.Configure -> AddPlaylistStep.Configure(st.sourceType)
             // Past the connect: the id-flip watcher below must not pop it.
             is AddPlaylistWizardStep.AddProfiles -> AddPlaylistStep.None
+            // The receiver pops itself when the handed-over playlist is applied.
+            is AddPlaylistWizardStep.ReceiveSetup -> AddPlaylistStep.None
         }
         else -> AddPlaylistStep.None
     }
@@ -3199,8 +3201,21 @@ private fun SettingsTabContent(
                         if (nav.current == r) nav.pop()
                     },
                 )
+            is AddPlaylistWizardStep.ReceiveSetup -> com.aeriotv.android.feature.devicesetup.TvSetupScreen(
+                addPlaylist = { req -> playlistVm.addFromSetup(req) },
+                onCancel = { nav.replaceTop(SettingsRoute.AddPlaylist(AddPlaylistWizardStep.ChooseType)) },
+                onDone = { pid ->
+                    if (nav.current != r) Unit
+                    // Dispatcharr: continue into Add Profiles so more users can be added.
+                    else if (pid != null) nav.replaceTop(SettingsRoute.AddPlaylist(AddPlaylistWizardStep.AddProfiles(pid)))
+                    else nav.pop()
+                },
+            )
             is AddPlaylistWizardStep.ChooseType -> ChooseSourceTypeScreen(
                 onBack = { nav.pop() },
+                onSetUpFromPhone = {
+                    nav.replaceTop(SettingsRoute.AddPlaylist(AddPlaylistWizardStep.ReceiveSetup))
+                },
                 onChoose = { type ->
                     // Start a FRESH draft so the add creates a NEW row and can't
                     // carry over the active server's bootstrap-prefilled API key

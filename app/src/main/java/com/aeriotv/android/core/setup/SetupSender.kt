@@ -21,7 +21,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.util.ArrayDeque
 
-/** A TV offering setup: from NSD (key only) or from its QR code (code included). */
+/** A device offering setup: from NSD (key only) or from its QR code (code included). */
 data class SetupTarget(
     val name: String,
     val host: String,
@@ -29,6 +29,8 @@ data class SetupTarget(
     val pk: ByteArray,
     /** The code itself, when it came from a QR link. */
     val code: String? = null,
+    /** [SetupProtocol.KIND_PHONE], [SetupProtocol.KIND_TABLET], or [SetupProtocol.KIND_TV]. */
+    val kind: String = SetupProtocol.KIND_TV,
 ) {
     val key: String get() = "$host:$port"
     /** Matches the 4 characters the TV shows next to its code. */
@@ -107,10 +109,11 @@ class SetupDiscovery(private val context: Context) {
                 val pk = attr(SetupProtocol.TXT_PK)?.let(SetupCrypto::unb64)?.takeIf { it.size == 32 }
                 if (host != null && pk != null && attr(SetupProtocol.TXT_VERSION) == SetupProtocol.VERSION.toString()) {
                     val t = SetupTarget(
-                        name = attr(SetupProtocol.TXT_NAME)?.takeIf { it.isNotBlank() } ?: info.serviceName ?: "TV",
+                        name = attr(SetupProtocol.TXT_NAME)?.takeIf { it.isNotBlank() } ?: info.serviceName ?: "AerioTV",
                         host = host,
                         port = info.port,
                         pk = pk,
+                        kind = SetupProtocol.normalizeKind(attr(SetupProtocol.TXT_KIND)),
                     )
                     info.serviceName?.let { synchronized(this@SetupDiscovery) { keysByService[it] = t.key } }
                     _tvs.value = (_tvs.value.filterNot { it.name == t.name || it.key == t.key } + t).sortedBy { it.name.lowercase() }
@@ -175,8 +178,14 @@ class SetupSender(
         return Source(row, isD, choices, syncOn)
     }
 
-    suspend fun buildPayload(playlistId: String, profileIds: Set<String>, turnOnSync: Boolean): SetupProtocol.Payload? {
+    /**
+     * [userOnly] = "Import this user only": the playlist signs in as the
+     * active profile, which arrives as the receiver's one (default) profile.
+     * Same wire format, one profile.
+     */
+    suspend fun buildPayload(playlistId: String, profileIds: Set<String>, turnOnSync: Boolean, userOnly: Boolean = false): SetupProtocol.Payload? {
         val row = profiles.defaultPlaylistRow(playlistId) ?: return null
+        if (userOnly) return buildUserOnly(playlistId, row, turnOnSync)
         val type = when {
             row.sourceType.startsWith("Dispatcharr") -> "dispatcharr"
             row.sourceType == "XtreamCodes" -> "xtream"
@@ -229,6 +238,39 @@ class SetupSender(
         )
     }
 
+    private suspend fun buildUserOnly(playlistId: String, row: PlaylistEntity, turnOnSync: Boolean): SetupProtocol.Payload? {
+        val full = buildPayload(playlistId, emptySet(), turnOnSync = false) ?: return null
+        if (full.playlist.type != "dispatcharr") return full
+        val activeId = profiles.activeProfile(playlistId)?.id
+        val src = profiles.setupSources(playlistId).firstOrNull { it.profile.id == activeId }
+            ?: profiles.setupSources(playlistId).firstOrNull { it.profile.isDefault } ?: return full
+        val p = src.profile
+        val cred = if (p.isDefault) full.playlist.credential else SetupProtocol.Credential(
+            apiKey = p.apiKey?.takeIf { it.isNotBlank() },
+            username = p.username.takeIf { it.isNotBlank() && !p.password.isNullOrBlank() },
+            password = p.password?.takeIf { it.isNotBlank() },
+        ).takeIf { it.apiKey != null || it.password != null } ?: return null
+        val pin = src.pin
+        return full.copy(
+            playlist = full.playlist.copy(credential = cred),
+            profiles = listOf(
+                SetupProtocol.ProfilePart(
+                    username = p.username,
+                    displayName = p.displayName,
+                    role = p.effectiveRole().wire,
+                    avatar = p.avatar?.let { SetupProtocol.Avatar(it.icon, it.color) },
+                    order = 0,
+                    isDefault = true,
+                    credential = null,
+                    pinType = if (pin != null) PinRules.wireType(pin.type) else "none",
+                    pinHash = pin?.hash.orEmpty(),
+                    pinSalt = pin?.salt.orEmpty(),
+                ),
+            ),
+            sync = if (turnOnSync) SetupProtocol.SyncPart() else null,
+        )
+    }
+
     sealed interface SendResult {
         data object Ok : SendResult
         data object WrongCode : SendResult
@@ -257,11 +299,11 @@ class SetupSender(
                 status == 200 && reply?.ok == true -> SendResult.Ok
                 status == 403 && reply?.error == "wrong_code" -> SendResult.WrongCode
                 status == 403 -> SendResult.Refused
-                else -> SendResult.Failed("The TV answered HTTP $status.")
+                else -> SendResult.Failed("The device answered HTTP $status.")
             }
         }.getOrElse {
             Log.w(TAG, "[SETUP] send failed: ${it.javaClass.simpleName}")
-            SendResult.Failed("Could not reach the TV. Check that both devices are on the same network.")
+            SendResult.Failed("The device could not be reached. Check that both devices are on the same network.")
         }
     }
 
