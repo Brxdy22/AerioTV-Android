@@ -21,6 +21,7 @@ import urllib.request
 
 UPSTREAM = os.getenv("UPSTREAM_REPO", "jonzey231/AerioTV-Android")
 MAX_LINES = 40
+TODAY = "Today's release notes"
 
 
 def api(path):
@@ -60,31 +61,30 @@ def previous_upstream_release(upstream_releases, new_ref):
     return None
 
 
-def release_labels(published_at, today):
-    """("yesterday's release", "Yesterday's release notes"), or dated labels."""
+def previous_heading(published_at, today):
+    """Heading for the previous release's change list."""
     day = datetime.date.fromisoformat(published_at[:10])
     if day == today - datetime.timedelta(days=1):
-        return "yesterday's release", "Yesterday's release notes"
-    date = f"{day:%b} {day.day}"
-    return f"the {date} release", f"Release notes from {date}"
+        return "Yesterday's release notes"
+    return f"Release notes from {day:%b} {day.day}"
 
 
 def previous_notes(body, heading):
     """The first change list in a release body, under [heading]; "" if none."""
     for block in (body or "").replace("\r\n", "\n").split("\n\n"):
-        if block.startswith("**What changed"):
-            return re.sub(r"^\*\*What changed[^*]*\*\*:?", f"**{heading}**", block, count=1)
+        if block.startswith(("**What changed", f"**{TODAY}")):
+            return re.sub(r"^\*\*[^*]*\*\*:?", f"**{heading}**", block, count=1)
     return ""
 
 
-def format_section(prev_label, prev_ref, new_ref, compare):
+def format_section(prev_ref, new_ref, compare):
     base = f"https://github.com/{UPSTREAM}"
     diff = f"{base}/compare/{prev_ref}...{new_ref}"
     commits = [c for c in compare.get("commits", []) if len(c.get("parents", [])) <= 1]
     total = compare.get("total_commits", len(commits))
     if not commits:
-        return f"**What changed since {prev_label}:** no upstream code changes (rebuild only)."
-    lines = [f"**What changed since {prev_label}** ({total} upstream commit{'s' if total != 1 else ''}, "
+        return f"**{TODAY}:** no upstream code changes (rebuild only)."
+    lines = [f"**{TODAY}** ({total} upstream commit{'s' if total != 1 else ''}, "
              f"[full diff]({diff}))"]
     for c in reversed(commits[-MAX_LINES:]):  # newest first
         subject = c["commit"]["message"].splitlines()[0].strip().replace("<", "&lt;")
@@ -107,12 +107,11 @@ def main():
     earlier = ""
     if prev:
         today = datetime.datetime.now(datetime.timezone.utc).date()
-        prev_label, heading = release_labels(prev["published_at"], today)
+        heading = previous_heading(prev["published_at"], today)
         prev_ref = upstream_ref_for_tag(prev["tag_name"])
         earlier = previous_notes(prev.get("body"), heading)
     else:
         prev_ref = previous_upstream_release(api(f"repos/{UPSTREAM}/releases?per_page=100"), args.new_ref)
-        prev_label = f"official {prev_ref}" if prev_ref else None
     if not prev_ref:
         print("**What changed:** first build, nothing earlier to compare with.")
         return
@@ -120,10 +119,10 @@ def main():
         compare = api(f"repos/{UPSTREAM}/compare/{prev_ref}...{args.new_ref}?per_page=250")
     except Exception as exc:  # notes are nice-to-have; never fail the release
         print(f"warning: compare {prev_ref}...{args.new_ref} failed: {exc}", file=sys.stderr)
-        print(f"**What changed since {prev_label}:** see "
+        print(f"**{TODAY}:** see "
               f"[the upstream diff](https://github.com/{UPSTREAM}/compare/{prev_ref}...{args.new_ref}).")
     else:
-        print(format_section(prev_label, prev_ref, args.new_ref, compare))
+        print(format_section(prev_ref, args.new_ref, compare))
     if earlier:
         print(f"\n{earlier}")
 
