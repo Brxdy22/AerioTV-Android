@@ -27,6 +27,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.CircleShape
@@ -200,33 +202,65 @@ fun ConfigureSourceScreen(
     }
     userQrPick?.let { (found, k) ->
         var userOnly by remember(found) { mutableStateOf(false) }
-        com.aeriotv.android.ui.scale.AlertDialog(
+        // Headline, card, and buttons as in Set up another device (SetUpTvScreen, 12 dp spacing, 560 dp column), sized to content.
+        androidx.compose.ui.window.Dialog(
             onDismissRequest = { userQrPick = null },
-            title = { Text("Copy from ${found.name}") },
-            text = {
-                Column(Modifier.selectableGroup()) {
-                    listOf(false to "Copy entire setup from this device", true to "Import this user only").forEach { (value, label) ->
-                        androidx.compose.foundation.layout.Row(
-                            Modifier.fillMaxWidth()
-                                .selectable(selected = userOnly == value, onClick = { userOnly = value }, role = androidx.compose.ui.semantics.Role.RadioButton)
-                                .padding(vertical = 10.dp),
-                            verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
-                        ) {
-                            androidx.compose.material3.RadioButton(selected = userOnly == value, onClick = null)
-                            Text(label, modifier = Modifier.padding(start = 12.dp))
+            properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
+        ) {
+            // Sized to its content: the card ends just below Cancel.
+            Column(
+                Modifier.fillMaxWidth()
+                    .then(Modifier.windowInsetsPadding(androidx.compose.foundation.layout.WindowInsets.safeDrawing))
+                    .padding(16.dp),
+                horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally,
+            ) {
+                Column(
+                    Modifier.widthIn(max = 560.dp).fillMaxWidth()
+                        .clip(androidx.compose.foundation.shape.RoundedCornerShape(24.dp))
+                        .background(MaterialTheme.colorScheme.background)
+                        .verticalScroll(rememberScrollState())
+                        .padding(start = 16.dp, end = 16.dp, top = 24.dp, bottom = 20.dp),
+                    verticalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(12.dp),
+                ) {
+                    Text(
+                        "Copy from ${found.name}",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.onBackground,
+                    )
+                    Text(
+                        "Copy every playlist and profile from ${found.name}, or add just the user in this code.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Column(
+                        Modifier.fillMaxWidth().clip(androidx.compose.foundation.shape.RoundedCornerShape(12.dp))
+                            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.55f))
+                            .selectableGroup(),
+                    ) {
+                        listOf(false to "Copy entire setup from this device", true to "Import this user only").forEach { (value, label) ->
+                            androidx.compose.foundation.layout.Row(
+                                Modifier.fillMaxWidth()
+                                    .selectable(selected = userOnly == value, onClick = { userOnly = value }, role = androidx.compose.ui.semantics.Role.RadioButton)
+                                    .padding(horizontal = 14.dp, vertical = 12.dp),
+                                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                            ) {
+                                androidx.compose.material3.RadioButton(selected = userOnly == value, onClick = null)
+                                Text(label, modifier = Modifier.padding(start = 12.dp), color = MaterialTheme.colorScheme.onBackground)
+                            }
                         }
                     }
+                    androidx.compose.material3.Button(
+                        onClick = {
+                            userQrPick = null
+                            if (userOnly) applyUserKey(k) else userQrRequest = found to k
+                        },
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 54.dp),
+                    ) { Text("Continue") }
+                    androidx.compose.material3.OutlinedButton(onClick = { userQrPick = null }, modifier = Modifier.fillMaxWidth()) { Text("Cancel") }
                 }
-            },
-            confirmButton = {
-                androidx.compose.material3.Button(onClick = {
-                    userQrPick = null
-                    if (userOnly) applyUserKey(k) else userQrRequest = found to k
-                }) { Text("Continue") }
-            },
-            dismissButton = { androidx.compose.material3.TextButton(onClick = { userQrPick = null }) { Text("Cancel") } },
-            containerColor = MaterialTheme.colorScheme.surface,
-        )
+            }
+        }
     }
 
     val cardIcon: ImageVector
