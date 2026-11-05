@@ -340,6 +340,12 @@ class AerioExoPlayerHolder @Inject constructor(
             p != null && p.playbackState != Player.STATE_IDLE && !_streamUnavailable.value &&
                 (currentChannelId ?: currentChannelIdForRebuild) == id
         }
+        // A walk started by a 503: the 503 leaves the player IDLE on purpose,
+        // so only a channel change or Channel Unavailable ends it.
+        liveFailover.isTuneWanted = { id ->
+            player != null && !_streamUnavailable.value &&
+                (currentChannelId ?: currentChannelIdForRebuild) == id
+        }
     }
 
     /** Learned time-to-first-byte per channel, mirrored in memory so the
@@ -536,7 +542,8 @@ class AerioExoPlayerHolder @Inject constructor(
         val want = (worstGapMs * 3L / 2L + RESUME_GATE_HEADROOM_MS)
             .coerceAtMost(RESUME_GATE_CAP_MS)
         val holdable = (builtMaxBufferMs - 1_000L).coerceAtLeast(0L)
-        return if (holdable > 0L) minOf(want, holdable) else want
+        val target = maxOf(want, repeatHoldTargetMs)
+        return if (holdable > 0L) minOf(target, holdable) else target
     }
 
     /** True when a resume gate may hold this playback: a live direct stream that
@@ -1073,73 +1080,36 @@ class AerioExoPlayerHolder @Inject constructor(
         lastLiveUnderrunAtMs = now
         if (repeat && cooled && inSwitchWindow()) {
             Log.i(TAG, "[RECOVER] suppressed reload during switch window (reason=rejoin $reason)")
-        } else if (repeat && cooled && tryRejoin(now)) return
+        } else if (repeat && cooled) {
+            // Second underrun inside the window (Apple parity, a7cb5d9): the
+            // old rejoin seeked backward into the local window and replayed
+            // video the viewer had already watched. Hold at the playhead
+            // instead until the learned hold-back is buffered, through the
+            // same gate and timeout, and only ever resume forward. Reset the
+            // repeat window so a third underrun goes through the normal gate.
+            lastRejoinAtMs = now
+            lastLiveUnderrunAtMs = 0L
+            val gapTarget = tracer.worstGapMs().coerceAtLeast(0L) * 3L / 2L + RESUME_GATE_HEADROOM_MS
+            repeatHoldTargetMs = minOf(REJOIN_MAX_BACK_MS, maxOf(learnedHoldBackMs().toLong(), gapTarget))
+            Log.i(
+                TAG,
+                "[AVP-NUDGE] repeat stall: holding at the playhead until ${repeatHoldTargetMs} ms buffered " +
+                    "(no backward seek), timeout ${RESUME_GATE_TIMEOUT_MS} ms",
+            )
+            armResumeGate("repeat $reason", skipRateCheck = true)
+            return
+        }
+        repeatHoldTargetMs = 0L
         armResumeGate(reason)
     }
 
-    /**
-     * Rejoin the feed behind the live edge.
-     *
-     * Dispatcharr live is a PROGRESSIVE MPEG-TS source: ExoPlayer keeps no back
-     * buffer on it (DefaultLoadControl's backBufferDurationMs is 0 and nothing
-     * here raises it), so there is NOTHING behind the playhead in the player
-     * itself and a plain seek back is impossible. The only real local window is
-     * the Live Rewind timeshift buffer, which the live tee mirrors whenever a
-     * rewind session is rolling on a raw-TS channel. When that window exists we
-     * enter it [seekBack] behind its head; when it does not (no rewind session,
-     * or an HLS/DASH live channel the tee cannot mirror) the rejoin degrades to
-     * a re-tune through the normal tune path, which applies the learned
-     * hold-back as the start gate immediately.
-     *
-     * Returns true when a rejoin was performed.
-     */
-    private fun tryRejoin(now: Long): Boolean {
-        val url = lastPlayUrl ?: return false
-        // A gate armed by an earlier underrun must not keep holding through the
-        // rejoin; the point of the rejoin is to resume immediately.
-        releaseResumeGate("rejoin")
-        val learned = learnedHoldBackMs().toLong()
-        val want = maxOf(learned, REJOIN_MIN_BACK_MS)
-        val window = rewindWindow()
-        val headWallMs = window?.get(1) ?: 0L
-        val windowMs = if (window == null) 0L else (window[1] - window[0]).coerceAtLeast(0L)
-        val usable = (windowMs - REJOIN_WINDOW_MARGIN_MS).coerceAtLeast(0L)
-        // Audio-only hold-back may reach 32 s (tickAudioOnlyBurst).
-        val maxBack = if (_audioOnly.value) AUDIO_ONLY_HOLDBACK_MAX_MS.toLong() else REJOIN_MAX_BACK_MS
-        val back = minOf(want, usable, maxBack)
-        if (back >= REJOIN_MIN_BACK_MS && headWallMs > 0L) {
-            // Never outside the window: back is already capped at the window
-            // minus its 1 s margin, so the target is at or after the tail.
-            val target = headWallMs - back
-            Log.i(
-                TAG,
-                "[HOLDBACK] rejoin: seeking back $back ms into the local window " +
-                    "(learned $learned ms, window $windowMs ms)",
-            )
-            if (playTimeshift(target)) {
-                lastRejoinAtMs = now
-                lastLiveUnderrunAtMs = 0L
-                return true
-            }
-            Log.i(TAG, "[HOLDBACK] rejoin: local window entry failed, re-tuning instead")
-        }
-        // No window behind the playhead: re-tune, which rebuilds the LoadControl
-        // with the learned hold-back as the start gate before the first frame.
-        Log.i(
-            TAG,
-            "[HOLDBACK] rejoin: no local window behind the playhead " +
-                "(window $windowMs ms), re-tuning with hold-back $learned ms",
-        )
-        lastRejoinAtMs = now
-        lastLiveUnderrunAtMs = 0L
-        playUrl(url, lastPlayTitle, lastPlaySubtitle, lastPlayArtworkUri)
-        return true
-    }
+    /** Deeper gate target for a repeat-stall hold, or 0 for the normal gate. */
+    private var repeatHoldTargetMs = 0L
 
     /** Arm (or re-arm) the gate. Safe to call repeatedly: an already-held gate
      *  simply keeps holding, and its target is re-read every watchdog tick so a
      *  hold-back learned during the hold raises the bar it must clear. */
-    private fun armResumeGate(reason: String) {
+    private fun armResumeGate(reason: String, skipRateCheck: Boolean = false) {
         if (resumeGateActive) return
         if (!resumeGateEligible()) return
         val p = player ?: return
@@ -1147,7 +1117,7 @@ class AerioExoPlayerHolder @Inject constructor(
         // upstream, not bursty: there is no burst coming to refill the cushion,
         // so a gate would just sit there until the fuse blows.
         val ratio = tracer.feedMediaRatio()
-        if (ratio != null && ratio < HOLDBACK_MEDIA_RATIO_MIN) {
+        if (!skipRateCheck && ratio != null && ratio < HOLDBACK_MEDIA_RATIO_MIN) {
             Log.i(TAG, "[HOLDBACK] resume gate skipped: upstream rate ${"%.2f".format(ratio)}")
             return
         }
@@ -1179,6 +1149,7 @@ class AerioExoPlayerHolder @Inject constructor(
         resumeGateActive = false
         resumeGateArmedAtMs = 0L
         resumeGateLoggedTargetMs = 0L
+        repeatHoldTargetMs = 0L
     }
 
     /** Buffered media ahead of the playhead, the quantity the gate measures. */
@@ -1728,6 +1699,13 @@ class AerioExoPlayerHolder @Inject constructor(
     // on) -- if nothing arrived by then the whole channel is dead.
     private val liveNoDataStartupThresholdMs = 50_000L
     private val liveReadTimeoutMs = 55_000
+    /** Read timeout for the CURRENT live tune's ingest: [liveReadTimeoutMs], or
+     *  [LiveStreamFailover.WALK_INGEST_TIMEOUT_MS] when the tune can walk
+     *  member streams (Apple parity 5267c55). Read per call by the live
+     *  client's interceptor. */
+    @Volatile private var liveIngestReadTimeoutMs = liveReadTimeoutMs
+    /** True while the current live tune can walk member streams. */
+    @Volatile private var liveTuneCanWalk = false
     private var noDataHealAttempts = 0
     /** Same-url retries already spent on a "Channel is stopping" 503 this tune.
      *  Reset by [resetWatchdogStateForNewStream] like every other heal budget. */
@@ -4081,6 +4059,12 @@ class AerioExoPlayerHolder @Inject constructor(
             Log.i(TAG, "[CODEC] releasing previous decoders before tune ch=$effectiveChannelId")
             p.stop()
         }
+        liveTuneCanWalk = kind == "live" && liveFailover.canWalk(effectiveChannelId)
+        liveIngestReadTimeoutMs =
+            if (liveTuneCanWalk) LiveStreamFailover.WALK_INGEST_TIMEOUT_MS.toInt() else liveReadTimeoutMs
+        if (liveTuneCanWalk) {
+            Log.i(TAG, "[FAILOVER] ingest timeout ${liveIngestReadTimeoutMs}ms (walk-capable) ch=$effectiveChannelId")
+        }
         p.setMediaSource(source)
         retireLiveCalls(p, staleCalls)
         p.prepare()
@@ -4341,6 +4325,17 @@ class AerioExoPlayerHolder @Inject constructor(
         OkHttpClient.Builder()
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(liveReadTimeoutMs.toLong(), TimeUnit.MILLISECONDS)
+            // A second open to a channel another player still holds waits up
+            // to 3 s for that connection to go ([SINGLE-CONN]).
+            .addInterceptor(LiveConnectionRegistry.interceptor)
+            // A tune that can walk member streams keeps its ingest open for
+            // the whole walk, not the 55 s floor.
+            .addInterceptor { chain ->
+                val ms = liveIngestReadTimeoutMs
+                if (ms == liveReadTimeoutMs) chain.proceed(chain.request())
+                else chain.withReadTimeout(ms, TimeUnit.MILLISECONDS).proceed(chain.request())
+            }
+            .eventListener(LiveConnectionRegistry.eventListener)
             .followRedirects(true)
             .followSslRedirects(true)
             .addNetworkInterceptor(ForceHls.redirectTokenInterceptor)
@@ -4660,8 +4655,14 @@ class AerioExoPlayerHolder @Inject constructor(
                 // over to a working one server-side); VOD/other keep the tight net.
                 val coldStartUrl = lastPlayUrl
                 val coldStartIsLive = coldStartUrl != null && isRawTsUrl(coldStartUrl)
-                val coldStartCeilingMs =
-                    if (coldStartIsLive) liveNoDataStartupThresholdMs else noDataStartupThresholdMs
+                // A walk-capable tune: the failover walk owns the silence and
+                // ends in Channel Unavailable itself when every stream is
+                // tried, so the net only bounds a walk that never finished.
+                val coldStartCeilingMs = when {
+                    coldStartIsLive && liveTuneCanWalk -> LiveStreamFailover.WALK_INGEST_TIMEOUT_MS
+                    coldStartIsLive -> liveNoDataStartupThresholdMs
+                    else -> noDataStartupThresholdMs
+                }
                 // Bytes flowing but nothing decoded: a local decoder fault, not
                 // a dead stream (Streamer 2026-11-01 18:20, 47 MB delivered
                 // while the old net said "no bytes" and walked every stream).
@@ -5065,6 +5066,9 @@ class AerioExoPlayerHolder @Inject constructor(
     // newer session elsewhere. Never on a guess.
     /** Clean ends in the current run: 1 = the first (immediate reconnect). */
     private var cleanEndStreak = 0
+    /** Clean ends in a row whose session delivered under
+     *  [StreamEndVerifier.EMPTY_SESSION_BYTES]. */
+    private var cleanEndEmptyRun = 0
     /** When the reconnect after a clean end opened; 0 when none is pending. */
     private var cleanEndReconnectAtMs = 0L
     /** The scheduled reconnect (verification + backoff), if one is waiting. */
@@ -5076,6 +5080,7 @@ class AerioExoPlayerHolder @Inject constructor(
     /** Channel change, Retry, teardown: forget the streak and any wait. */
     private fun resetCleanEndBudget() {
         cleanEndStreak = 0
+        cleanEndEmptyRun = 0
         cleanEndReconnectAtMs = 0L
         cleanEndJob?.cancel()
         cleanEndJob = null
@@ -5103,8 +5108,24 @@ class AerioExoPlayerHolder @Inject constructor(
         if (source != "ENDED" && cleanEndStreak == 0) return false
         val now = SystemClock.elapsedRealtime()
         val sinceReconnect = now - cleanEndReconnectAtMs
+        // Only a session that delivered data counts as healthy playback: a
+        // server that answers and closes after a few hundred bytes must not
+        // restart the ladder every 60 s (Apple parity 890f521).
+        val sessionBytes = tracer.feedSinceTune().first
+        val delivered = sessionBytes >= StreamEndVerifier.EMPTY_SESSION_BYTES
+        if (delivered) cleanEndEmptyRun = 0 else cleanEndEmptyRun += 1
+        if (cleanEndEmptyRun >= StreamEndVerifier.EMPTY_ENDS_LIMIT) {
+            Log.w(
+                TAG,
+                "[RECONNECT] upstream closed the live stream after $sessionBytes B; " +
+                    "$cleanEndEmptyRun empty sessions in a row, stopping reconnects ch=$currentChannelId",
+            )
+            stopForVerifiedStreamEnd(url, "$cleanEndEmptyRun consecutive empty sessions")
+            return true
+        }
         cleanEndStreak = if (
-            cleanEndReconnectAtMs > 0L && sinceReconnect < StreamEndVerifier.HEALTHY_RESET_MS
+            !delivered ||
+            (cleanEndReconnectAtMs > 0L && sinceReconnect < StreamEndVerifier.HEALTHY_RESET_MS)
         ) {
             cleanEndStreak + 1
         } else {
@@ -5124,7 +5145,7 @@ class AerioExoPlayerHolder @Inject constructor(
         Log.w(
             TAG,
             "[RECOVER] clean end ($source) #$streak ch=$currentChannelId; " +
-                "reconnecting in ${backoffMs}ms",
+                "reconnecting in ${backoffMs}ms (session $sessionBytes B, empty in a row $cleanEndEmptyRun)",
         )
         tracer.recover("clean end ($source) #$streak; reconnect in ${backoffMs}ms")
         // The stream is gone and we are waiting; say so instead of freezing on
@@ -5169,10 +5190,10 @@ class AerioExoPlayerHolder @Inject constructor(
 
     /** Verified boot: this account is at its stream limit and a newer session
      *  elsewhere took the slot. Stop everything until the user presses Retry. */
-    private fun stopForVerifiedStreamEnd(url: String) {
+    private fun stopForVerifiedStreamEnd(url: String, reason: String = "verified at the stream limit") {
         if (_connectionLimit.value != null) return
-        Log.w(TAG, "[RECOVER] stream end VERIFIED at the stream limit ch=$currentChannelId; stopping, waiting for Retry")
-        tracer.recover("stream end verified at the stream limit; stopping")
+        Log.w(TAG, "[RECOVER] stream end ($reason) ch=$currentChannelId; stopping, waiting for Retry")
+        tracer.recover("stream end ($reason); stopping")
         cleanEndJob = null
         resetCleanEndBudget()
         stoppingRetryJob?.cancel()
@@ -5775,16 +5796,11 @@ class AerioExoPlayerHolder @Inject constructor(
          *  would silently clamp a 12 s gate to 9.4 s). */
         private const val LIVE_MAX_BUFFER_FLOOR_MS = 14_000
         /** Two underruns inside this window mean the gate is not winning on this
-         *  feed, so the next recovery rejoins behind the live edge instead. */
+         *  feed, so the next recovery holds deeper at the playhead instead. */
         private const val REPEAT_STALL_WINDOW_MS = 60_000L
-        /** Minimum spacing between rejoins: a rejoin costs a re-prime or a jump
-         *  behind live, so at most one per 3 minutes. */
+        /** Minimum spacing between repeat-stall holds: at most one per 3 minutes. */
         private const val REJOIN_COOLDOWN_MS = 180_000L
-        /** Floor on the rejoin seek-back: less than this lands back inside the
-         *  same delivery gap. */
-        private const val REJOIN_MIN_BACK_MS = 8_000L
-        /** Ceiling on the rejoin seek-back: past this the user is watching
-         *  meaningfully old live. */
+        /** Ceiling on the repeat-stall hold target. */
         private const val REJOIN_MAX_BACK_MS = 18_000L
         /** Safety margin kept off the tail of the local window so a rejoin never
          *  seeks to or past the oldest byte retained. */

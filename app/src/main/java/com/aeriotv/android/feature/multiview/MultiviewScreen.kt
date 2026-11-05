@@ -112,6 +112,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.zIndex
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
@@ -1968,6 +1969,42 @@ private fun Tile(
                         )
                     }
                 }
+                // Resolution / frame rate pill (bottom-right), the same
+                // readout the single player shows, fading with the tile
+                // chrome. A single tile runs the full player chrome, which
+                // carries its own pill (Logan 2026-11-04: tiles showed none).
+                val tileFormatBadge = com.aeriotv.android.feature.player
+                    .rememberVideoFormatBadge(tilePlayer, tile.id)
+                // The pipeline pill ("ExoPlayer · TS") sits to its left, the
+                // same wording and capsule as the single player's readout
+                // (Logan 2026-11-04: tiles showed only the format pill).
+                val tilePipeline = rememberTilePipelineLabel(tilePlayer)
+                androidx.compose.animation.AnimatedVisibility(
+                    visible = chromeVisible && !singleTile &&
+                        (tileFormatBadge != null || tilePipeline != null),
+                    enter = androidx.compose.animation.fadeIn(),
+                    exit = androidx.compose.animation.fadeOut(),
+                    modifier = Modifier.align(Alignment.BottomEnd).padding(6.dp),
+                ) {
+                    val pillSize = if (LocalConfiguration.current.smallestScreenWidthDp >= 600) 12.sp else 10.sp
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        if (tilePipeline != null) {
+                            com.aeriotv.android.feature.player.PlayerFormatBadge(
+                                text = tilePipeline,
+                                fontSize = pillSize,
+                            )
+                        }
+                        if (tileFormatBadge != null) {
+                            com.aeriotv.android.feature.player.PlayerFormatBadge(
+                                text = tileFormatBadge,
+                                fontSize = pillSize,
+                            )
+                        }
+                    }
+                }
                 // Audio-focus indicator. centerIcon mode shows the speaker icon over
                 // the active tile while the chrome is visible. grayPersistent and
                 // themeFading are border-only, handled above on the outer Box.
@@ -2244,7 +2281,8 @@ private fun ExoTile(
     // last clean-end reconnect opened, [1] = the streak (1 = reconnect now,
     // then 5 s / 15 s / 30 s / 60 s), [2] = 1 while a reconnect is waiting.
     // Reset by Retry, by a swap, and by 60 s of healthy playback.
-    val tileCleanEnd = remember { longArrayOf(0L, 0L, 0L) }
+    // [3] = clean ends in a row whose session delivered under 256 KB.
+    val tileCleanEnd = remember { longArrayOf(0L, 0L, 0L, 0L) }
     val tileRetrySerial = remember { mutableIntStateOf(0) }
     // Always-on playback tracer (tag AerioTrace), one per tile. The "press"
     // is the tune that opened this tile, so press->firstFrame measures a
@@ -2495,15 +2533,41 @@ private fun ExoTile(
                         val verifier = com.aeriotv.android.core.playback.StreamEndVerifier
                         val now = android.os.SystemClock.elapsedRealtime()
                         val since = now - tileCleanEnd[0]
+                        // Only a session that delivered data counts as healthy
+                        // playback (Apple parity 890f521: 34 closes after 188 B
+                        // each restarted the ladder every 2 minutes).
+                        val sessionBytes = tracer.feedSinceTune().first
+                        val delivered = sessionBytes >= verifier.EMPTY_SESSION_BYTES
+                        tileCleanEnd[3] = if (delivered) 0L else tileCleanEnd[3] + 1
+                        if (tileCleanEnd[3] >= verifier.EMPTY_ENDS_LIMIT) {
+                            Log.w(
+                                TAG,
+                                "[RECONNECT] tile $channelName upstream closed the live stream after $sessionBytes B; " +
+                                    "${tileCleanEnd[3]} empty sessions in a row, stopping reconnects",
+                            )
+                            tracer.recover("tile ${tileCleanEnd[3]} consecutive empty sessions; stopping")
+                            tileCleanEnd[0] = 0L
+                            tileCleanEnd[1] = 0L
+                            tileCleanEnd[3] = 0L
+                            tileError.value = null
+                            tileLimit.value =
+                                com.aeriotv.android.core.playback.DispatcharrConnectionLimit.STREAM_ENDED
+                            liveCalls.stop(player)
+                            return
+                        }
                         tileCleanEnd[1] =
-                            if (tileCleanEnd[0] > 0L && since < verifier.HEALTHY_RESET_MS) {
+                            if (!delivered || (tileCleanEnd[0] > 0L && since < verifier.HEALTHY_RESET_MS)) {
                                 tileCleanEnd[1] + 1
                             } else {
                                 1L
                             }
                         val streak = tileCleanEnd[1].toInt()
                         val backoffMs = verifier.backoffMs(streak)
-                        Log.w(TAG, "[RECOVER] tile $channelName clean end #$streak; reconnecting in ${backoffMs}ms")
+                        Log.w(
+                            TAG,
+                            "[RECOVER] tile $channelName clean end #$streak; reconnecting in ${backoffMs}ms " +
+                                "(session $sessionBytes B, empty in a row ${tileCleanEnd[3]})",
+                        )
                         tracer.recover("tile clean end #$streak; reconnect in ${backoffMs}ms")
                         tileCleanEnd[2] = 1L
                         kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main.immediate).launch {
@@ -2643,6 +2707,7 @@ private fun ExoTile(
                     tileLimit.value = null
                     tileCleanEnd[0] = 0L
                     tileCleanEnd[1] = 0L
+                    tileCleanEnd[3] = 0L
                     tileTuneWall[0] = System.currentTimeMillis() / 1000.0
                     liveCalls.setSource(p) { buildTileMediaSource(u, dataSourceFactory()) }
                     tracer.recover("tile error-overlay retry")
@@ -2730,6 +2795,7 @@ private fun ExoTile(
                 tileLimit.value = null
                 tileCleanEnd[0] = 0L
                 tileCleanEnd[1] = 0L
+                tileCleanEnd[3] = 0L
                 tileTuneWall[0] = System.currentTimeMillis() / 1000.0
                 // setSource closes the old channel's live connection once the
                 // player has dropped it; the swap factory is built inside so
@@ -2941,6 +3007,50 @@ private fun ExoTile(
             }
         }
     }
+}
+
+/**
+ * Pipeline label for a tile's player, the same wording the single player's
+ * readout uses ("ExoPlayer · TS", "ExoPlayer · HLS"), derived from the URI
+ * the tile actually loaded with the routing [buildTileMediaSource] applies.
+ * Updates on every media item change; null while nothing is loaded.
+ */
+@androidx.compose.runtime.Composable
+internal fun rememberTilePipelineLabel(player: ExoPlayer?): String? {
+    var label by remember(player) {
+        mutableStateOf(player?.currentMediaItem?.localConfiguration?.uri?.toString()?.let(::tilePipelineLabel))
+    }
+    androidx.compose.runtime.DisposableEffect(player) {
+        val p = player ?: return@DisposableEffect onDispose { }
+        val listener = object : androidx.media3.common.Player.Listener {
+            override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                label = mediaItem?.localConfiguration?.uri?.toString()?.let(::tilePipelineLabel)
+            }
+            override fun onTimelineChanged(timeline: androidx.media3.common.Timeline, reason: Int) {
+                label = p.currentMediaItem?.localConfiguration?.uri?.toString()?.let(::tilePipelineLabel)
+            }
+        }
+        p.addListener(listener)
+        onDispose { p.removeListener(listener) }
+    }
+    return label
+}
+
+internal fun tilePipelineLabel(url: String): String {
+    val forcedHls = com.aeriotv.android.core.playback.ForceHls.isForcedHlsUrl(url)
+    val path = url.substringBefore('?').substringBefore('#')
+    val ext = path.substringAfterLast('/').substringAfterLast('.', "").lowercase()
+    val kind = when {
+        ext == "m3u8" || forcedHls -> "HLS"
+        ext == "ts" || url.contains("/proxy/ts/", ignoreCase = true) -> "TS"
+        ext == "mpd" -> "DASH"
+        ext in setOf("mp4", "m4v", "mov") -> "MP4"
+        ext == "mkv" -> "MKV"
+        ext == "webm" -> "WebM"
+        ext.isNotEmpty() && ext.length <= 4 -> ext.uppercase()
+        else -> "Auto"
+    }
+    return "ExoPlayer \u00B7 $kind"
 }
 
 @OptIn(UnstableApi::class)

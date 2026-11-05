@@ -80,8 +80,10 @@ and `base_url` only. The same payload may also arrive as a file or as text
 instead of an image. AerioTV reads this code and the `aeriotv://setup` code
 through three inputs, all with one parser (phones and tablets; TVs have none
 of them). Where these buttons appear they come in this order: Scan QR code,
-Choose from Photos, Import file, Show Dispatcharr User QR Code (see below). Import is manual only: AerioTV is not a share target and never
+Choose from Photos, Import file, Show User QR Code (see below). Import is manual only: AerioTV is not a share target and never
 reads the clipboard.
+
+The display draws the code at error correction level H with the AerioTV mark centered on a rounded white plate covering 20 percent of the code's width (mark inset 12 percent of the plate), so the payload is unchanged and still scans.
 
 1. Camera: the in-app scanner ("Scan QR code").
 2. Photos: a QR code image from the system photo picker ("Choose from
@@ -294,7 +296,7 @@ Non-interactive, with a progress line on screen:
   different fingerprint, and without the code (shown only on the real device)
   it cannot decrypt a payload anyway.
 
-## Show Dispatcharr User QR Code
+## Show User QR Code
 
 Phones and tablets show the active profile's Dispatcharr user code as the
 same JSON QR the Dispatcharr web UI emits, so another device's "Scan QR
@@ -302,7 +304,7 @@ code" or "Choose from Photos" accepts it unchanged:
 
 `{"v":1,"type":"user_api_key","api_key":"<key>","base_url":"<playlist url>","username":"<username>","first_name":"","last_name":"","email":""}`
 
-- The button "Show Dispatcharr User QR Code" sits after the other code
+- The button "Show User QR Code" sits after the other code
   buttons (Scan QR code, Choose from Photos, Import file) wherever they
   appear together: the Set up another device screen, Add Playlist, the
   Dispatcharr connect form, and Add Profile. The profile roster also
@@ -312,7 +314,7 @@ code" or "Choose from Photos" accepts it unchanged:
 - Gate: when a Device Admin PIN or that profile's PIN exists, either one
   must be entered first ("Enter the PIN to show this code"); with no PIN
   set, the code shows directly.
-- Screen "Dispatcharr User QR Code": the code is blurred until tapped
+- Screen "User QR Code": the code is blurred until tapped
   ("Tap to show"), hides again after 60 seconds or when the app leaves the
   foreground, and carries the caption "Anyone who scans this code can sign
   in as <username>. It hides after 60 seconds." Done closes it.
@@ -322,11 +324,52 @@ code" or "Choose from Photos" accepts it unchanged:
 - The payload is never logged, copied to the clipboard, shared, or saved
   to Photos or files. It is built locally; no server path is used.
 
+### Copy a setup from a user QR
+
+When the device showing the code is on the same network, the scanner can
+copy that device's whole setup instead of one user. The QR payload is
+unchanged and no server path is used; everything stays on the LAN.
+
+- Showing device ("source"), only while User QR Code is open with a code:
+  listens on an ephemeral TCP port and advertises `_aeriotv-setup._tcp`
+  (instance name = device name) with TXT `v`=1, `name`, `kind`
+  (phone, tablet, or tv), `role`=`source`, and `uq` = lowercase hex of
+  the first 8 bytes of SHA-256(UTF-8 of `aeriotv-userqr-v1:` + api_key).
+  There is no `pk`, and sender discovery skips `role`=`source`.
+- It serves `POST /user-qr` (HTTP/1.1, one request per connection,
+  `Connection: close`). Body:
+  `{"v":1,"link":"<scanner's aeriotv://setup link>","proof":"<base64 HMAC-SHA256(key = api_key, message = link)>"}`.
+  Replies are `{"ok":true}` or `{"ok":false,"error":"<code>"}`: 413
+  `too_large` (body over 8 KB), 403 `forbidden` (any Origin header, or a
+  proof mismatch, compared in constant time), 404 `bad_request` (other
+  path or method), 400 `bad_request` (unparseable, `v` not 1, or a link
+  that does not parse), 409 `busy` (a request is already pending), 403
+  `not_allowed` (the active profile cannot send a setup, a Child), 403
+  `declined`, 502 `send_failed`, 200 on success.
+- A valid request holds the connection while the showing device asks
+  "Send setup to {name}?" ("This copies this device's playlist, profiles,
+  and preferences to {name}.", Send / Don't send). Don't send, 120 seconds
+  without an answer, or closing the screen replies `declined`. Send builds
+  the same full payload as "Copy entire setup from this device" (every
+  profile with a saved sign-in, sync on when Dispatcharr Sync is on there)
+  and sends it to the link with the normal sealed `POST /setup`. Blur,
+  PIN gate, 60 second hide, and capture blocking are unchanged.
+- Scanning device (phones and tablets): after reading a user code it
+  browses for up to 3 seconds ("Looking for the device showing this
+  code") for `role`=`source` with a matching `uq`. Not found (a
+  screenshot, the Dispatcharr web UI code, or another network) imports
+  the user as before. Found: "Copy from {name}" with "Copy entire setup
+  from this device" (default) or "Import this user only". Entire setup
+  starts the normal receiver without an advert, posts its link with the
+  proof (150 second timeout), shows "Waiting for {name}", then applies the
+  payload and continues to Add Profiles. A failure offers "Import this
+  user only".
+
 ## Platform status
 
 | Platform | Receiver | Sender |
 |----------|----------|--------|
 | Android TV | Done (`kind` = `tv`) | n/a |
-| Android phone and tablet | Done (Welcome and Add Playlist) | Done (in-app scanner, Choose from Photos, Import file, a shared image, text, or file, and the system camera via the `aeriotv://setup` link; Show Dispatcharr User QR Code) |
+| Android phone and tablet | Done (Welcome and Add Playlist) | Done (in-app scanner, Choose from Photos, Import file, a shared image, text, or file, and the system camera via the `aeriotv://setup` link; Show User QR Code) |
 | Apple TV | Done (`kind` = `tv`) | n/a |
-| iPhone and iPad | Done (Welcome and Add Playlist) | Done (in-app scanner, Choose from Photos, Import file, and the system camera via the `aeriotv://setup` link; Show Dispatcharr User QR Code) |
+| iPhone and iPad | Done (Welcome and Add Playlist) | Done (in-app scanner, Choose from Photos, Import file, and the system camera via the `aeriotv://setup` link; Show User QR Code) |

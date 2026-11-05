@@ -96,6 +96,14 @@ class LiveStreamFailover(
      *  and the user back in the guide). Null = no gate wired (treated active). */
     @Volatile var isTuneActive: ((channelId: String) -> Boolean)? = null
 
+    /** True while [channelId] is still the holder's tune and has not gone
+     *  Channel Unavailable, regardless of player state. A walk started by a
+     *  503 checks this instead of [isTuneActive]: the 503 itself leaves the
+     *  player IDLE, which is not the tune going away (Apple parity 6c5b9c2:
+     *  the deliberate stop read as "tile gone" and the walk returned without
+     *  a log or a change_stream). Null = fall back to [isTuneActive]. */
+    @Volatile var isTuneWanted: ((channelId: String) -> Boolean)? = null
+
     /** Channel whose Dispatcharr session answered change_stream 404 "Channel
      *  not found". The walk stays off for it until a byte arrives (a live
      *  session exists again) or a different channel is tuned, so an auto
@@ -227,10 +235,13 @@ class LiveStreamFailover(
                 return@launch
             }
             Log.i(TAG, "[FAILOVER] 503 reason=\"$reason\" -> next stream")
-            _statusText.value = "Server: $reason. Trying another stream..."
-            if (stepJob?.isActive == true) return@launch
+            showStatus("Server: $reason. Trying another stream...")
+            if (stepJob?.isActive == true) {
+                Log.i(TAG, "[FAILOVER] channel=$channelName 503 during a walk step; the running step continues")
+                return@launch
+            }
             if (walkStartedAtMs == 0L) walkStartedAtMs = SystemClock.elapsedRealtime()
-            stepJob = scope.launch { step(h, id) }
+            stepJob = scope.launch { step(h, id, from503 = true) }
         }
     }
 
@@ -238,6 +249,14 @@ class LiveStreamFailover(
      *  shown while a "Channel is stopping" 503 is waited out). */
     fun publishServerStatus(text: String?) {
         scope.launch { _statusText.value = text }
+    }
+
+    /** True when a tune of [channelId] can walk member streams (Dispatcharr
+     *  Direct Connect admin, integer channel pk). Such a tune keeps its ingest
+     *  open across the whole walk, see [WALK_INGEST_TIMEOUT_MS]. */
+    fun canWalk(channelId: String?): Boolean {
+        val id = channelId ?: return false
+        return runCatching { hooks?.canSwitch(id) }.getOrNull() == true
     }
 
     /** Teardown / pipeline stop: cancel the deadline, KEEP the tried set. */
@@ -336,7 +355,10 @@ class LiveStreamFailover(
             )
             return
         }
-        if (stepJob?.isActive == true) return
+        if (stepJob?.isActive == true) {
+            Log.i(TAG, "[FAILOVER] channel=$channelName deadline hit during a walk step; the running step continues")
+            return
+        }
         blockReason(id)?.let {
             Log.i(TAG, "[FAILOVER] walker cancelled: $it")
             return
@@ -355,24 +377,25 @@ class LiveStreamFailover(
      * process), mark where we are, POST change_stream for the next untried
      * entry, re-arm the deadline.
      */
-    private suspend fun step(h: Hooks, id: String) {
+    private suspend fun step(h: Hooks, id: String, from503: Boolean = false) {
+        // Every early exit is logged; on the 503 entry point the holder's
+        // generic retry ladder keeps running behind the walk, so an exit here
+        // falls to that standing retry instead of leaving the tile on
+        // "Trying another stream..." with nothing scheduled.
+        val retryPath = if (from503) "the standing retry" else "the retry path"
         val uuid = id.substringAfterLast(':')
         val cached = streamCache[id]
         val ids = cached ?: runCatching { h.listStreamIds(id) }.getOrNull()
             ?.also { if (it.isNotEmpty()) streamCache[id] = it }
         if (ids.isNullOrEmpty()) {
             _statusText.value = "Reconnecting..."
-            Log.i(TAG, "[FAILOVER] channel=$channelName stream list unavailable; staying on the retry path")
+            Log.i(TAG, "[FAILOVER] channel=$channelName stream list unavailable; staying on $retryPath")
             return
         }
-        if (firstByteSeen || channelId != id) return
-        blockReason(id)?.let {
-            Log.i(TAG, "[FAILOVER] walker cancelled: $it")
-            return
-        }
+        if (!walkStillWanted(id, from503, "stream list")) return
         if (ids.size < 2) {
             _statusText.value = "Reconnecting..."
-            Log.i(TAG, "[FAILOVER] channel=$channelName single stream; staying on the retry path")
+            Log.i(TAG, "[FAILOVER] channel=$channelName single stream; staying on $retryPath")
             return
         }
         // Seed "where are we" once. /status is only trustworthy before any
@@ -396,10 +419,7 @@ class LiveStreamFailover(
             return
         }
         // The status read can take seconds: re-check before the POST.
-        blockReason(id)?.let {
-            Log.i(TAG, "[FAILOVER] walker cancelled: $it")
-            return
-        }
+        if (!walkStillWanted(id, from503, "status read")) return
         steps += 1
         tried.add(target)
         val step = steps
@@ -417,16 +437,19 @@ class LiveStreamFailover(
                 _statusText.value = "Channel unavailable. Retrying..."
                 return
             }
+            Log.i(TAG, "[FAILOVER] channel=$channelName change_stream refused; staying on $retryPath")
             _statusText.value = "Reconnecting..."
             return
         }
-        if (firstByteSeen || channelId != id) return
+        if (!walkStillWanted(id, from503, "change_stream")) return
         activeStreamId = target
         // Quote the server when it told us why we are moving; otherwise this was
         // our own first-byte deadline and there is no server text to show.
-        _statusText.value = serverReason
-            ?.let { "Server: $it. Trying another stream..." }
-            ?: "Trying another stream..."
+        showStatus(
+            serverReason
+                ?.let { "Server: $it. Trying another stream..." }
+                ?: "Trying another stream...",
+        )
         Log.i(
             TAG,
             "[FAILOVER] channel=$channelName stream $step/${ids.size} id=$target " +
@@ -435,8 +458,29 @@ class LiveStreamFailover(
         armDeadline(firstAttempt = false)
     }
 
-    private fun blockReason(id: String): String? = walkBlockReason(
-        tuneActive = runCatching { isTuneActive?.invoke(id) }.getOrNull() ?: true,
+    /** Sets the status line. A line that quotes the server is logged verbatim
+     *  as [STATUS], so a report of on-screen text can be matched to the log. */
+    private fun showStatus(text: String) {
+        if (text.startsWith("Server: ") && _statusText.value != text) {
+            Log.i(TAG, "[STATUS] player shows \"$text\" channel=$channelName")
+        }
+        _statusText.value = text
+    }
+
+    /** The walk is still this tune's business. Every early exit is logged. */
+    private fun walkStillWanted(id: String, from503: Boolean, at: String): Boolean {
+        val why = when {
+            firstByteSeen -> "bytes arrived"
+            else -> blockReason(id, from503)
+        } ?: return true
+        Log.i(TAG, "[FAILOVER] channel=$channelName walk ended at $at: $why")
+        return false
+    }
+
+    private fun blockReason(id: String, from503: Boolean = false): String? = walkBlockReason(
+        tuneActive = runCatching {
+            if (from503) (isTuneWanted ?: isTuneActive)?.invoke(id) else isTuneActive?.invoke(id)
+        }.getOrNull() ?: true,
         channelMatches = channelId == id,
         sessionGone = goneChannelId == id,
     )
@@ -479,6 +523,18 @@ class LiveStreamFailover(
          * is no tuner lock left to wait for and failover stays responsive.
          */
         const val STEP_FIRST_BYTE_MS = 12_000L
+
+        /**
+         * Ingest read timeout and no-data ceiling for a tune that can walk
+         * (Apple parity 5267c55): the first-attempt budget plus eight walk
+         * steps plus 10 s, 28 + 8 x 12 + 10 = 134 s. The walk keeps the same
+         * connection open while the server swaps the upstream behind it, so a
+         * shorter timeout ended that connection mid-step (Apple TV 2026-11-04:
+         * opened 11:15:02, timed out 11:15:32, 2 s after "stream 2/6") and the
+         * later streams were never tried. The silent-start deadline owns the
+         * silence; this only bounds a connection nobody is walking any more.
+         */
+        const val WALK_INGEST_TIMEOUT_MS = FIRST_TUNE_FIRST_BYTE_MS + 8 * STEP_FIRST_BYTE_MS + 10_000L
 
         /** Hard ceiling on a learned-stretched budget. */
         const val FIRST_BYTE_BUDGET_MAX_MS = 45_000L
