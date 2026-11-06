@@ -46,7 +46,7 @@ class SearchViewModel @Inject constructor(
     private val dispatcharrAuth: DispatcharrAuthBroker,
 ) : ViewModel() {
 
-    enum class Scope(val label: String) { All("All"), Movies("Movies"), Series("TV Shows"), Epg("EPG") }
+    enum class Scope(val label: String) { All("All"), Movies("Movies"), Series("TV Shows"), Epg("Programs") }
 
     sealed interface Result {
         val key: String
@@ -61,6 +61,9 @@ class SearchViewModel @Inject constructor(
             /** [M3UChannel.id] of the matched channel (GH #162): a live
              *  result plays this channel instead of jumping to the guide. */
             val channelRowId: String? = null,
+            /** The matched channel is flagged radio ([M3UChannel.isRadio]):
+             *  the row shows the radio glyph after the channel name. */
+            val channelIsRadio: Boolean = false,
         ) : Result {
             override val key = "epg-${programme.channelId}-${programme.startMillis}"
             val isLive: Boolean
@@ -148,7 +151,7 @@ class SearchViewModel @Inject constructor(
                 compareByDescending<EPGProgramme> { now in it.startMillis until it.endMillis }
                     .thenBy { it.startMillis },
             )
-            .map { prog ->
+            .mapNotNull { prog ->
                 // Cached rows may carry either the canonical key or the raw feed
                 // key (tvg-id or uuid), so a canonical miss falls back to the
                 // guide's own match maps (Streamer 2026-11-02: live results had
@@ -156,11 +159,19 @@ class SearchViewModel @Inject constructor(
                 val ch = channels[prog.channelId.trim().lowercase()]
                     ?: matchMaps(playlistId).resolve(prog.channelId).firstOrNull()
                         ?.let { channels[it.value.trim().lowercase()] }
+                // Guide filler titled with the channel's own name or call
+                // sign is not a program (tvOS review 2026-11-05).
+                if (ch != null && com.aeriotv.android.feature.livetv.LiveSearchMatcher.isChannelTitle(
+                        prog.title,
+                        com.aeriotv.android.feature.livetv.LiveSearchMatcher.channelTitleKeys(ch.name, ch.tvgID),
+                    )
+                ) return@mapNotNull null
                 Result.Epg(
                     programme = prog,
                     channelName = ch?.name?.takeIf { it.isNotBlank() },
                     channelLogo = ch?.tvgLogo?.takeIf { it.isNotBlank() },
                     channelRowId = ch?.id,
+                    channelIsRadio = ch?.isRadio == true,
                 )
             }
             // The same airing can be cached under more than one raw key (the

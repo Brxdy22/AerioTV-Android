@@ -38,6 +38,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import com.aeriotv.android.ui.tv.tvFormFieldInput
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -80,7 +81,7 @@ import java.util.Locale
 
 /**
  * Global Search screen (parity task #41). Reproduces the iOS SearchView: a
- * search field + four scope chips (All / Movies / TV Shows / EPG) over a mixed
+ * search field + four scope chips (All / Movies / TV Shows / Programs) over a mixed
  * result list. EPG results jump to the guide; movie/series results open detail.
  */
 @Composable
@@ -171,6 +172,14 @@ fun SearchScreen(
                 }
                 Spacer(Modifier.width(8.dp))
             }
+            // TV: the keyboard opens on OK only and the IME session starts on
+            // that same press (TvKeyboardOnOkHost + tvFormFieldInput, the gate
+            // every TV form uses). Without it, focusing the field popped the
+            // keyboard with no live session, so the first OK and the next
+            // keystroke went nowhere (2026-11-05: typed "nba", got "qnba").
+            // Phones and tablets: the host is a pass-through.
+            com.aeriotv.android.ui.tv.TvKeyboardOnOkHost {
+            val kbGate = com.aeriotv.android.ui.tv.LocalTvKeyboardGate.current
             OutlinedTextField(
                 value = state.query,
                 onValueChange = viewModel::onQueryChange,
@@ -183,6 +192,12 @@ fun SearchScreen(
                     // the scope chips / results with the remote. Hand focus down
                     // to the content instead.
                     .onPreviewKeyEvent { event ->
+                        if (event.type == KeyEventType.KeyDown &&
+                            (event.key == Key.DirectionDown || event.key == Key.DirectionUp)
+                        ) {
+                            // Leaving the field closes the keyboard gate.
+                            kbGate?.armed = false
+                        }
                         if (event.type == KeyEventType.KeyDown &&
                             event.key == Key.DirectionDown
                         ) {
@@ -202,12 +217,14 @@ fun SearchScreen(
                         } else {
                             false
                         }
-                    },
+                    }
+                    .tvFormFieldInput(),
                 singleLine = true,
                 leadingIcon = { Icon(Icons.Filled.Search, contentDescription = null) },
                 placeholder = { Text("Search movies, shows, programs…") },
                 keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
             )
+            }
         }
 
         Spacer(Modifier.height(12.dp))
@@ -229,7 +246,7 @@ fun SearchScreen(
         when {
             state.query.isBlank() -> CenterMessage(
                 icon = Icons.Filled.Search,
-                title = "Search for movies, shows, or EPG programs",
+                title = "Search for movies, shows, or programs",
             )
             liveMode -> {
                 val sections = live
@@ -441,14 +458,38 @@ private fun ResultRow(
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
-            Text(
-                text = subtitle,
+            val subtitleColor = if (result is SearchViewModel.Result.Epg && result.isLive) {
+                MaterialTheme.colorScheme.textAccent
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            }
+            if (display.radio) {
+                // Radio channel (Logan 2026-11-05, Apple parity): the glyph
+                // sits right after the channel name, before the time range.
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = subtitle,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = subtitleColor,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    com.aeriotv.android.feature.channels.RadioChannelGlyph(
+                        fontSize = MaterialTheme.typography.bodySmall.fontSize,
+                    )
+                    if (display.subtitleTail != null) Text(
+                        text = SUBTITLE_SEP + display.subtitleTail,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = subtitleColor,
+                        maxLines = 1,
+                    )
+                }
+            } else Text(
+                text = listOfNotNull(subtitle, display.subtitleTail).joinToString(SUBTITLE_SEP),
                 style = MaterialTheme.typography.bodySmall,
-                color = if (result is SearchViewModel.Result.Epg && result.isLive) {
-                    MaterialTheme.colorScheme.textAccent
-                } else {
-                    MaterialTheme.colorScheme.onSurfaceVariant
-                },
+                color = subtitleColor,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -479,7 +520,13 @@ private data class ResultDisplay(
     val programArt: Boolean = false,
     /** Channel logo shown when the program art is missing or fails to load. */
     val fallbackPoster: String? = null,
+    /** EPG rows: the channel is flagged radio, so the radio glyph follows the
+     *  channel name (the end of [subtitle]) and [subtitleTail] comes after. */
+    val radio: Boolean = false,
+    val subtitleTail: String? = null,
 )
+
+private const val SUBTITLE_SEP = "  ·  "
 
 private fun resultDisplay(result: SearchViewModel.Result): ResultDisplay = when (result) {
     is SearchViewModel.Result.Movie -> ResultDisplay(
@@ -520,8 +567,9 @@ private fun resultDisplay(result: SearchViewModel.Result): ResultDisplay = when 
             subtitle = listOfNotNull(
                 "LIVE".takeIf { result.isLive },
                 result.channelName,
-                range,
-            ).joinToString("  ·  "),
+            ).joinToString(SUBTITLE_SEP),
+            subtitleTail = range,
+            radio = result.channelIsRadio,
             poster = programArt ?: result.channelLogo,
             programArt = programArt != null,
             fallbackPoster = result.channelLogo,

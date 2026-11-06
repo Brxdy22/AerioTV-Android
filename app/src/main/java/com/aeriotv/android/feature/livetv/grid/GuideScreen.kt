@@ -17,7 +17,10 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import com.aeriotv.android.feature.livetv.liveProgramSearchSection
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -375,6 +378,23 @@ fun GuideScreen(
         }
     }
     val groupedChannels = guideSearch.channels
+    // Guide view "Programs" section (Logan 2026-11-05, Apple parity): the
+    // List view's program search, shown under the grid on phones and
+    // tablets. Same scan, cards, taps, and copy; TV keeps its Search tab.
+    val guideSearchEpg = if (isTv || favoritesOnly) null else state.epgByChannel
+    val guideProgramHits by produceState<com.aeriotv.android.feature.livetv.LiveProgramHits?>(
+        initialValue = null, state.channels, state.searchQuery, guideSearchEpg,
+    ) {
+        val q = state.searchQuery.trim()
+        if (q.isEmpty() || guideSearchEpg == null) { value = null; return@produceState }
+        value = null
+        kotlinx.coroutines.delay(com.aeriotv.android.feature.livetv.LIVE_SEARCH_DEBOUNCE_MS)
+        value = withContext(Dispatchers.Default) {
+            com.aeriotv.android.feature.livetv.LiveProgramIndex.of(guideSearchEpg)
+                .programHits(q, System.currentTimeMillis(), state.channels)
+        }
+    }
+    val guideProgramSearchActive = guideSearchEpg != null && state.searchQuery.isNotBlank()
     // favoritesOnly: the starred channels in the user's favorites order,
     // joined against the loaded playlist so stale rows fall away.
     val favoriteChannels = remember(favoritesList, state.channels) {
@@ -892,9 +912,24 @@ fun GuideScreen(
     // chain: the pill row when it is there, otherwise the grid itself.
     val tabEntryFocus = com.aeriotv.android.feature.main.LocalTvTabEntryFocus.current
     val pillsShownForEntry = isTv && !sidebarGroupMode && !favoritesOnly && pillItems.isNotEmpty()
-    androidx.compose.runtime.DisposableEffect(isTv, tabActive, pillsShownForEntry) {
-        if (isTv && tabActive) tabEntryFocus.value = if (pillsShownForEntry) pillsFocus else gridFocus
-        onDispose { if (tabEntryFocus.value === pillsFocus || tabEntryFocus.value === gridFocus) tabEntryFocus.value = null }
+    // Apple TV parity (2026-11-05 regression pass): while the staging banner
+    // (or its background Multiview / Radio Mode dock-card stand-ins) is up,
+    // Down from the tab bar lands on its Play capsule; the geometric default
+    // skipped it and dove into the grid, leaving Clear and Done unreachable.
+    val mvBackground by com.aeriotv.android.feature.multiview.MultiviewBackground.state.collectAsStateWithLifecycle()
+    val radioForBanner by com.aeriotv.android.feature.player.RadioMode.state.collectAsStateWithLifecycle()
+    val stagingBannerShown = isTv && ((stagingOn && stagedMultiview.isNotEmpty()) || mvBackground != null || radioForBanner != null)
+    androidx.compose.runtime.DisposableEffect(isTv, tabActive, pillsShownForEntry, stagingBannerShown) {
+        if (isTv && tabActive) tabEntryFocus.value = when {
+            stagingBannerShown -> stagingPlayFocus
+            pillsShownForEntry -> pillsFocus
+            else -> gridFocus
+        }
+        onDispose {
+            if (tabEntryFocus.value === pillsFocus || tabEntryFocus.value === gridFocus || tabEntryFocus.value === stagingPlayFocus) {
+                tabEntryFocus.value = null
+            }
+        }
     }
 
     // Stranded-focus watchdog (Frankie B. 2026-09-15). A failed hand-off out of
@@ -1451,7 +1486,11 @@ fun GuideScreen(
             selected = state.selectedGroup,
             onSelect = { viewModel.onGroupSelected(it) },
             rowFocus = pillsFocus,
-            onDown = { runCatching { gridFocus.requestFocus() }.getOrDefault(false) },
+            // Pills -> staging banner -> grid, the reverse of the banner's Up.
+            onDown = {
+                (stagingBannerShown && runCatching { stagingPlayFocus.requestFocus() }.getOrDefault(false)) ||
+                    runCatching { gridFocus.requestFocus() }.getOrDefault(false)
+            },
             leadInset = railWidth,
         )
         // Multiview staging banner (iOS EPGGuideView.stagingBanner), shared
@@ -1521,7 +1560,10 @@ fun GuideScreen(
                 hiddenGroupCount = hiddenGroups.size,
             )
         }
-        Box(modifier = Modifier.weight(1f).fillMaxSize()) {
+        Column(modifier = Modifier.weight(1f).fillMaxSize()) {
+        val programsPanelShown = guideProgramSearchActive &&
+            !(rows.isEmpty && guideProgramHits?.hits?.isEmpty() == true)
+        if (!(rows.isEmpty && programsPanelShown)) Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
         if (rows.isEmpty && favoritesOnly && favoritesOrNull == null) {
             // Favorites not loaded yet: draw nothing rather than flash the
             // empty-group notice for a frame (Streamer 2026-09-03).
@@ -1625,6 +1667,42 @@ fun GuideScreen(
                 onRefresh = { viewModel.refreshPlaylist() },
                 modifier = Modifier.fillMaxSize(),
             ) { gridContent() }
+        }
+        }
+        if (programsPanelShown) {
+            androidx.compose.foundation.lazy.LazyColumn(
+                // With channel matches the grid keeps the top; with none the
+                // Programs section takes the whole area.
+                modifier = Modifier.fillMaxWidth().then(
+                    if (rows.isEmpty) Modifier.weight(1f) else Modifier.fillMaxHeight(0.45f),
+                ),
+                contentPadding = PaddingValues(
+                    start = 12.dp,
+                    end = 12.dp,
+                    bottom = com.aeriotv.android.ui.adaptive.LocalTabBarBottomInset.current,
+                ),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                run {
+                    liveProgramSearchSection(
+                        hits = guideProgramHits?.hits.orEmpty(),
+                        truncated = guideProgramHits?.truncated == true,
+                        pending = guideProgramHits == null,
+                        isTv = false,
+                        onTap = { hit ->
+                            if (hit.isAiring(System.currentTimeMillis())) {
+                                android.util.Log.i("AerioSearch", "[SEARCH] guide program hit: play channel")
+                                onChannelClick(hit.channel)
+                            } else {
+                                android.util.Log.i("AerioSearch", "[SEARCH] guide program hit: program info")
+                                programInfoTarget = hit.programme.toInfoTarget(
+                                    hit.channel.name, hit.channel.dispatcharrChannelId,
+                                )
+                            }
+                        },
+                    )
+                }
+            }
         }
         }
         }
@@ -1850,8 +1928,10 @@ fun GuideScreen(
             // long-press action surface; Logan 2026-09-09), items in the iPhone
             // context-menu order. Jump To lives on the clock cell here.
             val sheetActions = buildList {
-                if (isLive && channel.url.isNotBlank()) add(TvMenuAction("Watch", Icons.Filled.PlayArrow) { com.aeriotv.android.feature.player.RadioSelect.watchAsVideo { onChannelClick(channel) } })
-                else if (replayable) add(TvMenuAction("Watch from Start", Icons.Outlined.History, onClick = watchFromStart))
+                // Apple guideMenuItems: a replayable aired program leads with
+                // Watch (catch-up), else a live program leads with Watch.
+                if (replayable) add(TvMenuAction("Watch", Icons.Outlined.History, onClick = watchFromStart))
+                else if (isLive && channel.url.isNotBlank()) add(TvMenuAction("Watch", Icons.Filled.PlayArrow) { com.aeriotv.android.feature.player.RadioSelect.watchAsVideo { onChannelClick(channel) } })
                 com.aeriotv.android.feature.player.radioMenuAction(context, channel, if (isLive) cell.title else "") { miniPlayerVm.dismiss() }?.let { add(it) }
             com.aeriotv.android.feature.player.radioFlagMenuAction(context, channel, state.playlist, viewModel)?.let { add(it) }
                 add(TvMenuAction(if (isFavorite) "Remove from Favorites" else "Add to Favorites", if (isFavorite) Icons.Outlined.StarOutline else Icons.Filled.Star) { favoritesVm.toggle(channel) })
@@ -1873,10 +1953,13 @@ fun GuideScreen(
             )
         } else {
         val actions = buildList {
-            // Apple order on TV: Watch first only when a plain Select would
-            // open Radio Mode (declared radio or Radio Mode by Default), then
-            // Radio Mode.
-            if (isLive && channel.url.isNotBlank() && com.aeriotv.android.feature.player.RadioSelect.picksOpenRadio(channel)) {
+            // Apple TV guide order (EPGGuideView confirmationDialog): Watch
+            // always leads (catch-up Watch on a replayable aired program,
+            // else live Watch), then Radio Mode, Mark as Radio Channel,
+            // and Favorites.
+            if (replayable) {
+                add(TvMenuAction("Watch", onClick = watchFromStart))
+            } else if (isLive && channel.url.isNotBlank()) {
                 add(TvMenuAction("Watch", Icons.Filled.PlayArrow) { com.aeriotv.android.feature.player.RadioSelect.watchAsVideo { onChannelClick(channel) } })
             }
             com.aeriotv.android.feature.player.radioMenuAction(context, channel, if (isLive) cell.title else "") { miniPlayerVm.dismiss() }?.let { add(it) }
@@ -1889,7 +1972,6 @@ fun GuideScreen(
             if (!cell.isPlaceholder) {
                 add(TvMenuAction("Program Info") { programInfoTarget = cell.toInfoTarget(channel.name, channel.dispatcharrChannelId) })
                 if (canRecord) add(TvMenuAction(if (isLive) "Record from Now" else "Record") { recordTarget = cell.toInfoTarget(channel.name, channel.dispatcharrChannelId) })
-                if (replayable) add(TvMenuAction("Watch from Start", onClick = watchFromStart))
                 if (cell.startMillis > nowMs) {
                     add(TvMenuAction(if (reminderSet) "Cancel Reminder" else "Set Reminder", onClick = toggleReminder))
                 }
