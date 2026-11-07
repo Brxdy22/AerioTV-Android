@@ -2111,7 +2111,9 @@ fun PlayerScreen(
         pauseLifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
             while (true) {
                 val p = exoHolder.player
-                livePaused = p != null && !p.playWhenReady &&
+                // wantsToPlay: a resume gate hold drops playWhenReady only to
+                // fill the buffer; it is not a pause and must not pin the chrome.
+                livePaused = p != null && !exoHolder.wantsToPlay() &&
                     p.playbackState != androidx.media3.common.Player.STATE_IDLE
                 delay(200)
             }
@@ -3070,6 +3072,10 @@ private fun LiveRewindChromeSection(
         // playFile on, leaving subsequent channels permanently
         // stuck.
         onClose = {
+            // Measures the "X did nothing on two taps" report (Nothing Phone
+            // 2026-11-06): no line here on a tap means the tap never reached
+            // the button.
+            android.util.Log.i("AerioChrome", "[CHROME] close tapped")
             PlayerDoubleBack.clear()
             miniPlayerVm.dismiss()
             exoWindowState.hide()

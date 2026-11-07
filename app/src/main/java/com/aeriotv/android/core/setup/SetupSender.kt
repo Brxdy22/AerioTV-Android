@@ -109,7 +109,7 @@ class SetupDiscovery(private val context: Context) {
                 val pk = attr(SetupProtocol.TXT_PK)?.let(SetupCrypto::unb64)?.takeIf { it.size == 32 }
                 // role=source is a device showing a user QR (POST /user-qr), never a receiver.
                 val isSource = attr(SetupProtocol.TXT_ROLE) == SetupProtocol.ROLE_SOURCE
-                if (!isSource && host != null && pk != null && attr(SetupProtocol.TXT_VERSION) == SetupProtocol.VERSION.toString()) {
+                if (!isSource && host != null && pk != null && !SetupReceiver.isOwnPk(pk) && attr(SetupProtocol.TXT_VERSION) == SetupProtocol.VERSION.toString()) {
                     val t = SetupTarget(
                         name = attr(SetupProtocol.TXT_NAME)?.takeIf { it.isNotBlank() } ?: info.serviceName ?: "AerioTV",
                         host = host,
@@ -130,7 +130,31 @@ class SetupDiscovery(private val context: Context) {
     @Synchronized
     private fun done() { resolving = false; pump() }
 
-    private companion object { const val TAG = "AerioSetup" }
+    companion object {
+        private const val TAG = "AerioSetup"
+
+        /**
+         * Resolves a discovered device again right before a send, so a device that
+         * started a new session (new port and key) is reached at its current
+         * advert. Waits up to [timeoutMs] for the same name; keeps the old target
+         * when the device is not seen (a QR target is returned as is).
+         */
+        suspend fun fresh(context: Context, t: SetupTarget, timeoutMs: Long = 3_000): SetupTarget {
+            if (t.code != null) return t
+            val d = SetupDiscovery(context.applicationContext)
+            d.start()
+            return try {
+                val live = kotlinx.coroutines.withTimeoutOrNull(timeoutMs) {
+                    d.tvs.first { list -> list.any { it.name == t.name } }.first { it.name == t.name }
+                }
+                when {
+                    live == null -> { Log.i(TAG, "[SETUP] send target not re-resolved, using last advert key=${t.fingerprint}"); t }
+                    live.pk.contentEquals(t.pk) && live.port == t.port -> { Log.i(TAG, "[SETUP] send target confirmed key=${live.fingerprint}"); live }
+                    else -> { Log.i(TAG, "[SETUP] send target refreshed old=${t.fingerprint} new=${live.fingerprint} port ${t.port} -> ${live.port}"); live }
+                }
+            } finally { d.stop() }
+        }
+    }
 }
 
 /** Builds the payload from this device's playlist and profiles, and posts it. */

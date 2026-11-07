@@ -736,13 +736,18 @@ private fun TimeHeader(
                     // The partial slot's label is pinned to the edge instead, and only
                     // skipped when the next mark is too close for both to fit.
                     val y = (size.height - 16.sp.toPx()) / 2f
+                    // Measure once and draw with an explicit color: the
+                    // measurer's cache ignores color (not layout-affecting),
+                    // so the String overload kept painting a cached layout in
+                    // the old accent after the accent changed (11:30pm stayed
+                    // orange with Custom Accent off, Nothing Phone 2026-11-06).
+                    val layout = textMeasurer.measure(label, style = labelStyle, maxLines = 1)
                     if (x >= -1f) {
-                        drawText(textMeasurer, label, topLeft = Offset(x.coerceAtLeast(0f) + 6f, y), style = labelStyle, maxLines = 1)
+                        drawText(layout, color = labelStyle.color, topLeft = Offset(x.coerceAtLeast(0f) + 6f, y))
                     } else {
-                        val w = textMeasurer.measure(label, style = labelStyle, maxLines = 1).size.width
                         val nextX = (t + slot - vs) * pxPerMs
-                        if (nextX >= w + 12f) {
-                            drawText(textMeasurer, label, topLeft = Offset(6f, y), style = labelStyle, maxLines = 1)
+                        if (nextX >= layout.size.width + 12f) {
+                            drawText(layout, color = labelStyle.color, topLeft = Offset(6f, y))
                         }
                     }
                     t += slot
@@ -998,11 +1003,14 @@ private fun GridRow(
         val railContentW = nameW
         // The width the logo and the name actually get.
         val logoColumnW = railContentW
-        // Radio glyph: name-font-sized, one gap after the name text, both
-        // centered together in the name rect, so the name gives up exactly
-        // the glyph's width and still ellipsizes inside the column.
-        val radioIconPx = if (channel.isRadio) railNameStyle.fontSize.toPx() else 0f
-        val radioGapPx = if (channel.isRadio) (if (isTv) 6.dp else 4.dp).toPx() else 0f
+        // Radio glyph (phone / tablet): name-font-sized, one gap after the
+        // name text, both centered together in the name rect, so the name
+        // gives up exactly the glyph's width and still ellipsizes inside the
+        // column. On TV the glyph lives in the band's fixed slot instead
+        // (Logan 2026-11-06, Apple 88ae566), so the name keeps the full width.
+        val inlineRadio = channel.isRadio && !isTv
+        val radioIconPx = if (inlineRadio) railNameStyle.fontSize.toPx() else 0f
+        val radioGapPx = if (inlineRadio) (if (isTv) 6.dp else 4.dp).toPx() else 0f
         val name = if (rail.names) textCache.getOrPut(RAIL_NAME_KEY) {
             // The star is always the corner glyph now (Logan 2026-09-10: left
             // of the catch-up clock on TV too), never inline in the name.
@@ -1151,7 +1159,7 @@ private fun GridRow(
                 val pairW = textW + radioGapPx + radioIconPx
                 val left = railContentLeft + rect.left + (rect.width - pairW) / 2f
                 drawText(it.title, topLeft = Offset(left, bandH + rect.top))
-                if (channel.isRadio) {
+                if (inlineRadio) {
                     val iconTop = bandH + rect.top + (it.title.size.height - radioIconPx) / 2f
                     translate(left = left + textW + radioGapPx, top = iconTop) {
                         with(radioPainter) { draw(Size(radioIconPx, radioIconPx), colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(tertiary)) }
@@ -1186,19 +1194,48 @@ private fun GridRow(
             val endInset = bandInset + hairlinePx
             val gap = (if (isTv) GUIDE_TV_BAND_GLYPH_GAP else 4.dp).toPx()
             val glyphTop = ((bandH - iconPx) / 2f).coerceAtLeast(0f)
-            // The clock sits hard at the end; the star sits one gap before it.
+            // The clock sits hard at the end. On TV the trailing glyphs pack
+            // from the corner with no reserved empty slots: clock at the
+            // corner, radio glyph one slot before it, and the star right
+            // before whichever of those are shown (Logan 2026-11-06, Streamer:
+            // a reserved empty radio slot left a visible gap between the star
+            // and the clock on non-radio channels). Phone keeps the star one
+            // gap before the clock only when the clock is there, and the radio
+            // glyph inline.
             val clockLeft = (railWidthPx - iconPx - endInset).coerceAtLeast(0f)
+            val slotW = iconPx + gap
+            val tvSlots = railBandSlotLefts(
+                cornerLeft = clockLeft,
+                slotW = slotW,
+                favorite = isFavorite,
+                radio = channel.isRadio,
+                catchup = channel.hasCatchup,
+            )
+            val radioLeft = tvSlots.radio ?: 0f
+            val starLeft = if (isTv) {
+                tvSlots.star ?: 0f
+            } else {
+                (clockLeft - (if (channel.hasCatchup) iconPx + gap else 0f)).coerceAtLeast(0f)
+            }
             if (isFavorite) {
                 // Same box and same baseline as the catch-up clock so the two
                 // sit on one line (a text glyph sat lower, Logan 2026-09-09).
-                val left = (clockLeft - (if (channel.hasCatchup) iconPx + gap else 0f)).coerceAtLeast(0f)
-                translate(left = left, top = glyphTop) {
+                translate(left = starLeft, top = glyphTop) {
                     with(starPainter) { draw(Size(iconPx, iconPx), colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(Color(0xFFFFA502))) }
+                }
+            }
+            if (isTv && channel.isRadio) {
+                // Same box and accent as the catch-up clock.
+                translate(left = radioLeft, top = glyphTop) {
+                    with(radioPainter) { draw(Size(iconPx, iconPx), colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(colors.primary)) }
                 }
             }
             if (channel.hasCatchup) {
                 translate(left = clockLeft, top = glyphTop) {
-                    with(catchupPainter) { draw(Size(iconPx, iconPx), colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(tertiary.copy(alpha = 0.8f))) }
+                    // Full accent, matching the program-cell clocks (Apple
+                    // 584cc63): tertiary read the theme tint once the tint
+                    // rule landed, which split the guide into two clock colors.
+                    with(catchupPainter) { draw(Size(iconPx, iconPx), colorFilter = androidx.compose.ui.graphics.ColorFilter.tint(colors.primary)) }
                 }
             }
         }
@@ -1255,7 +1292,10 @@ private fun GridRow(
             // from the visible edge (the clipRect below follows x0). The
             // airing cell clipped at now also keeps a minimum visible width
             // so even a 5-minute sliver shows its title (Logan 2026-10-11);
-            // the next cell starts after it. Plain floats, no allocation.
+            // the next cell starts after it. TV only, as on Apple (the
+            // widening is tvOS-only there): on a phone it pushed every later
+            // cell right of its header mark, so 12:00am sat about 75 dp left
+            // of the 12:00 column (Nothing Phone 2026-11-06). Plain floats, no allocation.
             val airingMinPx = AIRING_MIN_VISIBLE.toPx()
             var drawnRight = 0f
             while (i < cells.size) {
@@ -1272,7 +1312,7 @@ private fun GridRow(
                 val airing = nowMs in cell.startMillis until cell.endMillis
                 val x0 = ((cell.startMillis - vs) * pxPerMs).coerceAtLeast(drawnRight)
                 var x1 = ((cell.endMillis - vs) * pxPerMs).coerceAtMost(stripW)
-                if (airing && cell.startMillis < vs && x1 - x0 < airingMinPx) x1 = (x0 + airingMinPx).coerceAtMost(stripW)
+                if (isTv && airing && cell.startMillis < vs && x1 - x0 < airingMinPx) x1 = (x0 + airingMinPx).coerceAtMost(stripW)
                 if (x1 - x0 < MIN_CELL_PX + seam) { drawnRight = maxOf(drawnRight, x1); if (x1 <= x0) continue }
                 drawnRight = maxOf(drawnRight, x1)
                 val w = (x1 - x0 - seam).coerceAtLeast(MIN_CELL_PX)
@@ -1588,10 +1628,17 @@ internal val GUIDE_TV_RAIL_BAND = 11.dp
 /** Start / end inset of the band's contents. */
 private val GUIDE_TV_BAND_INSET = 4.dp
 
-/** The band's glyph box (favorite star, catch-up clock). */
-private val GUIDE_TV_BAND_GLYPH = 8.dp
+/**
+ * The band's glyph box (favorite star, radio glyph, catch-up clock). 10 dp
+ * renders the Material glyphs (which keep about 2/24 of their box clear on
+ * each side) at Apple TV's size: the Apple clock measures 15.5 x 14.5 pt on
+ * the 1920 pt canvas (LogoMetrics.glyphSize 14 pt, simulator 2026-11-06);
+ * at 8 dp the Android clock drew 14 x 12 px and the star 12 x 12 px on the
+ * 1920 px canvas, about a fifth smaller (Logan: the radio glyph read small).
+ */
+private val GUIDE_TV_BAND_GLYPH = 10.dp
 
-/** Space between the two band glyphs. */
+/** Space between the band glyph slots. */
 private val GUIDE_TV_BAND_GLYPH_GAP = 3.dp
 
 /**
